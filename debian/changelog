@@ -1,3 +1,9 @@
+samba (2:4.11.6+dfsg-0ubuntu1.8bb1) focal; urgency=medium
+
+  * Balabit patched version
+
+ -- Balabit Platform Team <devnull@dev.null>  Sat, 01 May 2021 16:36:01 +0200
+
 samba (2:4.11.6+dfsg-0ubuntu1.8) focal-security; urgency=medium
 
   * SECURITY UPDATE: wrong group entries via negative idmap cache entries

@@ -258,6 +258,9 @@ endif
 ifneq (,$(filter ctdb, $(shell dh_listpackages)))
 	dh_installsystemd -pctdb --no-start --no-stop-on-upgrade
 endif
+ifneq (,$(filter samba-common-bin, $(shell dh_listpackages)))
+	dh_installsystemd -psamba-common-bin
+endif
 
 override_dh_installpam:
 	dh_installpam --name=samba

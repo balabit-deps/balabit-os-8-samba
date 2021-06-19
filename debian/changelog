@@ -1,3 +1,16 @@
+samba (2:4.11.6+dfsg-0ubuntu1.9) focal; urgency=medium
+
+  * Fix samba-common-bin postinst errors (LP: #1905387)
+    - d/rules: ensure systemd-tmpfiles runs for samba-common-bin postinst
+      through dh_installsystemd
+    - d/samba-common-bin.postinst: ensure systemd-tmpfiles is called before
+      testparm
+    - d/t/reinstall-samba-common-bin: make sure /run/samba is created by the
+      samba-common-bin installation process (postinst script)
+    - d/t/control: run new reinstall-samba-common-bin test case
+
+ -- Athos Ribeiro <athos.ribeiro@canonical.com>  Mon, 24 May 2021 16:45:27 -0300
+
 samba (2:4.11.6+dfsg-0ubuntu1.8bb1) focal; urgency=medium
 
   * Balabit patched version

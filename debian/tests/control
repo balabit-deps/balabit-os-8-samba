@@ -16,3 +16,7 @@ Restrictions: needs-root, allow-stderr, isolation-container
 Tests: smbclient-share-access
 Depends: samba, smbclient, coreutils, systemd, passwd
 Restrictions: needs-root, allow-stderr, isolation-container
+
+Tests: reinstall-samba-common-bin
+Depends: samba-common, samba-common-bin
+Restrictions: needs-root, needs-reboot, isolation-machine, allow-stderr

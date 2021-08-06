@@ -66,3 +66,4 @@ CVE-2020-14323-2.patch
 CVE-2020-14383-1.patch
 CVE-2020-14383-2.patch
 CVE-2021-20254.patch
+fix-double-free-with-unresolved-credentia-cache.patch

@@ -126,15 +126,21 @@ NTSTATUS open_fake_file(struct smb_request *req, connection_struct *conn,
 				uint32_t access_mask,
 				files_struct **result)
 {
+	const struct loadparm_substitution *lp_sub =
+		loadparm_s3_global_substitution();
 	files_struct *fsp = NULL;
 	NTSTATUS status;
 
-	status = smbd_calculate_access_mask(conn, smb_fname, false,
-					    access_mask, &access_mask);
+	status = smbd_calculate_access_mask(conn,
+					conn->cwd_fsp,
+					smb_fname,
+					false,
+					access_mask,
+					&access_mask);
 	if (!NT_STATUS_IS_OK(status)) {
 		DEBUG(10, ("open_fake_file: smbd_calculate_access_mask "
 			"on service[%s] file[%s] returned %s\n",
-			lp_servicename(talloc_tos(), SNUM(conn)),
+			lp_servicename(talloc_tos(), lp_sub, SNUM(conn)),
 			smb_fname_str_dbg(smb_fname),
 			nt_errstr(status)));
 		return status;
@@ -144,7 +150,7 @@ NTSTATUS open_fake_file(struct smb_request *req, connection_struct *conn,
 	if (geteuid() != sec_initial_uid()) {
 		DEBUG(3, ("open_fake_file_shared: access_denied to "
 			  "service[%s] file[%s] user[%s]\n",
-			  lp_servicename(talloc_tos(), SNUM(conn)),
+			  lp_servicename(talloc_tos(), lp_sub, SNUM(conn)),
 			  smb_fname_str_dbg(smb_fname),
 			  conn->session_info->unix_info->unix_name));
 		return NT_STATUS_ACCESS_DENIED;
@@ -164,7 +170,7 @@ NTSTATUS open_fake_file(struct smb_request *req, connection_struct *conn,
 	fsp->fh->fd = -1;
 	fsp->vuid = current_vuid;
 	fsp->fh->pos = -1;
-	fsp->can_lock = False; /* Should this be true ? - No, JRA */
+	fsp->fsp_flags.can_lock = false; /* Should this be true ? - No, JRA */
 	fsp->access_mask = access_mask;
 	status = fsp_set_smb_fname(fsp, smb_fname);
 	if (!NT_STATUS_IS_OK(status)) {

@@ -527,6 +527,13 @@ static NTSTATUS smbXsrv_open_global_allocate(struct db_context *db,
 	talloc_set_destructor(global, smbXsrv_open_global_destructor);
 
 	/*
+	 * We mark every slot as invalid using 0xFF.
+	 * Valid values are masked with 0xF.
+	 */
+	memset(global->lock_sequence_array, 0xFF,
+	       sizeof(global->lock_sequence_array));
+
+	/*
 	 * Here we just randomly try the whole 32-bit space
 	 *
 	 * We use just 32-bit, because we want to reuse the
@@ -901,11 +908,10 @@ NTSTATUS smbXsrv_open_create(struct smbXsrv_connection *conn,
 	}
 
 	if (CHECK_DEBUGLVL(10)) {
-		struct smbXsrv_openB open_blob;
-
-		ZERO_STRUCT(open_blob);
-		open_blob.version = SMBXSRV_VERSION_0;
-		open_blob.info.info0 = op;
+		struct smbXsrv_openB open_blob = {
+			.version = SMBXSRV_VERSION_0,
+			.info.info0 = op,
+		};
 
 		DEBUG(10,("smbXsrv_open_create: global_id (0x%08x) stored\n",
 			 op->global->open_global_id));
@@ -914,26 +920,6 @@ NTSTATUS smbXsrv_open_create(struct smbXsrv_connection *conn,
 
 	*_open = op;
 	return NT_STATUS_OK;
-}
-
-uint32_t smbXsrv_open_hash(struct smbXsrv_open *_open)
-{
-	uint8_t buf[8+8+8];
-	uint32_t ret;
-	TDB_DATA key;
-
-	SBVAL(buf,  0, _open->global->open_persistent_id);
-	SBVAL(buf,  8, _open->global->open_volatile_id);
-	SBVAL(buf, 16, _open->global->open_time);
-
-	key = (TDB_DATA) { .dptr = buf, .dsize = sizeof(buf) };
-	ret = tdb_jenkins_hash(&key);
-
-	if (ret == 0) {
-		ret = 1;
-	}
-
-	return ret;
 }
 
 static NTSTATUS smbXsrv_open_set_replay_cache(struct smbXsrv_open *op)
@@ -1046,11 +1032,10 @@ NTSTATUS smbXsrv_open_update(struct smbXsrv_open *op)
 	}
 
 	if (CHECK_DEBUGLVL(10)) {
-		struct smbXsrv_openB open_blob;
-
-		ZERO_STRUCT(open_blob);
-		open_blob.version = SMBXSRV_VERSION_0;
-		open_blob.info.info0 = op;
+		struct smbXsrv_openB open_blob = {
+			.version = SMBXSRV_VERSION_0,
+			.info.info0 = op,
+		};
 
 		DEBUG(10,("smbXsrv_open_update: global_id (0x%08x) stored\n",
 			  op->global->open_global_id));
@@ -1120,11 +1105,10 @@ NTSTATUS smbXsrv_open_close(struct smbXsrv_open *op, NTTIME now)
 		}
 
 		if (NT_STATUS_IS_OK(status) && CHECK_DEBUGLVL(10)) {
-			struct smbXsrv_openB open_blob;
-
-			ZERO_STRUCT(open_blob);
-			open_blob.version = SMBXSRV_VERSION_0;
-			open_blob.info.info0 = op;
+			struct smbXsrv_openB open_blob = {
+				.version = SMBXSRV_VERSION_0,
+				.info.info0 = op,
+			};
 
 			DEBUG(10,("smbXsrv_open_close(0x%08x): "
 				  "stored disconnect\n",
@@ -1437,11 +1421,9 @@ NTSTATUS smb2srv_open_recreate(struct smbXsrv_connection *conn,
 	}
 
 	if (CHECK_DEBUGLVL(10)) {
-		struct smbXsrv_openB open_blob;
-
-		ZERO_STRUCT(open_blob);
-		open_blob.version = 0;
-		open_blob.info.info0 = op;
+		struct smbXsrv_openB open_blob = {
+			.info.info0 = op,
+		};
 
 		DEBUG(10,("smbXsrv_open_recreate: global_id (0x%08x) stored\n",
 			 op->global->open_global_id));
@@ -1482,6 +1464,15 @@ static NTSTATUS smbXsrv_open_global_parse_record(TALLOC_CTX *mem_ctx,
 			 "key '%s' unsupported version - %d - %s\n",
 			 hex_encode_talloc(frame, key.dptr, key.dsize),
 			 (int)global_blob.version,
+			 nt_errstr(status)));
+		goto done;
+	}
+
+	if (global_blob.info.info0 == NULL) {
+		status = NT_STATUS_INTERNAL_DB_CORRUPTION;
+		DEBUG(1,("Invalid record in smbXsrv_tcon_global.tdb:"
+			 "key '%s' info0 NULL pointer - %s\n",
+			 hex_encode_talloc(frame, key.dptr, key.dsize),
 			 nt_errstr(status)));
 		goto done;
 	}

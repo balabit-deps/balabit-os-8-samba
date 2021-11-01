@@ -138,6 +138,14 @@ static NTSTATUS db_rbt_storev(struct db_record *rec,
 		return NT_STATUS_MEDIA_WRITE_PROTECTED;
 	}
 
+	if ((flag == TDB_INSERT) && (rec_priv->node != NULL)) {
+		return NT_STATUS_OBJECT_NAME_COLLISION;
+	}
+
+	if ((flag == TDB_MODIFY) && (rec_priv->node == NULL)) {
+		return NT_STATUS_OBJECT_NAME_NOT_FOUND;
+	}
+
 	if (num_dbufs == 1) {
 		data = dbufs[0];
 	} else {
@@ -375,6 +383,7 @@ static struct db_record *db_rbt_fetch_locked(struct db_context *db_ctx,
 
 	rec_priv->node = res.node;
 	result->value  = res.val;
+	result->value_valid = true;
 
 	if (found) {
 		result->key = res.key;
@@ -447,6 +456,7 @@ static int db_rbt_traverse_internal(struct db_context *db,
 		rec.storev = db_rbt_storev;
 		rec.delete_rec = db_rbt_delete;
 		db_rbt_parse_node(rec_priv.node, &rec.key, &rec.value);
+		rec.value_valid = true;
 
 		if (rw) {
 			ctx->traverse_nextp = &next;

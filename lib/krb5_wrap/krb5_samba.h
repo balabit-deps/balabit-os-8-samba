@@ -350,12 +350,19 @@ krb5_error_code ms_suptypes_to_ietf_enctypes(TALLOC_CTX *mem_ctx,
 int smb_krb5_get_pw_salt(krb5_context context,
 			 krb5_const_principal host_princ,
 			 krb5_data *psalt);
-int smb_krb5_salt_principal(const char *realm,
+int smb_krb5_salt_principal(krb5_context krb5_ctx,
+			    const char *realm,
 			    const char *sAMAccountName,
 			    const char *userPrincipalName,
 			    uint32_t uac_flags,
-			    TALLOC_CTX *mem_ctx,
-			    char **_salt_principal);
+			    krb5_principal *salt_princ);
+
+int smb_krb5_salt_principal_str(const char *realm,
+				const char *sAMAccountName,
+				const char *userPrincipalName,
+				uint32_t uac_flags,
+				TALLOC_CTX *mem_ctx,
+				char **_salt_principal);
 int smb_krb5_salt_principal2data(krb5_context context,
 				 const char *salt_principal,
 				 TALLOC_CTX *mem_ctx,
@@ -367,8 +374,6 @@ int smb_krb5_create_key_from_string(krb5_context context,
 				    krb5_data *password,
 				    krb5_enctype enctype,
 				    krb5_keyblock *key);
-
-krb5_boolean smb_krb5_get_allowed_weak_crypto(krb5_context context);
 
 #ifndef krb5_princ_size
 #if defined(HAVE_KRB5_PRINCIPAL_GET_NUM_COMP)
@@ -407,5 +412,8 @@ int ads_krb5_cli_get_ticket(TALLOC_CTX *mem_ctx,
 			    uint32_t extra_ap_opts, const char *ccname,
 			    time_t *tgs_expire,
 			    const char *impersonate_princ_s);
+
+NTSTATUS krb5_to_nt_status(krb5_error_code kerberos_error);
+krb5_error_code nt_status_to_krb5(NTSTATUS nt_status);
 
 #endif /* _KRB5_SAMBA_H */

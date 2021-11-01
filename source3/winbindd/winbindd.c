@@ -28,8 +28,10 @@
 #include "nsswitch/winbind_client.h"
 #include "nsswitch/wb_reqtrans.h"
 #include "ntdomain.h"
-#include "../librpc/gen_ndr/srv_lsa.h"
-#include "../librpc/gen_ndr/srv_samr.h"
+#include "librpc/rpc/dcesrv_core.h"
+#include "librpc/gen_ndr/ndr_lsa_scompat.h"
+#include "librpc/gen_ndr/ndr_samr_scompat.h"
+#include "librpc/gen_ndr/ndr_winbind_scompat.h"
 #include "secrets.h"
 #include "rpc_client/cli_netlogon.h"
 #include "idmap.h"
@@ -47,6 +49,7 @@
 #include "passdb.h"
 #include "lib/util/tevent_req_profile.h"
 #include "lib/gencache.h"
+#include "rpc_server/rpc_config.h"
 
 #undef DBGC_CLASS
 #define DBGC_CLASS DBGC_WINBIND
@@ -99,12 +102,14 @@ struct imessaging_context *winbind_imessaging_context(void)
 
 /* Reload configuration */
 
-static bool reload_services_file(const char *lfile)
+bool winbindd_reload_services_file(const char *lfile)
 {
+	const struct loadparm_substitution *lp_sub =
+		loadparm_s3_global_substitution();
 	bool ret;
 
 	if (lp_loaded()) {
-		char *fname = lp_next_configfile(talloc_tos());
+		char *fname = lp_next_configfile(talloc_tos(), lp_sub);
 
 		if (file_exist(fname) && !strcsequal(fname,get_dyn_CONFIGFILE())) {
 			set_dyn_CONFIGFILE(fname);
@@ -112,14 +117,14 @@ static bool reload_services_file(const char *lfile)
 		TALLOC_FREE(fname);
 	}
 
+	reopen_logs();
+	ret = lp_load_global(get_dyn_CONFIGFILE());
+
 	/* if this is a child, restore the logfile to the special
 	   name - <domain>, idmap, etc. */
 	if (lfile && *lfile) {
 		lp_set_logfile(lfile);
 	}
-
-	reopen_logs();
-	ret = lp_load_global(get_dyn_CONFIGFILE());
 
 	reopen_logs();
 	load_interfaces();
@@ -151,7 +156,7 @@ static void winbindd_status(void)
 
 /* Flush client cache */
 
-static void flush_caches(void)
+void winbindd_flush_caches(void)
 {
 	/* We need to invalidate cached user list entries on a SIGHUP 
            otherwise cached access denied errors due to restrict anonymous
@@ -358,7 +363,7 @@ static void winbindd_sig_hup_handler(struct tevent_context *ev,
 
 	DEBUG(1,("Reloading services after SIGHUP\n"));
 	flush_caches_noinit();
-	reload_services_file(file);
+	winbindd_reload_services_file(file);
 }
 
 bool winbindd_setup_sig_hup_handler(const char *lfile)
@@ -440,18 +445,6 @@ static bool winbindd_setup_sig_usr2_handler(void)
 	}
 
 	return true;
-}
-
-/* React on 'smbcontrol winbindd reload-config' in the same way as on SIGHUP*/
-static void msg_reload_services(struct messaging_context *msg,
-				void *private_data,
-				uint32_t msg_type,
-				struct server_id server_id,
-				DATA_BLOB *data)
-{
-        /* Flush various caches */
-	flush_caches();
-	reload_services_file((const char *) private_data);
 }
 
 /* React on 'smbcontrol winbindd shutdown' in the same way as on SIGTERM*/
@@ -764,6 +757,8 @@ static struct tevent_req *process_request_send(
 	ok = false;
 
 	if (i < ARRAY_SIZE(bool_dispatch_table)) {
+		cli_state->cmd_name = bool_dispatch_table[i].cmd_name;
+
 		DBG_DEBUG("process_request: request fn %s\n",
 			  bool_dispatch_table[i].cmd_name);
 		ok = bool_dispatch_table[i].fn(cli_state);
@@ -1413,7 +1408,8 @@ static void winbindd_register_handlers(struct messaging_context *msg_ctx,
 	/* React on 'smbcontrol winbindd reload-config' in the same way
 	   as to SIGHUP signal */
 	messaging_register(msg_ctx, NULL,
-			   MSG_SMB_CONF_UPDATED, msg_reload_services);
+			   MSG_SMB_CONF_UPDATED,
+			   winbindd_msg_reload_services_parent);
 	messaging_register(msg_ctx, NULL,
 			   MSG_SHUTDOWN, msg_shutdown);
 
@@ -1648,11 +1644,15 @@ int main(int argc, const char **argv)
 		POPT_COMMON_SAMBA
 		POPT_TABLEEND
 	};
+	const struct loadparm_substitution *lp_sub =
+		loadparm_s3_global_substitution();
 	poptContext pc;
 	int opt;
 	TALLOC_CTX *frame;
 	NTSTATUS status;
 	bool ok;
+	const struct dcesrv_endpoint_server *ep_server = NULL;
+	struct dcesrv_context *dce_ctx = NULL;
 
 	setproctitle_init(argc, discard_const(argv), environ);
 
@@ -1677,7 +1677,7 @@ int main(int argc, const char **argv)
  	CatchSignal(SIGUSR2, SIG_IGN);
 
 	fault_setup();
-	dump_core_setup("winbindd", lp_logfile(talloc_tos()));
+	dump_core_setup("winbindd", lp_logfile(talloc_tos(), lp_sub));
 
 	smb_init_locale();
 
@@ -1737,7 +1737,7 @@ int main(int argc, const char **argv)
 	 * is often not related to the path where winbindd is actually run
 	 * in production.
 	 */
-	dump_core_setup("winbindd", lp_logfile(talloc_tos()));
+	dump_core_setup("winbindd", lp_logfile(talloc_tos(), lp_sub));
 	if (is_daemon && interactive) {
 		d_fprintf(stderr,"\nERROR: "
 			  "Option -i|--interactive is not allowed together with -D|--daemon\n\n");
@@ -1781,7 +1781,7 @@ int main(int argc, const char **argv)
 	 * as the log file might have been set in the configuration and cores's
 	 * path is by default basename(lp_logfile()).
 	 */
-	dump_core_setup("winbindd", lp_logfile(talloc_tos()));
+	dump_core_setup("winbindd", lp_logfile(talloc_tos(), lp_sub));
 
 	if (lp_server_role() == ROLE_ACTIVE_DIRECTORY_DC
 	    && !lp_parm_bool(-1, "server role check", "inhibit", false)) {
@@ -1800,7 +1800,7 @@ int main(int argc, const char **argv)
 		exit(1);
 	}
 
-	if (!reload_services_file(NULL)) {
+	if (!winbindd_reload_services_file(NULL)) {
 		DEBUG(0, ("error opening config file\n"));
 		exit(1);
 	}
@@ -1869,8 +1869,11 @@ int main(int argc, const char **argv)
 	BlockSignals(False, SIGHUP);
 	BlockSignals(False, SIGCHLD);
 
-	if (!interactive)
+	if (!interactive) {
 		become_daemon(Fork, no_process_group, log_stdout);
+	} else {
+		daemon_status("winbindd", "Starting process ...");
+	}
 
 	pidfile_create(lp_pid_directory(), "winbindd");
 
@@ -1925,8 +1928,59 @@ int main(int argc, const char **argv)
 		exit_daemon("Winbindd failed to setup system user info", map_errno_from_nt_status(status));
 	}
 
-	rpc_lsarpc_init(NULL);
-	rpc_samr_init(NULL);
+	DBG_INFO("Registering DCE/RPC endpoint servers\n");
+
+	/* Register the endpoint server to dispatch calls locally through
+	 * the legacy api_struct */
+	ep_server = lsarpc_get_ep_server();
+	if (ep_server == NULL) {
+		DBG_ERR("Failed to get 'lsarpc' endpoint server\n");
+		exit(1);
+	}
+	status = dcerpc_register_ep_server(ep_server);
+	if (!NT_STATUS_IS_OK(status)) {
+		DBG_ERR("Failed to register 'lsarpc' endpoint "
+			"server: %s\n", nt_errstr(status));
+		exit(1);
+	}
+
+	/* Register the endpoint server to dispatch calls locally through
+	 * the legacy api_struct */
+	ep_server = samr_get_ep_server();
+	if (ep_server == NULL) {
+		DBG_ERR("Failed to get 'samr' endpoint server\n");
+		exit(1);
+	}
+	status = dcerpc_register_ep_server(ep_server);
+	if (!NT_STATUS_IS_OK(status)) {
+		DBG_ERR("Failed to register 'samr' endpoint "
+			"server: %s\n", nt_errstr(status));
+		exit(1);
+	}
+
+	ep_server = winbind_get_ep_server();
+	if (ep_server == NULL) {
+		DBG_ERR("Failed to get 'winbind' endpoint server\n");
+		exit(1);
+	}
+	status = dcerpc_register_ep_server(ep_server);
+	if (!NT_STATUS_IS_OK(status)) {
+		DBG_ERR("Failed to register 'winbind' endpoint "
+			"server: %s\n", nt_errstr(status));
+		exit(1);
+	}
+
+	dce_ctx = global_dcesrv_context();
+
+	DBG_INFO("Initializing DCE/RPC registered endpoint servers\n");
+
+	/* Init all registered ep servers */
+	status = dcesrv_init_registered_ep_servers(dce_ctx);
+	if (!NT_STATUS_IS_OK(status)) {
+		DBG_ERR("Failed to init DCE/RPC endpoint servers: %s\n",
+			nt_errstr(status));
+		exit(1);
+	}
 
 	winbindd_init_addrchange(NULL, global_event_context(),
 				 global_messaging_context());

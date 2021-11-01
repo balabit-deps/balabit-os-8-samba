@@ -27,6 +27,7 @@ import tdb
 import samba.getopt as options
 from samba.samdb import SamDB, get_default_backend_store
 import ldb
+from ldb import LdbError
 from samba.samba3 import libsmb_samba_internal as libsmb
 from samba.samba3 import param as s3param
 from samba.ntacls import backup_online, backup_restore, backup_offline
@@ -59,46 +60,51 @@ from samba.ndr import ndr_pack
 # work out a SID (based on a free RID) to use when the domain gets restored.
 # This ensures that the restored DC's SID won't clash with any other RIDs
 # already in use in the domain
-def get_sid_for_restore(samdb):
-    # Find the DN of the RID set of the server
-    res = samdb.search(base=ldb.Dn(samdb, samdb.get_serverName()),
-                       scope=ldb.SCOPE_BASE, attrs=["serverReference"])
-    server_ref_dn = ldb.Dn(samdb, str(res[0]['serverReference'][0]))
-    res = samdb.search(base=server_ref_dn,
-                       scope=ldb.SCOPE_BASE,
-                       attrs=['rIDSetReferences'])
-    rid_set_dn = ldb.Dn(samdb, str(res[0]['rIDSetReferences'][0]))
-
-    # Get the alloc pools and next RID of the RID set
-    res = samdb.search(base=rid_set_dn,
-                       scope=ldb.SCOPE_SUBTREE,
-                       expression="(rIDNextRID=*)",
-                       attrs=['rIDAllocationPool',
-                              'rIDPreviousAllocationPool',
-                              'rIDNextRID'])
-
-    # Decode the bounds of the RID allocation pools
-    rid = int(res[0].get('rIDNextRID')[0])
-
-    def split_val(num):
-        high = (0xFFFFFFFF00000000 & int(num)) >> 32
-        low = 0x00000000FFFFFFFF & int(num)
-        return low, high
-    pool_l, pool_h = split_val(res[0].get('rIDPreviousAllocationPool')[0])
-    npool_l, npool_h = split_val(res[0].get('rIDAllocationPool')[0])
-
-    # Calculate next RID based on pool bounds
-    if rid == npool_h:
-        raise CommandError('Out of RIDs, finished AllocPool')
-    if rid == pool_h:
-        if pool_h == npool_h:
-            raise CommandError('Out of RIDs, finished PrevAllocPool.')
-        rid = npool_l
-    else:
-        rid += 1
+def get_sid_for_restore(samdb, logger):
+    # Allocate a new RID without modifying the database. This should be safe,
+    # because we acquire the RID master role after creating an account using
+    # this RID during the restore process. Acquiring the RID master role
+    # creates a new RID pool which we will fetch RIDs from, so we shouldn't get
+    # duplicates.
+    try:
+        rid = samdb.next_free_rid()
+    except LdbError as err:
+        logger.info("A SID could not be allocated for restoring the domain. "
+                    "Either no RID Set was found on this DC, "
+                    "or the RID Set was not usable.")
+        logger.info("To initialise this DC's RID pools, obtain a RID Set from "
+                    "this domain's RID master, or run samba-tool dbcheck "
+                    "to fix the existing RID Set.")
+        raise CommandError("Cannot create backup", err)
 
     # Construct full SID
     sid = dom_sid(samdb.get_domain_sid())
+    sid_for_restore = str(sid) + '-' + str(rid)
+
+    # Confirm the SID is not already in use
+    try:
+        res = samdb.search(scope=ldb.SCOPE_BASE,
+                           base='<SID=%s>' % sid_for_restore,
+                           attrs=[],
+                           controls=['show_deleted:1',
+                                     'show_recycled:1'])
+        if len(res) != 1:
+            # This case makes no sense, but neither does a corrupt RID set
+            raise CommandError("Cannot create backup - "
+                               "this DC's RID pool is corrupt, "
+                               "the next SID (%s) appears to be in use." %
+                               sid_for_restore)
+        raise CommandError("Cannot create backup - "
+                           "this DC's RID pool is corrupt, "
+                           "the next SID %s points to existing object %s. "
+                           "Please run samba-tool dbcheck on the source DC." %
+                           (sid_for_restore, res[0].dn))
+    except ldb.LdbError as e:
+        (enum, emsg) = e.args
+        if enum != ldb.ERR_NO_SUCH_OBJECT:
+            # We want NO_SUCH_OBJECT, anything else is a serious issue
+            raise
+
     return str(sid) + '-' + str(rid)
 
 
@@ -243,47 +249,50 @@ class cmd_domain_backup_online(samba.netcmd.Command):
 
         # Run a clone join on the remote
         include_secrets = not no_secrets
-        ctx = join_clone(logger=logger, creds=creds, lp=lp,
-                         include_secrets=include_secrets, server=server,
-                         dns_backend='SAMBA_INTERNAL', targetdir=tmpdir,
-                         backend_store=backend_store)
+        try:
+            ctx = join_clone(logger=logger, creds=creds, lp=lp,
+                             include_secrets=include_secrets, server=server,
+                             dns_backend='SAMBA_INTERNAL', targetdir=tmpdir,
+                             backend_store=backend_store)
 
-        # get the paths used for the clone, then drop the old samdb connection
-        paths = ctx.paths
-        del ctx
+            # get the paths used for the clone, then drop the old samdb connection
+            paths = ctx.paths
+            del ctx
 
-        # Get a free RID to use as the new DC's SID (when it gets restored)
-        remote_sam = SamDB(url='ldap://' + server, credentials=creds,
-                           session_info=system_session(), lp=lp)
-        new_sid = get_sid_for_restore(remote_sam)
-        realm = remote_sam.domain_dns_name()
+            # Get a free RID to use as the new DC's SID (when it gets restored)
+            remote_sam = SamDB(url='ldap://' + server, credentials=creds,
+                               session_info=system_session(), lp=lp)
+            new_sid = get_sid_for_restore(remote_sam, logger)
+            realm = remote_sam.domain_dns_name()
 
-        # Grab the remote DC's sysvol files and bundle them into a tar file
-        sysvol_tar = os.path.join(tmpdir, 'sysvol.tar.gz')
-        smb_conn = smb_sysvol_conn(server, lp, creds)
-        backup_online(smb_conn, sysvol_tar, remote_sam.get_domain_sid())
+            # Grab the remote DC's sysvol files and bundle them into a tar file
+            logger.info("Backing up sysvol files (via SMB)...")
+            sysvol_tar = os.path.join(tmpdir, 'sysvol.tar.gz')
+            smb_conn = smb_sysvol_conn(server, lp, creds)
+            backup_online(smb_conn, sysvol_tar, remote_sam.get_domain_sid())
 
-        # remove the default sysvol files created by the clone (we want to
-        # make sure we restore the sysvol.tar.gz files instead)
-        shutil.rmtree(paths.sysvol)
+            # remove the default sysvol files created by the clone (we want to
+            # make sure we restore the sysvol.tar.gz files instead)
+            shutil.rmtree(paths.sysvol)
 
-        # Edit the downloaded sam.ldb to mark it as a backup
-        samdb = SamDB(url=paths.samdb, session_info=system_session(), lp=lp)
-        time_str = get_timestamp()
-        add_backup_marker(samdb, "backupDate", time_str)
-        add_backup_marker(samdb, "sidForRestore", new_sid)
-        add_backup_marker(samdb, "backupType", "online")
+            # Edit the downloaded sam.ldb to mark it as a backup
+            samdb = SamDB(url=paths.samdb, session_info=system_session(), lp=lp,
+                          flags=ldb.FLG_DONT_CREATE_DB)
+            time_str = get_timestamp()
+            add_backup_marker(samdb, "backupDate", time_str)
+            add_backup_marker(samdb, "sidForRestore", new_sid)
+            add_backup_marker(samdb, "backupType", "online")
 
-        # ensure the admin user always has a password set (same as provision)
-        if no_secrets:
-            set_admin_password(logger, samdb)
+            # ensure the admin user always has a password set (same as provision)
+            if no_secrets:
+                set_admin_password(logger, samdb)
 
-        # Add everything in the tmpdir to the backup tar file
-        backup_file = backup_filepath(targetdir, realm, time_str)
-        create_log_file(tmpdir, lp, "online", server, include_secrets)
-        create_backup_tar(logger, tmpdir, backup_file)
-
-        shutil.rmtree(tmpdir)
+            # Add everything in the tmpdir to the backup tar file
+            backup_file = backup_filepath(targetdir, realm, time_str)
+            create_log_file(tmpdir, lp, "online", server, include_secrets)
+            create_backup_tar(logger, tmpdir, backup_file)
+        finally:
+            shutil.rmtree(tmpdir)
 
 
 class cmd_domain_backup_restore(cmd_fsmo_seize):
@@ -492,7 +501,8 @@ class cmd_domain_backup_restore(cmd_fsmo_seize):
         # open a DB connection to the restored DB
         private_dir = os.path.join(targetdir, 'private')
         samdb_path = os.path.join(private_dir, 'sam.ldb')
-        samdb = SamDB(url=samdb_path, session_info=system_session(), lp=lp)
+        samdb = SamDB(url=samdb_path, session_info=system_session(), lp=lp,
+                      flags=ldb.FLG_DONT_CREATE_DB)
         backup_type = self.get_backup_type(samdb)
 
         if site is None:
@@ -540,7 +550,50 @@ class cmd_domain_backup_restore(cmd_fsmo_seize):
                            attrs=['sidForRestore'])
         sid = res[0].get('sidForRestore')[0]
         logger.info('Creating account with SID: ' + str(sid))
-        ctx.join_add_objects(specified_sid=dom_sid(str(sid)))
+        try:
+            ctx.join_add_objects(specified_sid=dom_sid(str(sid)))
+        except LdbError as e:
+            (enum, emsg) = e.args
+            if enum != ldb.ERR_CONSTRAINT_VIOLATION:
+                raise
+
+            dup_res = []
+            try:
+                dup_res = samdb.search(base=ldb.Dn(samdb, "<SID=%s>" % sid),
+                                       scope=ldb.SCOPE_BASE,
+                                       attrs=['objectGUID'],
+                                       controls=["show_deleted:0",
+                                                 "show_recycled:0"])
+            except LdbError as dup_e:
+                (dup_enum, _) = dup_e.args
+                if dup_enum != ldb.ERR_NO_SUCH_OBJECT:
+                    raise
+
+            if (len(dup_res) != 1):
+                raise
+
+            objectguid = samdb.schema_format_value("objectGUID",
+                                                       dup_res[0]["objectGUID"][0])
+            objectguid = objectguid.decode('utf-8')
+            logger.error("The RID Pool on the source DC for the backup in %s "
+                         "may be corrupt "
+                         "or in conflict with SIDs already allocated "
+                         "in the domain. " % backup_file)
+            logger.error("Running 'samba-tool dbcheck' on the source "
+                         "DC (and obtaining a new backup) may correct the issue.")
+            logger.error("Alternatively please obtain a new backup "
+                         "against a different DC.")
+            logger.error("The SID we wish to use (%s) is recorded in "
+                         "@SAMBA_DSDB as the sidForRestore attribute."
+                         % sid)
+
+            raise CommandError("Domain restore failed because there "
+                               "is already an existing object (%s) "
+                               "with SID %s and objectGUID %s.  "
+                               "This conflicts with "
+                               "the new DC account we want to add "
+                               "for the restored domain.   " % (
+                                dup_res[0].dn, sid, objectguid))
 
         m = ldb.Message()
         m.dn = ldb.Dn(samdb, '@ROOTDSE')
@@ -558,7 +611,8 @@ class cmd_domain_backup_restore(cmd_fsmo_seize):
                                    host_ip, host_ip6, site)
 
         secrets_path = os.path.join(private_dir, 'secrets.ldb')
-        secrets_ldb = Ldb(secrets_path, session_info=system_session(), lp=lp)
+        secrets_ldb = Ldb(secrets_path, session_info=system_session(), lp=lp,
+                          flags=ldb.FLG_DONT_CREATE_DB)
         secretsdb_self_join(secrets_ldb, domain=ctx.domain_name,
                             realm=ctx.realm, dnsdomain=ctx.dnsdomain,
                             netbiosname=ctx.myname, domainsid=ctx.domsid,
@@ -838,7 +892,7 @@ class cmd_domain_backup_rename(samba.netcmd.Command):
         # get a free RID to use as the new DC's SID (when it gets restored)
         remote_sam = SamDB(url='ldap://' + server, credentials=creds,
                            session_info=system_session(), lp=lp)
-        new_sid = get_sid_for_restore(remote_sam)
+        new_sid = get_sid_for_restore(remote_sam, logger)
 
         # Grab the remote DC's sysvol files and bundle them into a tar file.
         # Note we end up with 2 sysvol dirs - the original domain's files (that
@@ -850,7 +904,8 @@ class cmd_domain_backup_rename(samba.netcmd.Command):
 
         # connect to the local DB (making sure we use the new/renamed config)
         lp.load(paths.smbconf)
-        samdb = SamDB(url=paths.samdb, session_info=system_session(), lp=lp)
+        samdb = SamDB(url=paths.samdb, session_info=system_session(), lp=lp,
+                      flags=ldb.FLG_DONT_CREATE_DB)
 
         # Edit the cloned sam.ldb to mark it as a backup
         time_str = get_timestamp()
@@ -938,7 +993,8 @@ class cmd_domain_backup_offline(samba.netcmd.Command):
     # on the secrets.ldb file before backing up that file and secrets.tdb
     def backup_secrets(self, private_dir, lp, logger):
         secrets_path = os.path.join(private_dir, 'secrets')
-        secrets_obj = Ldb(secrets_path + '.ldb', lp=lp)
+        secrets_obj = Ldb(secrets_path + '.ldb', lp=lp,
+                          flags=ldb.FLG_DONT_CREATE_DB)
         logger.info('Starting transaction on ' + secrets_path)
         secrets_obj.transaction_start()
         self.offline_tdb_copy(secrets_path + '.ldb')
@@ -963,7 +1019,7 @@ class cmd_domain_backup_offline(samba.netcmd.Command):
         else:
             logger.info('Starting transaction on ' + sam_ldb_path)
             copy_function = self.offline_tdb_copy
-            sam_obj = Ldb(sam_ldb_path, lp=lp)
+            sam_obj = Ldb(sam_ldb_path, lp=lp, flags=ldb.FLG_DONT_CREATE_DB)
             sam_obj.transaction_start()
 
         logger.info('   backing up ' + sam_ldb_path)
@@ -1015,9 +1071,14 @@ class cmd_domain_backup_offline(samba.netcmd.Command):
 
         check_targetdir(logger, targetdir)
 
-        samdb = SamDB(url=paths.samdb, session_info=system_session(), lp=lp)
-        sid = get_sid_for_restore(samdb)
+        samdb = SamDB(url=paths.samdb, session_info=system_session(), lp=lp,
+                      flags=ldb.FLG_RDONLY)
+        sid = get_sid_for_restore(samdb, logger)
 
+        # Iterating over the directories in this specific order ensures that
+        # when the private directory contains hardlinks that are also contained
+        # in other directories to be backed up (such as in paths.binddns_dir),
+        # the hardlinks in the private directory take precedence.
         backup_dirs = [paths.private_dir, paths.state_dir,
                        os.path.dirname(paths.smbconf)]  # etc dir
         logger.info('running backup on dirs: {0}'.format(' '.join(backup_dirs)))
@@ -1030,22 +1091,31 @@ class cmd_domain_backup_offline(samba.netcmd.Command):
                     continue
                 if working_dir.endswith('.sock') or '.sock/' in working_dir:
                     continue
+                # The BIND DNS database can be regenerated, so it doesn't need
+                # to be backed up.
+                if working_dir.startswith(os.path.join(paths.binddns_dir, 'dns')):
+                    continue
 
                 for filename in filenames:
-                    if filename in all_files:
+                    full_path = os.path.join(working_dir, filename)
+
+                    # Ignore files that have already been added. This prevents
+                    # duplicates if one backup dir is a subdirectory of another,
+                    # or if backup dirs contain hardlinks.
+                    if any(os.path.samefile(full_path, file) for file in all_files):
                         continue
 
                     # Assume existing backup files are from a previous backup.
                     # Delete and ignore.
                     if filename.endswith(self.backup_ext):
-                        os.remove(os.path.join(working_dir, filename))
+                        os.remove(full_path)
                         continue
 
                     # Sock files are autogenerated at runtime, ignore.
                     if filename.endswith('.sock'):
                         continue
 
-                    all_files.append(os.path.join(working_dir, filename))
+                    all_files.append(full_path)
 
         # Backup secrets, sam.ldb and their downstream files
         self.backup_secrets(paths.private_dir, lp, logger)
@@ -1057,7 +1127,8 @@ class cmd_domain_backup_offline(samba.netcmd.Command):
         #          Writing to a .bak file only works because the DN being
         #          written to happens to be top level.
         samdb = SamDB(url=paths.samdb + self.backup_ext,
-                      session_info=system_session(), lp=lp)
+                      session_info=system_session(), lp=lp,
+                      flags=ldb.FLG_DONT_CREATE_DB)
         time_str = get_timestamp()
         add_backup_marker(samdb, "backupDate", time_str)
         add_backup_marker(samdb, "sidForRestore", sid)
@@ -1069,7 +1140,7 @@ class cmd_domain_backup_offline(samba.netcmd.Command):
             if not os.path.exists(path + self.backup_ext):
                 if path.endswith('.ldb'):
                     logger.info('Starting transaction on solo db: ' + path)
-                    ldb_obj = Ldb(path, lp=lp)
+                    ldb_obj = Ldb(path, lp=lp, flags=ldb.FLG_DONT_CREATE_DB)
                     ldb_obj.transaction_start()
                     logger.info('   running tdbbackup on the same file')
                     self.offline_tdb_copy(path)

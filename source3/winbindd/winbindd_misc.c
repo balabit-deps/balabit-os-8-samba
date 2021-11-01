@@ -75,7 +75,7 @@ static char *get_trust_type_string(TALLOC_CTX *mem_ctx,
 	case SEC_CHAN_BDC: {
 		int role = lp_server_role();
 
-		if (role == ROLE_DOMAIN_PDC) {
+		if (role == ROLE_DOMAIN_PDC || role == ROLE_IPA_DC) {
 			s = talloc_strdup(mem_ctx, "PDC");
 			if (s == NULL) {
 				return NULL;
@@ -476,6 +476,11 @@ bool winbindd_priv_pipe_dir(struct winbindd_cli_state *state)
 	/* must add one to length to copy the 0 for string termination */
 	state->response->length +=
 		strlen((char *)state->response->extra_data.data) + 1;
+
+	DBG_NOTICE("[%s (%u)]: response location of privileged pipe: %s\n",
+		   state->client_name,
+		   (unsigned int)state->pid,
+		   priv_dir);
 
 	return true;
 }

@@ -64,16 +64,6 @@ bool strnorm(char *s, int case_default)
 }
 
 /**
- *  Skip past some strings in a buffer - old version - no checks.
- *  **/
-
-char *push_skip_string(char *buf)
-{
-	buf += strlen(buf) + 1;
-	return(buf);
-}
-
-/**
  Skip past a string in a buffer. Buffer may not be
  null terminated. end_ptr points to the first byte after
  then end of the buffer.
@@ -570,80 +560,6 @@ int fstr_sprintf(fstring s, const char *fmt, ...)
 	return ret;
 }
 
-/**
- List of Strings manipulation functions
-**/
-
-#define S_LIST_ABS 16 /* List Allocation Block Size */
-
-/******************************************************************************
- substitute a specific pattern in a string list
- *****************************************************************************/
-
-bool str_list_substitute(char **list, const char *pattern, const char *insert)
-{
-	TALLOC_CTX *ctx = list;
-	char *p, *s, *t;
-	ssize_t ls, lp, li, ld, i, d;
-
-	if (!list)
-		return false;
-	if (!pattern)
-		return false;
-	if (!insert)
-		return false;
-
-	lp = (ssize_t)strlen(pattern);
-	li = (ssize_t)strlen(insert);
-	ld = li -lp;
-
-	while (*list) {
-		s = *list;
-		ls = (ssize_t)strlen(s);
-
-		while ((p = strstr_m(s, pattern))) {
-			t = *list;
-			d = p -t;
-			if (ld) {
-				t = talloc_array(ctx, char, ls +ld +1);
-				if (!t) {
-					DEBUG(0,("str_list_substitute: "
-						"Unable to allocate memory"));
-					return false;
-				}
-				memcpy(t, *list, d);
-				memcpy(t +d +li, p +lp, ls -d -lp +1);
-				TALLOC_FREE(*list);
-				*list = t;
-				ls += ld;
-				s = t +d +li;
-			}
-
-			for (i = 0; i < li; i++) {
-				switch (insert[i]) {
-					case '`':
-					case '"':
-					case '\'':
-					case ';':
-					case '$':
-					case '%':
-					case '\r':
-					case '\n':
-						t[d +i] = '_';
-						break;
-					default:
-						t[d +i] = insert[i];
-				}
-			}
-		}
-
-		list++;
-	}
-
-	return true;
-}
-
-
 #define IPSTR_LIST_SEP	","
 #define IPSTR_LIST_CHAR	','
 
@@ -754,8 +670,7 @@ int ipstr_list_parse(const char *ipstr_list, struct ip_service **ip_list)
 {
 	TALLOC_CTX *frame;
 	char *token_str = NULL;
-	size_t count;
-	int i;
+	size_t i, count;
 
 	if (!ipstr_list || !ip_list)
 		return 0;

@@ -28,9 +28,10 @@
 #include "system/passwd.h" /* uid_wrapper */
 #include "ntdomain.h"
 #include "../libcli/auth/schannel.h"
-#include "../librpc/gen_ndr/srv_netlogon.h"
-#include "../librpc/gen_ndr/ndr_samr_c.h"
-#include "../librpc/gen_ndr/ndr_lsa_c.h"
+#include "librpc/gen_ndr/ndr_netlogon.h"
+#include "librpc/gen_ndr/ndr_netlogon_scompat.h"
+#include "librpc/gen_ndr/ndr_samr_c.h"
+#include "librpc/gen_ndr/ndr_lsa_c.h"
 #include "rpc_client/cli_lsarpc.h"
 #include "rpc_client/init_lsa.h"
 #include "rpc_client/init_samr.h"
@@ -47,6 +48,7 @@
 #include "../lib/tsocket/tsocket.h"
 #include "lib/param/param.h"
 #include "libsmb/dsgetdcname.h"
+#include "lib/util/util_str_escape.h"
 
 extern userdom_struct current_user_info;
 
@@ -419,6 +421,7 @@ NTSTATUS _netr_NetrEnumerateTrustedDomains(struct pipes_struct *p,
 	int i;
 	uint32_t max_size = (uint32_t)-1;
 
+	ZERO_STRUCT(pol);
 	DEBUG(6,("_netr_NetrEnumerateTrustedDomains: %d\n", __LINE__));
 
 	status = rpcint_binding_handle(p->mem_ctx,
@@ -839,8 +842,7 @@ NTSTATUS _netr_ServerReqChallenge(struct pipes_struct *p,
 
 	pipe_state->client_challenge = *r->in.credentials;
 
-	generate_random_buffer(pipe_state->server_challenge.data,
-			       sizeof(pipe_state->server_challenge.data));
+	netlogon_creds_random_challenge(&pipe_state->server_challenge);
 
 	*r->out.return_credentials = pipe_state->server_challenge;
 
@@ -1072,19 +1074,24 @@ static NTSTATUS netr_creds_server_step_check(struct pipes_struct *p,
 {
 	NTSTATUS status;
 	bool schannel_global_required = (lp_server_schannel() == true) ? true:false;
+	bool schannel_required = schannel_global_required;
+	const char *explicit_opt = NULL;
 	struct loadparm_context *lp_ctx;
+	struct netlogon_creds_CredentialState *creds = NULL;
+	enum dcerpc_AuthType auth_type = DCERPC_AUTH_TYPE_NONE;
+	uint16_t opnum = p->opnum;
+	const char *opname = "<unknown>";
+	static bool warned_global_once = false;
 
 	if (creds_out != NULL) {
 		*creds_out = NULL;
 	}
 
-	if (schannel_global_required) {
-		if (p->auth.auth_type != DCERPC_AUTH_TYPE_SCHANNEL) {
-			DBG_ERR("[%s] is not using schannel\n",
-				computer_name);
-			return NT_STATUS_ACCESS_DENIED;
-		}
+	if (opnum < ndr_table_netlogon.num_calls) {
+		opname = ndr_table_netlogon.calls[opnum].name;
 	}
+
+	auth_type = p->auth.auth_type;
 
 	lp_ctx = loadparm_init_s3(mem_ctx, loadparm_s3_helpers());
 	if (lp_ctx == NULL) {
@@ -1094,9 +1101,97 @@ static NTSTATUS netr_creds_server_step_check(struct pipes_struct *p,
 
 	status = schannel_check_creds_state(mem_ctx, lp_ctx,
 					    computer_name, received_authenticator,
-					    return_authenticator, creds_out);
+					    return_authenticator, &creds);
 	talloc_unlink(mem_ctx, lp_ctx);
-	return status;
+
+	if (!NT_STATUS_IS_OK(status)) {
+		ZERO_STRUCTP(return_authenticator);
+		return status;
+	}
+
+	/*
+	 * We don't use lp_parm_bool(), as we
+	 * need the explicit_opt pointer in order to
+	 * adjust the debug messages.
+	 */
+
+	explicit_opt = lp_parm_const_string(GLOBAL_SECTION_SNUM,
+					    "server require schannel",
+					    creds->account_name,
+					    NULL);
+	if (explicit_opt != NULL) {
+		schannel_required = lp_bool(explicit_opt);
+	}
+
+	if (schannel_required) {
+		if (auth_type == DCERPC_AUTH_TYPE_SCHANNEL) {
+			*creds_out = creds;
+			return NT_STATUS_OK;
+		}
+
+		DBG_ERR("CVE-2020-1472(ZeroLogon): "
+			"%s request (opnum[%u]) without schannel from "
+			"client_account[%s] client_computer_name[%s]\n",
+			opname, opnum,
+			log_escape(mem_ctx, creds->account_name),
+			log_escape(mem_ctx, creds->computer_name));
+		DBG_ERR("CVE-2020-1472(ZeroLogon): Check if option "
+			"'server require schannel:%s = no' is needed! \n",
+			log_escape(mem_ctx, creds->account_name));
+		TALLOC_FREE(creds);
+		ZERO_STRUCTP(return_authenticator);
+		return NT_STATUS_ACCESS_DENIED;
+	}
+
+	if (!schannel_global_required && !warned_global_once) {
+		/*
+		 * We want admins to notice their misconfiguration!
+		 */
+		DBG_ERR("CVE-2020-1472(ZeroLogon): "
+			"Please configure 'server schannel = yes', "
+			"See https://bugzilla.samba.org/show_bug.cgi?id=14497\n");
+		warned_global_once = true;
+	}
+
+	if (auth_type == DCERPC_AUTH_TYPE_SCHANNEL) {
+		DBG_ERR("CVE-2020-1472(ZeroLogon): "
+			"%s request (opnum[%u]) WITH schannel from "
+			"client_account[%s] client_computer_name[%s]\n",
+			opname, opnum,
+			log_escape(mem_ctx, creds->account_name),
+			log_escape(mem_ctx, creds->computer_name));
+		DBG_ERR("CVE-2020-1472(ZeroLogon): "
+			"Option 'server require schannel:%s = no' not needed!?\n",
+			log_escape(mem_ctx, creds->account_name));
+
+		*creds_out = creds;
+		return NT_STATUS_OK;
+	}
+
+	if (explicit_opt != NULL) {
+		DBG_INFO("CVE-2020-1472(ZeroLogon): "
+			 "%s request (opnum[%u]) without schannel from "
+			 "client_account[%s] client_computer_name[%s]\n",
+			 opname, opnum,
+			 log_escape(mem_ctx, creds->account_name),
+			 log_escape(mem_ctx, creds->computer_name));
+		DBG_INFO("CVE-2020-1472(ZeroLogon): "
+			 "Option 'server require schannel:%s = no' still needed!\n",
+			 log_escape(mem_ctx, creds->account_name));
+	} else {
+		DBG_ERR("CVE-2020-1472(ZeroLogon): "
+			"%s request (opnum[%u]) without schannel from "
+			"client_account[%s] client_computer_name[%s]\n",
+			opname, opnum,
+			log_escape(mem_ctx, creds->account_name),
+			log_escape(mem_ctx, creds->computer_name));
+		DBG_ERR("CVE-2020-1472(ZeroLogon): Check if option "
+			"'server require schannel:%s = no' might be needed!\n",
+			log_escape(mem_ctx, creds->account_name));
+	}
+
+	*creds_out = creds;
+	return NT_STATUS_OK;
 }
 
 
@@ -1134,6 +1229,7 @@ static NTSTATUS netr_set_machine_account_password(TALLOC_CTX *mem_ctx,
 	int rc;
 	DATA_BLOB session_key;
 	enum samr_UserInfoLevel infolevel;
+	TALLOC_CTX *frame = talloc_stackframe();
 
 	ZERO_STRUCT(user_handle);
 
@@ -1144,7 +1240,7 @@ static NTSTATUS netr_set_machine_account_password(TALLOC_CTX *mem_ctx,
 		goto out;
 	}
 
-	rc = tsocket_address_inet_from_strings(mem_ctx,
+	rc = tsocket_address_inet_from_strings(frame,
 					       "ip",
 					       "127.0.0.1",
 					       0,
@@ -1154,7 +1250,7 @@ static NTSTATUS netr_set_machine_account_password(TALLOC_CTX *mem_ctx,
 		goto out;
 	}
 
-	status = rpcint_binding_handle(mem_ctx,
+	status = rpcint_binding_handle(frame,
 				       &ndr_table_samr,
 				       local,
 				       NULL,
@@ -1166,7 +1262,7 @@ static NTSTATUS netr_set_machine_account_password(TALLOC_CTX *mem_ctx,
 	}
 
 	become_root();
-	status = samr_find_machine_account(mem_ctx,
+	status = samr_find_machine_account(frame,
 					   h,
 					   account_name,
 					   SEC_FLAG_MAXIMUM_ALLOWED,
@@ -1179,7 +1275,7 @@ static NTSTATUS netr_set_machine_account_password(TALLOC_CTX *mem_ctx,
 	}
 
 	status = dcerpc_samr_QueryUserInfo2(h,
-					    mem_ctx,
+					    frame,
 					    &user_handle,
 					    UserControlInformation,
 					    &info,
@@ -1213,8 +1309,17 @@ static NTSTATUS netr_set_machine_account_password(TALLOC_CTX *mem_ctx,
 			infolevel = UserInternal1Information;
 
 			in = data_blob_const(cr->creds.nt_hash, 16);
-			out = data_blob_talloc_zero(mem_ctx, 16);
-			sess_crypt_blob(&out, &in, &session_key, true);
+			out = data_blob_talloc_zero(frame, 16);
+			if (out.data == NULL) {
+				status = NT_STATUS_NO_MEMORY;
+				goto out;
+			}
+			rc = sess_crypt_blob(&out, &in, &session_key, SAMBA_GNUTLS_ENCRYPT);
+			if (rc != 0) {
+				status = gnutls_error_to_ntstatus(rc,
+								  NT_STATUS_ACCESS_DISABLED_BY_POLICY_OTHER);
+				goto out;
+			}
 			memcpy(info18.nt_pwd.hash, out.data, out.length);
 
 			info18.nt_pwd_active = true;
@@ -1226,9 +1331,12 @@ static NTSTATUS netr_set_machine_account_password(TALLOC_CTX *mem_ctx,
 
 			infolevel = UserInternal5InformationNew;
 
-			init_samr_CryptPasswordEx(cr->creds.password,
-						  &session_key,
-						  &info26.password);
+			status = init_samr_CryptPasswordEx(cr->creds.password,
+							   &session_key,
+							   &info26.password);
+			if (!NT_STATUS_IS_OK(status)) {
+				goto out;
+			}
 
 			info26.password_expired = PASS_DONT_CHANGE_AT_NEXT_LOGON;
 			info->info26 = info26;
@@ -1241,7 +1349,7 @@ static NTSTATUS netr_set_machine_account_password(TALLOC_CTX *mem_ctx,
 
 	become_root();
 	status = dcerpc_samr_SetUserInfo2(h,
-					  mem_ctx,
+					  frame,
 					  &user_handle,
 					  infolevel,
 					  info,
@@ -1257,8 +1365,9 @@ static NTSTATUS netr_set_machine_account_password(TALLOC_CTX *mem_ctx,
 
  out:
 	if (h && is_valid_policy_hnd(&user_handle)) {
-		dcerpc_samr_Close(h, mem_ctx, &user_handle, &result);
+		dcerpc_samr_Close(h, frame, &user_handle, &result);
 	}
+	TALLOC_FREE(frame);
 
 	return status;
 }
@@ -1301,7 +1410,10 @@ NTSTATUS _netr_ServerPasswordSet(struct pipes_struct *p,
 	DEBUG(3,("_netr_ServerPasswordSet: Server Password Set by remote machine:[%s] on account [%s]\n",
 			r->in.computer_name, creds->computer_name));
 
-	netlogon_creds_des_decrypt(creds, r->in.new_password);
+	status = netlogon_creds_des_decrypt(creds, r->in.new_password);
+	if (!NT_STATUS_IS_OK(status)) {
+		return status;
+	}
 
 	DEBUG(100,("_netr_ServerPasswordSet: new given value was :\n"));
 	for(i = 0; i < sizeof(r->in.new_password->hash); i++)
@@ -1326,9 +1438,14 @@ NTSTATUS _netr_ServerPasswordSet2(struct pipes_struct *p,
 {
 	NTSTATUS status;
 	struct netlogon_creds_CredentialState *creds = NULL;
-	DATA_BLOB plaintext;
+	DATA_BLOB plaintext = data_blob_null;
+	DATA_BLOB new_password = data_blob_null;
+	size_t confounder_len;
+	DATA_BLOB dec_blob = data_blob_null;
+	DATA_BLOB enc_blob = data_blob_null;
 	struct samr_CryptPassword password_buf;
 	struct _samr_Credentials_t cr = { CRED_TYPE_PLAIN_TEXT, {0}};
+	bool ok;
 
 	become_root();
 	status = netr_creds_server_step_check(p, p->mem_ctx,
@@ -1359,28 +1476,112 @@ NTSTATUS _netr_ServerPasswordSet2(struct pipes_struct *p,
 	SIVAL(password_buf.data, 512, r->in.new_password->length);
 
 	if (creds->negotiate_flags & NETLOGON_NEG_SUPPORTS_AES) {
-		netlogon_creds_aes_decrypt(creds, password_buf.data, 516);
+		status = netlogon_creds_aes_decrypt(creds,
+						    password_buf.data,
+						    516);
 	} else {
 		status = netlogon_creds_arcfour_crypt(creds,
 						      password_buf.data,
 						      516);
-		if (!NT_STATUS_IS_OK(status)) {
-			return status;
-		}
+	}
+	if (!NT_STATUS_IS_OK(status)) {
+		TALLOC_FREE(creds);
+		return status;
 	}
 
-	if (!decode_pw_buffer(p->mem_ctx,
-			      password_buf.data,
-			      (char**) &plaintext.data,
-			      &plaintext.length,
-			      CH_UTF16)) {
+	if (!extract_pw_from_buffer(p->mem_ctx, password_buf.data, &new_password)) {
 		DEBUG(2,("_netr_ServerPasswordSet2: unable to extract password "
 			 "from a buffer. Rejecting auth request as a wrong password\n"));
 		TALLOC_FREE(creds);
 		return NT_STATUS_WRONG_PASSWORD;
 	}
 
+	/*
+	 * Make sure the length field was encrypted,
+	 * otherwise we are under attack.
+	 */
+	if (new_password.length == r->in.new_password->length) {
+		DBG_WARNING("Length[%zu] field not encrypted\n",
+			new_password.length);
+		TALLOC_FREE(creds);
+		return NT_STATUS_WRONG_PASSWORD;
+	}
+
+	/*
+	 * We don't allow empty passwords for machine accounts.
+	 */
+	if (new_password.length < 2) {
+		DBG_WARNING("Empty password Length[%zu]\n",
+			new_password.length);
+		TALLOC_FREE(creds);
+		return NT_STATUS_WRONG_PASSWORD;
+	}
+
+	/*
+	 * Make sure the confounder part of CryptPassword
+	 * buffer was encrypted, otherwise we are under attack.
+	 */
+	confounder_len = 512 - new_password.length;
+	enc_blob = data_blob_const(r->in.new_password->data, confounder_len);
+	dec_blob = data_blob_const(password_buf.data, confounder_len);
+	if (data_blob_cmp(&dec_blob, &enc_blob) == 0) {
+		DBG_WARNING("Confounder buffer not encrypted Length[%zu]\n",
+			    confounder_len);
+		TALLOC_FREE(creds);
+		return NT_STATUS_WRONG_PASSWORD;
+	}
+
+	/*
+	 * Check that the password part was actually encrypted,
+	 * otherwise we are under attack.
+	 */
+	enc_blob = data_blob_const(r->in.new_password->data + confounder_len,
+				   new_password.length);
+	dec_blob = data_blob_const(password_buf.data + confounder_len,
+				   new_password.length);
+	if (data_blob_cmp(&dec_blob, &enc_blob) == 0) {
+		DBG_WARNING("Password buffer not encrypted Length[%zu]\n",
+			    new_password.length);
+		TALLOC_FREE(creds);
+		return NT_STATUS_WRONG_PASSWORD;
+	}
+
+	/*
+	 * don't allow zero buffers
+	 */
+	if (all_zero(new_password.data, new_password.length)) {
+		DBG_WARNING("Password zero buffer Length[%zu]\n",
+			    new_password.length);
+		TALLOC_FREE(creds);
+		return NT_STATUS_WRONG_PASSWORD;
+	}
+
+	/* Convert from UTF16 -> plaintext. */
+	ok = convert_string_talloc(p->mem_ctx,
+				CH_UTF16,
+				CH_UNIX,
+				new_password.data,
+				new_password.length,
+				(void *)&plaintext.data,
+				&plaintext.length);
+	if (!ok) {
+		DBG_WARNING("unable to extract password from a buffer. "
+			    "Rejecting auth request as a wrong password\n");
+		TALLOC_FREE(creds);
+		return NT_STATUS_WRONG_PASSWORD;
+	}
+
+	/*
+	 * We don't allow empty passwords for machine accounts.
+	 */
+
 	cr.creds.password = (const char*) plaintext.data;
+	if (strlen(cr.creds.password) == 0) {
+		DBG_WARNING("Empty plaintext password\n");
+		TALLOC_FREE(creds);
+		return NT_STATUS_WRONG_PASSWORD;
+	}
+
 	status = netr_set_machine_account_password(p->mem_ctx,
 						   p->session_info,
 						   p->msg_ctx,
@@ -1497,6 +1698,7 @@ static NTSTATUS _netr_LogonSamLogon_base(struct pipes_struct *p,
 	NTSTATUS status = NT_STATUS_OK;
 	union netr_LogonLevel *logon = r->in.logon;
 	const char *nt_username, *nt_domain, *nt_workstation;
+	char *sanitized_username = NULL;
 	struct auth_usersupplied_info *user_info = NULL;
 	struct auth_serversupplied_info *server_info = NULL;
 	struct auth_context *auth_context = NULL;
@@ -1583,8 +1785,6 @@ static NTSTATUS _netr_LogonSamLogon_base(struct pipes_struct *p,
 	} /* end switch */
 
 	DEBUG(3,("User:[%s@%s] Requested Domain:[%s]\n", nt_username, nt_workstation, nt_domain));
-	fstrcpy(current_user_info.smb_name, nt_username);
-	sub_set_smb_name(nt_username);
 
 	DEBUG(5,("Attempting validation level %d for unmapped username %s.\n",
 		r->in.validation_level, nt_username));
@@ -1724,6 +1924,19 @@ static NTSTATUS _netr_LogonSamLogon_base(struct pipes_struct *p,
 		TALLOC_FREE(server_info);
 		return NT_STATUS_LOGON_FAILURE;
 	}
+
+	sanitized_username = talloc_alpha_strcpy(talloc_tos(),
+						 nt_username,
+						 SAFE_NETBIOS_CHARS "$");
+	if (sanitized_username == NULL) {
+		TALLOC_FREE(server_info);
+		return NT_STATUS_NO_MEMORY;
+	}
+
+	set_current_user_info(sanitized_username,
+			      server_info->unix_name,
+			      server_info->info3->base.logon_domain.string);
+	TALLOC_FREE(sanitized_username);
 
 	/* This is the point at which, if the login was successful, that
            the SAM Local Security Authority should record that the user is
@@ -2431,10 +2644,10 @@ WERROR _netr_DsRGetForestTrustInformation(struct pipes_struct *p,
 {
 	NTSTATUS status;
 	struct lsa_ForestTrustInformation *info, **info_ptr;
+	enum security_user_level security_level;
 
-	if (!(p->pipe_bound && (p->auth.auth_type != DCERPC_AUTH_TYPE_NONE)
-		       && (p->auth.auth_level != DCERPC_AUTH_LEVEL_NONE))) {
-		p->fault_state = DCERPC_FAULT_ACCESS_DENIED;
+	security_level = security_session_user_level(p->session_info, NULL);
+	if (security_level < SECURITY_USER) {
 		return WERR_ACCESS_DENIED;
 	}
 
@@ -2548,6 +2761,7 @@ static NTSTATUS get_password_from_trustAuth(TALLOC_CTX *mem_ctx,
 {
 	enum ndr_err_code ndr_err;
 	struct trustAuthInOutBlob trustAuth;
+	NTSTATUS status;
 
 	ndr_err = ndr_pull_struct_blob_all(trustAuth_blob, mem_ctx, &trustAuth,
 					   (ndr_pull_flags_fn_t)ndr_pull_trustAuthInOutBlob);
@@ -2560,7 +2774,10 @@ static NTSTATUS get_password_from_trustAuth(TALLOC_CTX *mem_ctx,
 		mdfour(current_pw_enc->hash,
 		       trustAuth.current.array[0].AuthInfo.clear.password,
 		       trustAuth.current.array[0].AuthInfo.clear.size);
-		netlogon_creds_des_encrypt(creds, current_pw_enc);
+		status = netlogon_creds_des_encrypt(creds, current_pw_enc);
+		if (!NT_STATUS_IS_OK(status)) {
+			return status;
+		}
 	} else {
 		return NT_STATUS_UNSUCCESSFUL;
 	}
@@ -2571,7 +2788,10 @@ static NTSTATUS get_password_from_trustAuth(TALLOC_CTX *mem_ctx,
 		mdfour(previous_pw_enc->hash,
 		       trustAuth.previous.array[0].AuthInfo.clear.password,
 		       trustAuth.previous.array[0].AuthInfo.clear.size);
-		netlogon_creds_des_encrypt(creds, previous_pw_enc);
+		status = netlogon_creds_des_encrypt(creds, previous_pw_enc);
+		if (!NT_STATUS_IS_OK(status)) {
+			return status;
+		}
 	} else {
 		ZERO_STRUCTP(previous_pw_enc);
 	}
@@ -2704,3 +2924,6 @@ NTSTATUS _netr_DsrUpdateReadOnlyServerDnsRecords(struct pipes_struct *p,
 	p->fault_state = DCERPC_FAULT_OP_RNG_ERROR;
 	return NT_STATUS_NOT_IMPLEMENTED;
 }
+
+/* include the generated boilerplate */
+#include "librpc/gen_ndr/ndr_netlogon_scompat.c"

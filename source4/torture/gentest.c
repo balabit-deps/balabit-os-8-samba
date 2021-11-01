@@ -1640,6 +1640,7 @@ static bool cmp_fileinfo(int instance,
 
 	case RAW_FILEINFO_ALT_NAME_INFO:
 	case RAW_FILEINFO_ALT_NAME_INFORMATION:
+	case RAW_FILEINFO_SMB2_ALT_NAME_INFORMATION:
 		CHECK_WSTR_EQUAL(alt_name_info.out.fname);
 		break;
 
@@ -2098,7 +2099,7 @@ static bool handler_smb_lockingx(int instance)
 	parm[0].lockx.in.mode = gen_lock_mode();
 	parm[0].lockx.in.timeout = gen_timeout();
 	do {
-		/* make sure we don't accidentially generate an oplock
+		/* make sure we don't accidentally generate an oplock
 		   break ack - otherwise the server can just block forever */
 		parm[0].lockx.in.ulock_cnt = gen_lock_count();
 		parm[0].lockx.in.lock_cnt = gen_lock_count();
@@ -3317,7 +3318,7 @@ int main(int argc, const char *argv[])
 		POPT_COMMON_CONNECTION
 		POPT_COMMON_CREDENTIALS
 		POPT_COMMON_VERSION
-		{ NULL }
+		{0}
 	};
 	TALLOC_CTX *mem_ctx = NULL;
 
@@ -3398,6 +3399,7 @@ int main(int argc, const char *argv[])
 		const char *share = argv[1+i];
 		if (!split_unc_name(share, &servers[i].server_name, &servers[i].share_name)) {
 			printf("Invalid share name '%s'\n", share);
+			poptFreeContext(pc);
 			talloc_free(mem_ctx);
 			return -1;
 		}
@@ -3405,6 +3407,7 @@ int main(int argc, const char *argv[])
 
 	if (username_count == 0) {
 		usage(pc);
+		poptFreeContext(pc);
 		talloc_free(mem_ctx);
 		return -1;
 	}
@@ -3426,6 +3429,7 @@ int main(int argc, const char *argv[])
 		printf("gentest failed\n");
 	}
 
+	poptFreeContext(pc);
 	talloc_free(mem_ctx);
 	return ret?0:-1;
 }

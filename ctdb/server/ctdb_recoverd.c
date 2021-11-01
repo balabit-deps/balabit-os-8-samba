@@ -425,329 +425,63 @@ static int set_recovery_mode(struct ctdb_context *ctdb,
 }
 
 /*
-  ensure all other nodes have attached to any databases that we have
+ * Update flags on all connected nodes
  */
-static int create_missing_remote_databases(struct ctdb_context *ctdb, struct ctdb_node_map_old *nodemap, 
-					   uint32_t pnn, struct ctdb_dbid_map_old *dbmap, TALLOC_CTX *mem_ctx)
+static int update_flags_on_all_nodes(struct ctdb_recoverd *rec,
+				     uint32_t pnn,
+				     uint32_t flags)
 {
-	unsigned int i, j, db;
+	struct ctdb_context *ctdb = rec->ctdb;
+	struct timeval timeout = CONTROL_TIMEOUT();
+	TDB_DATA data;
+	struct ctdb_node_map_old *nodemap=NULL;
+	struct ctdb_node_flag_change c;
+	TALLOC_CTX *tmp_ctx = talloc_new(ctdb);
+	uint32_t *nodes;
+	uint32_t i;
 	int ret;
-	struct ctdb_dbid_map_old *remote_dbmap;
 
-	/* verify that all other nodes have all our databases */
-	for (j=0; j<nodemap->num; j++) {
-		/* we don't need to ourself ourselves */
-		if (nodemap->nodes[j].pnn == pnn) {
-			continue;
-		}
-		/* don't check nodes that are unavailable */
-		if (nodemap->nodes[j].flags & NODE_FLAGS_INACTIVE) {
-			continue;
-		}
+	nodemap = rec->nodemap;
 
-		ret = ctdb_ctrl_getdbmap(ctdb, CONTROL_TIMEOUT(), nodemap->nodes[j].pnn, 
-					 mem_ctx, &remote_dbmap);
-		if (ret != 0) {
-			DEBUG(DEBUG_ERR, (__location__ " Unable to get dbids from node %u\n", pnn));
-			return -1;
-		}
-
-		/* step through all local databases */
-		for (db=0; db<dbmap->num;db++) {
-			const char *name;
-
-
-			for (i=0;i<remote_dbmap->num;i++) {
-				if (dbmap->dbs[db].db_id == remote_dbmap->dbs[i].db_id) {
-					break;
-				}
-			}
-			/* the remote node already have this database */
-			if (i!=remote_dbmap->num) {
-				continue;
-			}
-			/* ok so we need to create this database */
-			ret = ctdb_ctrl_getdbname(ctdb, CONTROL_TIMEOUT(), pnn,
-						  dbmap->dbs[db].db_id, mem_ctx,
-						  &name);
-			if (ret != 0) {
-				DEBUG(DEBUG_ERR, (__location__ " Unable to get dbname from node %u\n", pnn));
-				return -1;
-			}
-			ret = ctdb_ctrl_createdb(ctdb, CONTROL_TIMEOUT(),
-						 nodemap->nodes[j].pnn,
-						 mem_ctx, name,
-						 dbmap->dbs[db].flags, NULL);
-			if (ret != 0) {
-				DEBUG(DEBUG_ERR, (__location__ " Unable to create remote db:%s\n", name));
-				return -1;
-			}
+	for (i = 0; i < nodemap->num; i++) {
+		if (pnn == nodemap->nodes[i].pnn) {
+			break;
 		}
 	}
-
-	return 0;
-}
-
-
-/*
-  ensure we are attached to any databases that anyone else is attached to
- */
-static int create_missing_local_databases(struct ctdb_context *ctdb, struct ctdb_node_map_old *nodemap, 
-					  uint32_t pnn, struct ctdb_dbid_map_old **dbmap, TALLOC_CTX *mem_ctx)
-{
-	unsigned int i, j, db;
-	int ret;
-	struct ctdb_dbid_map_old *remote_dbmap;
-
-	/* verify that we have all database any other node has */
-	for (j=0; j<nodemap->num; j++) {
-		/* we don't need to ourself ourselves */
-		if (nodemap->nodes[j].pnn == pnn) {
-			continue;
-		}
-		/* don't check nodes that are unavailable */
-		if (nodemap->nodes[j].flags & NODE_FLAGS_INACTIVE) {
-			continue;
-		}
-
-		ret = ctdb_ctrl_getdbmap(ctdb, CONTROL_TIMEOUT(), nodemap->nodes[j].pnn, 
-					 mem_ctx, &remote_dbmap);
-		if (ret != 0) {
-			DEBUG(DEBUG_ERR, (__location__ " Unable to get dbids from node %u\n", pnn));
-			return -1;
-		}
-
-		/* step through all databases on the remote node */
-		for (db=0; db<remote_dbmap->num;db++) {
-			const char *name;
-
-			for (i=0;i<(*dbmap)->num;i++) {
-				if (remote_dbmap->dbs[db].db_id == (*dbmap)->dbs[i].db_id) {
-					break;
-				}
-			}
-			/* we already have this db locally */
-			if (i!=(*dbmap)->num) {
-				continue;
-			}
-			/* ok so we need to create this database and
-			   rebuild dbmap
-			 */
-			ctdb_ctrl_getdbname(ctdb, CONTROL_TIMEOUT(), nodemap->nodes[j].pnn, 
-					    remote_dbmap->dbs[db].db_id, mem_ctx, &name);
-			if (ret != 0) {
-				DEBUG(DEBUG_ERR, (__location__ " Unable to get dbname from node %u\n", 
-					  nodemap->nodes[j].pnn));
-				return -1;
-			}
-			ctdb_ctrl_createdb(ctdb, CONTROL_TIMEOUT(), pnn,
-					   mem_ctx, name,
-					   remote_dbmap->dbs[db].flags, NULL);
-			if (ret != 0) {
-				DEBUG(DEBUG_ERR, (__location__ " Unable to create local db:%s\n", name));
-				return -1;
-			}
-			ret = ctdb_ctrl_getdbmap(ctdb, CONTROL_TIMEOUT(), pnn, mem_ctx, dbmap);
-			if (ret != 0) {
-				DEBUG(DEBUG_ERR, (__location__ " Unable to reread dbmap on node %u\n", pnn));
-				return -1;
-			}
-		}
-	}
-
-	return 0;
-}
-
-/*
-  update flags on all active nodes
- */
-static int update_flags_on_all_nodes(struct ctdb_context *ctdb, struct ctdb_node_map_old *nodemap, uint32_t pnn, uint32_t flags)
-{
-	int ret;
-
-	ret = ctdb_ctrl_modflags(ctdb, CONTROL_TIMEOUT(), pnn, flags, ~flags);
-		if (ret != 0) {
-		DEBUG(DEBUG_ERR, (__location__ " Unable to update nodeflags on remote nodes\n"));
+	if (i >= nodemap->num) {
+		DBG_ERR("Nodemap does not contain node %d\n", pnn);
+		talloc_free(tmp_ctx);
 		return -1;
 	}
 
-	return 0;
-}
+	c.pnn       = pnn;
+	c.old_flags = nodemap->nodes[i].flags;
+	c.new_flags = flags;
 
-/*
-  called when a vacuum fetch has completed - just free it and do the next one
- */
-static void vacuum_fetch_callback(struct ctdb_client_call_state *state)
-{
-	talloc_free(state);
-}
+	data.dsize = sizeof(c);
+	data.dptr = (unsigned char *)&c;
 
+	/* send the flags update to all connected nodes */
+	nodes = list_of_connected_nodes(ctdb, nodemap, tmp_ctx, true);
 
-/**
- * Process one elements of the vacuum fetch list:
- * Migrate it over to us with the special flag
- * CTDB_CALL_FLAG_VACUUM_MIGRATION.
- */
-static bool vacuum_fetch_process_one(struct ctdb_db_context *ctdb_db,
-				     uint32_t pnn,
-				     struct ctdb_rec_data_old *r)
-{
-	struct ctdb_client_call_state *state;
-	TDB_DATA data;
-	struct ctdb_ltdb_header *hdr;
-	struct ctdb_call call;
-
-	ZERO_STRUCT(call);
-	call.call_id = CTDB_NULL_FUNC;
-	call.flags = CTDB_IMMEDIATE_MIGRATION;
-	call.flags |= CTDB_CALL_FLAG_VACUUM_MIGRATION;
-
-	call.key.dptr = &r->data[0];
-	call.key.dsize = r->keylen;
-
-	/* ensure we don't block this daemon - just skip a record if we can't get
-	   the chainlock */
-	if (tdb_chainlock_nonblock(ctdb_db->ltdb->tdb, call.key) != 0) {
-		return true;
-	}
-
-	data = tdb_fetch(ctdb_db->ltdb->tdb, call.key);
-	if (data.dptr == NULL) {
-		tdb_chainunlock(ctdb_db->ltdb->tdb, call.key);
-		return true;
-	}
-
-	if (data.dsize < sizeof(struct ctdb_ltdb_header)) {
-		free(data.dptr);
-		tdb_chainunlock(ctdb_db->ltdb->tdb, call.key);
-		return true;
-	}
-
-	hdr = (struct ctdb_ltdb_header *)data.dptr;
-	if (hdr->dmaster == pnn) {
-		/* its already local */
-		free(data.dptr);
-		tdb_chainunlock(ctdb_db->ltdb->tdb, call.key);
-		return true;
-	}
-
-	free(data.dptr);
-
-	state = ctdb_call_send(ctdb_db, &call);
-	tdb_chainunlock(ctdb_db->ltdb->tdb, call.key);
-	if (state == NULL) {
-		DEBUG(DEBUG_ERR,(__location__ " Failed to setup vacuum fetch call\n"));
-		return false;
-	}
-	state->async.fn = vacuum_fetch_callback;
-	state->async.private_data = NULL;
-
-	return true;
-}
-
-
-/*
-  handler for vacuum fetch
-*/
-static void vacuum_fetch_handler(uint64_t srvid, TDB_DATA data,
-				 void *private_data)
-{
-	struct ctdb_recoverd *rec = talloc_get_type(
-		private_data, struct ctdb_recoverd);
-	struct ctdb_context *ctdb = rec->ctdb;
-	struct ctdb_marshall_buffer *recs;
-	unsigned int i;
-	int ret;
-	TALLOC_CTX *tmp_ctx = talloc_new(ctdb);
-	const char *name;
-	struct ctdb_dbid_map_old *dbmap=NULL;
-	uint8_t db_flags = 0;
-	struct ctdb_db_context *ctdb_db;
-	struct ctdb_rec_data_old *r;
-
-	recs = (struct ctdb_marshall_buffer *)data.dptr;
-
-	if (recs->count == 0) {
-		goto done;
-	}
-
-	/* work out if the database is persistent */
-	ret = ctdb_ctrl_getdbmap(ctdb, CONTROL_TIMEOUT(), CTDB_CURRENT_NODE, tmp_ctx, &dbmap);
+	ret = ctdb_client_async_control(ctdb,
+					CTDB_CONTROL_MODIFY_FLAGS,
+					nodes,
+					0,
+					timeout,
+					false,
+					data,
+					NULL,
+					NULL,
+					NULL);
 	if (ret != 0) {
-		DEBUG(DEBUG_ERR, (__location__ " Unable to get dbids from local node\n"));
-		goto done;
+		DBG_ERR("Unable to update flags on remote nodes\n");
+		talloc_free(tmp_ctx);
+		return -1;
 	}
 
-	for (i=0;i<dbmap->num;i++) {
-		if (dbmap->dbs[i].db_id == recs->db_id) {
-			db_flags = dbmap->dbs[i].flags;
-			break;
-		}
-	}
-	if (i == dbmap->num) {
-		DEBUG(DEBUG_ERR, (__location__ " Unable to find db_id 0x%x on local node\n", recs->db_id));
-		goto done;
-	}
-
-	/* find the name of this database */
-	if (ctdb_ctrl_getdbname(ctdb, CONTROL_TIMEOUT(), CTDB_CURRENT_NODE, recs->db_id, tmp_ctx, &name) != 0) {
-		DEBUG(DEBUG_ERR,(__location__ " Failed to get name of db 0x%x\n", recs->db_id));
-		goto done;
-	}
-
-	/* attach to it */
-	ctdb_db = ctdb_attach(ctdb, CONTROL_TIMEOUT(), name, db_flags);
-	if (ctdb_db == NULL) {
-		DEBUG(DEBUG_ERR,(__location__ " Failed to attach to database '%s'\n", name));
-		goto done;
-	}
-
-	r = (struct ctdb_rec_data_old *)&recs->data[0];
-	while (recs->count) {
-		bool ok;
-
-		ok = vacuum_fetch_process_one(ctdb_db, rec->ctdb->pnn, r);
-		if (!ok) {
-			break;
-		}
-
-		r = (struct ctdb_rec_data_old *)(r->length + (uint8_t *)r);
-		recs->count--;
-	}
-
-done:
 	talloc_free(tmp_ctx);
-}
-
-
-/*
- * handler for database detach
- */
-static void detach_database_handler(uint64_t srvid, TDB_DATA data,
-				    void *private_data)
-{
-	struct ctdb_recoverd *rec = talloc_get_type(
-		private_data, struct ctdb_recoverd);
-	struct ctdb_context *ctdb = rec->ctdb;
-	uint32_t db_id;
-	struct ctdb_db_context *ctdb_db;
-
-	if (data.dsize != sizeof(db_id)) {
-		return;
-	}
-	db_id = *(uint32_t *)data.dptr;
-
-	ctdb_db = find_ctdb_db(ctdb, db_id);
-	if (ctdb_db == NULL) {
-		/* database is not attached */
-		return;
-	}
-
-	DLIST_REMOVE(ctdb->db_list, ctdb_db);
-
-	DEBUG(DEBUG_NOTICE, ("Detached from database '%s'\n",
-			     ctdb_db->db_name));
-	talloc_free(ctdb_db);
+	return 0;
 }
 
 /*
@@ -786,7 +520,7 @@ static void ctdb_election_timeout(struct tevent_context *ev,
 	rec->election_timeout = NULL;
 	fast_start = false;
 
-	DEBUG(DEBUG_WARNING,("Election period ended\n"));
+	D_WARNING("Election period ended, master=%u\n", rec->recmaster);
 }
 
 
@@ -803,60 +537,90 @@ static void ctdb_wait_election(struct ctdb_recoverd *rec)
 }
 
 /*
-  Update our local flags from all remote connected nodes. 
-  This is only run when we are or we belive we are the recovery master
+ * Update local flags from all remote connected nodes and push out
+ * flags changes to all nodes.  This is only run by the recovery
+ * master.
  */
-static int update_local_flags(struct ctdb_recoverd *rec, struct ctdb_node_map_old *nodemap)
+static int update_flags(struct ctdb_recoverd *rec,
+			struct ctdb_node_map_old *nodemap,
+			struct ctdb_node_map_old **remote_nodemaps)
 {
 	unsigned int j;
 	struct ctdb_context *ctdb = rec->ctdb;
 	TALLOC_CTX *mem_ctx = talloc_new(ctdb);
 
-	/* get the nodemap for all active remote nodes and verify
-	   they are the same as for this node
-	 */
+	/* Check flags from remote nodes */
 	for (j=0; j<nodemap->num; j++) {
 		struct ctdb_node_map_old *remote_nodemap=NULL;
+		uint32_t local_flags = nodemap->nodes[j].flags;
+		uint32_t remote_pnn = nodemap->nodes[j].pnn;
+		uint32_t remote_flags;
+		unsigned int i;
 		int ret;
 
-		if (nodemap->nodes[j].flags & NODE_FLAGS_DISCONNECTED) {
+		if (local_flags & NODE_FLAGS_DISCONNECTED) {
 			continue;
 		}
-		if (nodemap->nodes[j].pnn == ctdb->pnn) {
-			continue;
+		if (remote_pnn == ctdb->pnn) {
+			/*
+			 * No remote nodemap for this node since this
+			 * is the local nodemap.  However, still need
+			 * to check this against the remote nodes and
+			 * push it if they are out-of-date.
+			 */
+			goto compare_remotes;
 		}
 
-		ret = ctdb_ctrl_getnodemap(ctdb, CONTROL_TIMEOUT(), nodemap->nodes[j].pnn, 
-					   mem_ctx, &remote_nodemap);
+		remote_nodemap = remote_nodemaps[j];
+		remote_flags = remote_nodemap->nodes[j].flags;
+
+		if (local_flags != remote_flags) {
+			/*
+			 * Update the local copy of the flags in the
+			 * recovery daemon.
+			 */
+			D_NOTICE("Remote node %u had flags 0x%x, "
+				 "local had 0x%x - updating local\n",
+				 remote_pnn,
+				 remote_flags,
+				 local_flags);
+			nodemap->nodes[j].flags = remote_flags;
+			local_flags = remote_flags;
+			goto push;
+		}
+
+compare_remotes:
+		for (i = 0; i < nodemap->num; i++) {
+			if (i == j) {
+				continue;
+			}
+			if (nodemap->nodes[i].flags & NODE_FLAGS_DISCONNECTED) {
+				continue;
+			}
+			if (nodemap->nodes[i].pnn == ctdb->pnn) {
+				continue;
+			}
+
+			remote_nodemap = remote_nodemaps[i];
+			remote_flags = remote_nodemap->nodes[j].flags;
+
+			if (local_flags != remote_flags) {
+				goto push;
+			}
+		}
+
+		continue;
+
+push:
+		D_NOTICE("Pushing updated flags for node %u (0x%x)\n",
+			 remote_pnn,
+			 local_flags);
+		ret = update_flags_on_all_nodes(rec, remote_pnn, local_flags);
 		if (ret != 0) {
-			DEBUG(DEBUG_ERR, (__location__ " Unable to get nodemap from remote node %u\n", 
-				  nodemap->nodes[j].pnn));
-			ctdb_set_culprit(rec, nodemap->nodes[j].pnn);
+			DBG_ERR("Unable to update flags on remote nodes\n");
 			talloc_free(mem_ctx);
 			return -1;
 		}
-		if (nodemap->nodes[j].flags != remote_nodemap->nodes[j].flags) {
-			/* We should tell our daemon about this so it
-			   updates its flags or else we will log the same 
-			   message again in the next iteration of recovery.
-			   Since we are the recovery master we can just as
-			   well update the flags on all nodes.
-			*/
-			ret = ctdb_ctrl_modflags(ctdb, CONTROL_TIMEOUT(), nodemap->nodes[j].pnn, remote_nodemap->nodes[j].flags, ~remote_nodemap->nodes[j].flags);
-			if (ret != 0) {
-				DEBUG(DEBUG_ERR, (__location__ " Unable to update nodeflags on remote nodes\n"));
-				return -1;
-			}
-
-			/* Update our local copy of the flags in the recovery
-			   daemon.
-			*/
-			DEBUG(DEBUG_NOTICE,("Remote node %u had flags 0x%x, local had 0x%x - updating local\n",
-				 nodemap->nodes[j].pnn, remote_nodemap->nodes[j].flags,
-				 nodemap->nodes[j].flags));
-			nodemap->nodes[j].flags = remote_nodemap->nodes[j].flags;
-		}
-		talloc_free(remote_nodemap);
 	}
 	talloc_free(mem_ctx);
 	return 0;
@@ -1341,7 +1105,6 @@ static int do_recovery(struct ctdb_recoverd *rec,
 	struct ctdb_context *ctdb = rec->ctdb;
 	unsigned int i;
 	int ret;
-	struct ctdb_dbid_map_old *dbmap;
 	bool self_ban;
 
 	DEBUG(DEBUG_NOTICE, (__location__ " Starting do_recovery\n"));
@@ -1421,32 +1184,6 @@ static int do_recovery(struct ctdb_recoverd *rec,
 
 	DEBUG(DEBUG_NOTICE, (__location__ " Recovery initiated due to problem with node %u\n", rec->last_culprit_node));
 
-	/* get a list of all databases */
-	ret = ctdb_ctrl_getdbmap(ctdb, CONTROL_TIMEOUT(), pnn, mem_ctx, &dbmap);
-	if (ret != 0) {
-		DEBUG(DEBUG_ERR, (__location__ " Unable to get dbids from node :%u\n", pnn));
-		goto fail;
-	}
-
-	/* we do the db creation before we set the recovery mode, so the freeze happens
-	   on all databases we will be dealing with. */
-
-	/* verify that we have all the databases any other node has */
-	ret = create_missing_local_databases(ctdb, nodemap, pnn, &dbmap, mem_ctx);
-	if (ret != 0) {
-		DEBUG(DEBUG_ERR, (__location__ " Unable to create missing local databases\n"));
-		goto fail;
-	}
-
-	/* verify that all other nodes have all our databases */
-	ret = create_missing_remote_databases(ctdb, nodemap, pnn, dbmap, mem_ctx);
-	if (ret != 0) {
-		DEBUG(DEBUG_ERR, (__location__ " Unable to create missing remote databases\n"));
-		goto fail;
-	}
-	DEBUG(DEBUG_NOTICE, (__location__ " Recovery - created remote databases\n"));
-
-
 	/* Retrieve capabilities from all connected nodes */
 	ret = update_capabilities(rec, nodemap);
 	if (ret!=0) {
@@ -1462,7 +1199,9 @@ static int do_recovery(struct ctdb_recoverd *rec,
 			continue;
 		}
 
-		ret = update_flags_on_all_nodes(ctdb, nodemap, i, nodemap->nodes[i].flags);
+		ret = update_flags_on_all_nodes(rec,
+						nodemap->nodes[i].pnn,
+						nodemap->nodes[i].flags);
 		if (ret != 0) {
 			if (nodemap->nodes[i].flags & NODE_FLAGS_INACTIVE) {
 				DEBUG(DEBUG_WARNING, (__location__ "Unable to update flags on inactive node %d\n", i));
@@ -2042,58 +1781,25 @@ static void force_election(struct ctdb_recoverd *rec, uint32_t pnn,
 }
 
 
-
-/*
-  handler for when a node changes its flags
-*/
-static void monitor_handler(uint64_t srvid, TDB_DATA data, void *private_data)
+static void srvid_not_implemented(uint64_t srvid,
+				  TDB_DATA data,
+				  void *private_data)
 {
-	struct ctdb_recoverd *rec = talloc_get_type(
-		private_data, struct ctdb_recoverd);
-	struct ctdb_context *ctdb = rec->ctdb;
-	int ret;
-	struct ctdb_node_flag_change *c = (struct ctdb_node_flag_change *)data.dptr;
-	struct ctdb_node_map_old *nodemap=NULL;
-	TALLOC_CTX *tmp_ctx;
-	unsigned int i;
+	const char *s;
 
-	if (data.dsize != sizeof(*c)) {
-		DEBUG(DEBUG_ERR,(__location__ "Invalid data in ctdb_node_flag_change\n"));
-		return;
+	switch (srvid) {
+	case CTDB_SRVID_SET_NODE_FLAGS:
+		s = "CTDB_SRVID_SET_NODE_FLAGS";
+		break;
+	default:
+		s = "UNKNOWN";
 	}
 
-	tmp_ctx = talloc_new(ctdb);
-	CTDB_NO_MEMORY_VOID(ctdb, tmp_ctx);
-
-	ret = ctdb_ctrl_getnodemap(ctdb, CONTROL_TIMEOUT(), CTDB_CURRENT_NODE, tmp_ctx, &nodemap);
-	if (ret != 0) {
-		DEBUG(DEBUG_ERR,(__location__ "ctdb_ctrl_getnodemap failed in monitor_handler\n"));
-		talloc_free(tmp_ctx);
-		return;		
-	}
-
-
-	for (i=0;i<nodemap->num;i++) {
-		if (nodemap->nodes[i].pnn == c->pnn) break;
-	}
-
-	if (i == nodemap->num) {
-		DEBUG(DEBUG_CRIT,(__location__ "Flag change for non-existant node %u\n", c->pnn));
-		talloc_free(tmp_ctx);
-		return;
-	}
-
-	if (c->old_flags != c->new_flags) {
-		DEBUG(DEBUG_NOTICE,("Node %u has changed flags - now 0x%x  was 0x%x\n", c->pnn, c->new_flags, c->old_flags));
-	}
-
-	nodemap->nodes[i].flags = c->new_flags;
-
-	talloc_free(tmp_ctx);
+	D_WARNING("SRVID %s (0x%" PRIx64 ") is obsolete\n", s, srvid);
 }
 
 /*
-  handler for when we need to push out flag changes ot all other nodes
+  handler for when we need to push out flag changes to all other nodes
 */
 static void push_flags_handler(uint64_t srvid, TDB_DATA data,
 			       void *private_data)
@@ -2415,6 +2121,7 @@ static int verify_local_ip_allocation(struct ctdb_context *ctdb,
 	/* Return early if disabled... */
 	if (ctdb_config.failover_disabled ||
 	    ctdb_op_is_disabled(rec->takeover_run)) {
+		talloc_free(mem_ctx);
 		return  0;
 	}
 
@@ -2508,37 +2215,94 @@ done:
 }
 
 
-static void async_getnodemap_callback(struct ctdb_context *ctdb, uint32_t node_pnn, int32_t res, TDB_DATA outdata, void *callback_data)
-{
-	struct ctdb_node_map_old **remote_nodemaps = callback_data;
+struct remote_nodemaps_state {
+	struct ctdb_node_map_old **remote_nodemaps;
+	struct ctdb_recoverd *rec;
+};
 
-	if (node_pnn >= ctdb->num_nodes) {
-		DEBUG(DEBUG_ERR,(__location__ " pnn from invalid node\n"));
+static void async_getnodemap_callback(struct ctdb_context *ctdb,
+				      uint32_t node_pnn,
+				      int32_t res,
+				      TDB_DATA outdata,
+				      void *callback_data)
+{
+	struct remote_nodemaps_state *state =
+		(struct remote_nodemaps_state *)callback_data;
+	struct ctdb_node_map_old **remote_nodemaps = state->remote_nodemaps;
+	struct ctdb_node_map_old *nodemap = state->rec->nodemap;
+	size_t i;
+
+	for (i = 0; i < nodemap->num; i++) {
+		if (nodemap->nodes[i].pnn == node_pnn) {
+			break;
+		}
+	}
+
+	if (i >= nodemap->num) {
+		DBG_ERR("Invalid PNN %"PRIu32"\n", node_pnn);
 		return;
 	}
 
-	remote_nodemaps[node_pnn] = (struct ctdb_node_map_old *)talloc_steal(remote_nodemaps, outdata.dptr);
+	remote_nodemaps[i] = (struct ctdb_node_map_old *)talloc_steal(
+					remote_nodemaps, outdata.dptr);
 
 }
 
-static int get_remote_nodemaps(struct ctdb_context *ctdb, TALLOC_CTX *mem_ctx,
-	struct ctdb_node_map_old *nodemap,
-	struct ctdb_node_map_old **remote_nodemaps)
+static void async_getnodemap_error(struct ctdb_context *ctdb,
+				   uint32_t node_pnn,
+				   int32_t res,
+				   TDB_DATA outdata,
+				   void *callback_data)
 {
+	struct remote_nodemaps_state *state =
+		(struct remote_nodemaps_state *)callback_data;
+	struct ctdb_recoverd *rec = state->rec;
+
+	DBG_ERR("Failed to retrieve nodemap from node %u\n", node_pnn);
+	ctdb_set_culprit(rec, node_pnn);
+}
+
+static int get_remote_nodemaps(struct ctdb_recoverd *rec,
+			       TALLOC_CTX *mem_ctx,
+			       struct ctdb_node_map_old ***remote_nodemaps)
+{
+	struct ctdb_context *ctdb = rec->ctdb;
+	struct ctdb_node_map_old **t;
 	uint32_t *nodes;
+	struct remote_nodemaps_state state;
+	int ret;
 
-	nodes = list_of_active_nodes(ctdb, nodemap, mem_ctx, true);
-	if (ctdb_client_async_control(ctdb, CTDB_CONTROL_GET_NODEMAP,
-					nodes, 0,
-					CONTROL_TIMEOUT(), false, tdb_null,
-					async_getnodemap_callback,
-					NULL,
-					remote_nodemaps) != 0) {
-		DEBUG(DEBUG_ERR, (__location__ " Unable to pull all remote nodemaps\n"));
-
+	t = talloc_zero_array(mem_ctx,
+			      struct ctdb_node_map_old *,
+			      rec->nodemap->num);
+	if (t == NULL) {
+		DBG_ERR("Memory allocation error\n");
 		return -1;
 	}
 
+	nodes = list_of_connected_nodes(ctdb, rec->nodemap, mem_ctx, false);
+
+	state.remote_nodemaps = t;
+	state.rec = rec;
+
+	ret = ctdb_client_async_control(ctdb,
+					CTDB_CONTROL_GET_NODEMAP,
+					nodes,
+					0,
+					CONTROL_TIMEOUT(),
+					false,
+					tdb_null,
+					async_getnodemap_callback,
+					async_getnodemap_error,
+					&state);
+	talloc_free(nodes);
+
+	if (ret != 0) {
+		talloc_free(t);
+		return ret;
+	}
+
+	*remote_nodemaps = t;
 	return 0;
 }
 
@@ -2690,13 +2454,13 @@ static void main_loop(struct ctdb_context *ctdb, struct ctdb_recoverd *rec,
 	pnn = ctdb_get_pnn(ctdb);
 
 	/* get nodemap */
-	TALLOC_FREE(rec->nodemap);
-	ret = ctdb_ctrl_getnodemap(ctdb, CONTROL_TIMEOUT(), pnn, rec, &rec->nodemap);
+	ret = ctdb_ctrl_getnodemap(ctdb, CONTROL_TIMEOUT(), pnn, rec, &nodemap);
 	if (ret != 0) {
-		DEBUG(DEBUG_ERR, (__location__ " Unable to get nodemap from node %u\n", pnn));
+		DBG_ERR("Unable to get nodemap from node %"PRIu32"\n", pnn);
 		return;
 	}
-	nodemap = rec->nodemap;
+	talloc_free(rec->nodemap);
+	rec->nodemap = nodemap;
 
 	/* remember our own node flags */
 	rec->node_flags = nodemap->nodes[pnn].flags;
@@ -2783,10 +2547,17 @@ static void main_loop(struct ctdb_context *ctdb, struct ctdb_recoverd *rec,
 	}
 
 
-	/* ensure our local copies of flags are right */
-	ret = update_local_flags(rec, nodemap);
+	/* Get the nodemaps for all connected remote nodes */
+	ret = get_remote_nodemaps(rec, mem_ctx, &remote_nodemaps);
 	if (ret != 0) {
-		DEBUG(DEBUG_ERR,("Unable to update local flags\n"));
+		DBG_ERR("Failed to read remote nodemaps\n");
+		return;
+	}
+
+	/* Ensure our local and remote flags are correct */
+	ret = update_flags(rec, nodemap, remote_nodemaps);
+	if (ret != 0) {
+		D_ERR("Unable to update flags\n");
 		return;
 	}
 
@@ -2859,33 +2630,14 @@ static void main_loop(struct ctdb_context *ctdb, struct ctdb_recoverd *rec,
 		goto takeover_run_checks;
 	}
 
-	/* get the nodemap for all active remote nodes
-	 */
-	remote_nodemaps = talloc_array(mem_ctx, struct ctdb_node_map_old *, nodemap->num);
-	if (remote_nodemaps == NULL) {
-		DEBUG(DEBUG_ERR, (__location__ " failed to allocate remote nodemap array\n"));
-		return;
-	}
-	for(i=0; i<nodemap->num; i++) {
-		remote_nodemaps[i] = NULL;
-	}
-	if (get_remote_nodemaps(ctdb, mem_ctx, nodemap, remote_nodemaps) != 0) {
-		DEBUG(DEBUG_ERR,(__location__ " Failed to read remote nodemaps\n"));
-		return;
-	} 
-
 	/* verify that all other nodes have the same nodemap as we have
 	*/
 	for (j=0; j<nodemap->num; j++) {
-		if (nodemap->nodes[j].flags & NODE_FLAGS_INACTIVE) {
+		if (nodemap->nodes[j].pnn == ctdb->pnn) {
 			continue;
 		}
-
-		if (remote_nodemaps[j] == NULL) {
-			DEBUG(DEBUG_ERR,(__location__ " Did not get a remote nodemap for node %d, restarting monitoring\n", j));
-			ctdb_set_culprit(rec, j);
-
-			return;
+		if (nodemap->nodes[j].flags & NODE_FLAGS_INACTIVE) {
+			continue;
 		}
 
  		/* if the nodes disagree on how many nodes there are
@@ -2914,55 +2666,6 @@ static void main_loop(struct ctdb_context *ctdb, struct ctdb_recoverd *rec,
 			}
 		}
 	}
-
-	/*
-	 * Update node flags obtained from each active node. This ensure we have
-	 * up-to-date information for all the nodes.
-	 */
-	for (j=0; j<nodemap->num; j++) {
-		if (nodemap->nodes[j].flags & NODE_FLAGS_INACTIVE) {
-			continue;
-		}
-		nodemap->nodes[j].flags = remote_nodemaps[j]->nodes[j].flags;
-	}
-
-	for (j=0; j<nodemap->num; j++) {
-		if (nodemap->nodes[j].flags & NODE_FLAGS_INACTIVE) {
-			continue;
-		}
-
-		/* verify the flags are consistent
-		*/
-		for (i=0; i<nodemap->num; i++) {
-			if (nodemap->nodes[i].flags & NODE_FLAGS_DISCONNECTED) {
-				continue;
-			}
-			
-			if (nodemap->nodes[i].flags != remote_nodemaps[j]->nodes[i].flags) {
-				DEBUG(DEBUG_ERR, (__location__ " Remote node:%u has different flags for node %u. It has 0x%02x vs our 0x%02x\n", 
-				  nodemap->nodes[j].pnn, 
-				  nodemap->nodes[i].pnn, 
-				  remote_nodemaps[j]->nodes[i].flags,
-				  nodemap->nodes[i].flags));
-				if (i == j) {
-					DEBUG(DEBUG_ERR,("Use flags 0x%02x from remote node %d for cluster update of its own flags\n", remote_nodemaps[j]->nodes[i].flags, j));
-					update_flags_on_all_nodes(ctdb, nodemap, nodemap->nodes[i].pnn, remote_nodemaps[j]->nodes[i].flags);
-					ctdb_set_culprit(rec, nodemap->nodes[j].pnn);
-					do_recovery(rec, mem_ctx, pnn, nodemap, 
-						    vnnmap);
-					return;
-				} else {
-					DEBUG(DEBUG_ERR,("Use flags 0x%02x from local recmaster node for cluster update of node %d flags\n", nodemap->nodes[i].flags, i));
-					update_flags_on_all_nodes(ctdb, nodemap, nodemap->nodes[i].pnn, nodemap->nodes[i].flags);
-					ctdb_set_culprit(rec, nodemap->nodes[j].pnn);
-					do_recovery(rec, mem_ctx, pnn, nodemap, 
-						    vnnmap);
-					return;
-				}
-			}
-		}
-	}
-
 
 	/* count how many active nodes there are */
 	num_lmasters  = 0;
@@ -3097,6 +2800,112 @@ static void recd_sig_term_handler(struct tevent_context *ev,
 	exit(0);
 }
 
+/*
+ * Periodically log elements of the cluster state
+ *
+ * This can be used to confirm a split brain has occurred
+ */
+static void maybe_log_cluster_state(struct tevent_context *ev,
+				    struct tevent_timer *te,
+				    struct timeval current_time,
+				    void *private_data)
+{
+	struct ctdb_recoverd *rec = talloc_get_type_abort(
+		private_data, struct ctdb_recoverd);
+	struct ctdb_context *ctdb = rec->ctdb;
+	struct tevent_timer *tt;
+
+	static struct timeval start_incomplete = {
+		.tv_sec = 0,
+	};
+
+	bool is_complete;
+	bool was_complete;
+	unsigned int i;
+	double seconds;
+	unsigned int minutes;
+	unsigned int num_connected;
+
+	if (rec->recmaster != ctdb_get_pnn(ctdb)) {
+		goto done;
+	}
+
+	if (rec->nodemap == NULL) {
+		goto done;
+	}
+
+	is_complete = true;
+	num_connected = 0;
+	for (i = 0; i < rec->nodemap->num; i++) {
+		struct ctdb_node_and_flags *n = &rec->nodemap->nodes[i];
+
+		if (n->pnn == ctdb_get_pnn(ctdb)) {
+			continue;
+		}
+		if ((n->flags & NODE_FLAGS_DELETED) != 0) {
+			continue;
+		}
+		if ((n->flags & NODE_FLAGS_DISCONNECTED) != 0) {
+			is_complete = false;
+			continue;
+		}
+
+		num_connected++;
+	}
+
+	was_complete = timeval_is_zero(&start_incomplete);
+
+	if (is_complete) {
+		if (! was_complete) {
+			D_WARNING("Cluster complete with master=%u\n",
+				  rec->recmaster);
+			start_incomplete = timeval_zero();
+		}
+		goto done;
+	}
+
+	/* Cluster is newly incomplete... */
+	if (was_complete) {
+		start_incomplete = current_time;
+		minutes = 0;
+		goto log;
+	}
+
+	/*
+	 * Cluster has been incomplete since previous check, so figure
+	 * out how long (in minutes) and decide whether to log anything
+	 */
+	seconds = timeval_elapsed2(&start_incomplete, &current_time);
+	minutes = (unsigned int)seconds / 60;
+	if (minutes >= 60) {
+		/* Over an hour, log every hour */
+		if (minutes % 60 != 0) {
+			goto done;
+		}
+	} else if (minutes >= 10) {
+		/* Over 10 minutes, log every 10 minutes */
+		if (minutes % 10 != 0) {
+			goto done;
+		}
+	}
+
+log:
+	D_WARNING("Cluster incomplete with master=%u, elapsed=%u minutes, "
+		  "connected=%u\n",
+		  rec->recmaster,
+		  minutes,
+		  num_connected);
+
+done:
+	tt = tevent_add_timer(ctdb->ev,
+			      rec,
+			      timeval_current_ofs(60, 0),
+			      maybe_log_cluster_state,
+			      rec);
+	if (tt == NULL) {
+		DBG_WARNING("Failed to set up cluster state timer\n");
+	}
+}
 
 /*
   the main monitoring loop
@@ -3131,6 +2940,19 @@ static void monitor_cluster(struct ctdb_context *ctdb)
 		exit(1);
 	}
 
+	if (ctdb->recovery_lock == NULL) {
+		struct tevent_timer *tt;
+
+		tt = tevent_add_timer(ctdb->ev,
+				      rec,
+				      timeval_current_ofs(60, 0),
+				      maybe_log_cluster_state,
+				      rec);
+		if (tt == NULL) {
+			DBG_WARNING("Failed to set up cluster state timer\n");
+		}
+	}
+
 	/* register a message port for sending memory dumps */
 	ctdb_client_set_message_handler(ctdb, CTDB_SRVID_MEM_DUMP, mem_dump_handler, rec);
 
@@ -3141,14 +2963,13 @@ static void monitor_cluster(struct ctdb_context *ctdb)
 	/* register a message port for recovery elections */
 	ctdb_client_set_message_handler(ctdb, CTDB_SRVID_ELECTION, election_handler, rec);
 
-	/* when nodes are disabled/enabled */
-	ctdb_client_set_message_handler(ctdb, CTDB_SRVID_SET_NODE_FLAGS, monitor_handler, rec);
+	ctdb_client_set_message_handler(ctdb,
+					CTDB_SRVID_SET_NODE_FLAGS,
+					srvid_not_implemented,
+					rec);
 
 	/* when we are asked to puch out a flag change */
 	ctdb_client_set_message_handler(ctdb, CTDB_SRVID_PUSH_NODE_FLAGS, push_flags_handler, rec);
-
-	/* register a message port for vacuum fetch */
-	ctdb_client_set_message_handler(ctdb, CTDB_SRVID_VACUUM_FETCH, vacuum_fetch_handler, rec);
 
 	/* register a message port for reloadnodes  */
 	ctdb_client_set_message_handler(ctdb, CTDB_SRVID_RELOAD_NODES, reload_nodes_handler, rec);
@@ -3172,11 +2993,6 @@ static void monitor_cluster(struct ctdb_context *ctdb)
 	ctdb_client_set_message_handler(ctdb,
 					CTDB_SRVID_DISABLE_RECOVERIES,
 					disable_recoveries_handler, rec);
-
-	/* register a message port for detaching database */
-	ctdb_client_set_message_handler(ctdb,
-					CTDB_SRVID_DETACH_DATABASE,
-					detach_database_handler, rec);
 
 	for (;;) {
 		TALLOC_CTX *mem_ctx = talloc_new(ctdb);

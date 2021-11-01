@@ -226,11 +226,11 @@ class BaseSortTests(samba.tests.TestCase):
                 if expected_order != received_order:
                     print(attr, ['forward', 'reverse'][rev])
                     print("expected", expected_order)
-                    print("recieved", received_order)
+                    print("received", received_order)
                     print("unnormalised:", [x[attr][0] for x in res])
                     print("unnormalised: «%s»" % '»  «'.join(str(x[attr][0])
                                                              for x in res))
-                self.assertEquals(expected_order, received_order)
+                self.assertEqual(expected_order, received_order)
 
     def _test_server_sort_binary(self):
         for attr in self.binary_sorted_keys:
@@ -247,7 +247,7 @@ class BaseSortTests(samba.tests.TestCase):
                     print(attr)
                     print(expected_order)
                     print(received_order)
-                self.assertEquals(expected_order, received_order)
+                self.assertEqual(expected_order, received_order)
 
     def _test_server_sort_us_english(self):
         # Windows doesn't support many matching rules, but does allow
@@ -273,12 +273,12 @@ class BaseSortTests(samba.tests.TestCase):
                         print(attr, lang)
                         print(['forward', 'reverse'][rev])
                         print("expected: ", expected_order)
-                        print("recieved: ", received_order)
+                        print("received: ", received_order)
                         print("unnormalised:", [x[attr][0] for x in res])
                         print("unnormalised: «%s»" % '»  «'.join(str(x[attr][0])
                                                                  for x in res))
 
-                    self.assertEquals(expected_order, received_order)
+                    self.assertEqual(expected_order, received_order)
 
     def _test_server_sort_different_attr(self):
 
@@ -322,7 +322,7 @@ class BaseSortTests(samba.tests.TestCase):
                 if expected_order != received_order:
                     print(sort_attr, result_attr, ['forward', 'reverse'][rev])
                     print("expected", expected_order)
-                    print("recieved", received_order)
+                    print("received", received_order)
                     print("unnormalised:", [x[result_attr][0] for x in res])
                     print("unnormalised: «%s»" % '»  «'.join(str(x[result_attr][0])
                                                              for x in res))
@@ -337,7 +337,7 @@ class BaseSortTests(samba.tests.TestCase):
                         print("Try with --elements=27 (or similar).")
                         print('-' * 72)
 
-                self.assertEquals(expected_order, received_order)
+                self.assertEqual(expected_order, received_order)
                 for x in res:
                     if sort_attr in x:
                         self.fail('the search for %s should not return %s' %

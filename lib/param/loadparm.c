@@ -61,6 +61,7 @@
 #include "system/network.h" /* needed for TCP_NODELAY */
 #include "../lib/util/dlinklist.h"
 #include "lib/param/param.h"
+#define LOADPARM_SUBSTITUTION_INTERNALS 1
 #include "lib/param/loadparm.h"
 #include "auth/gensec/gensec.h"
 #include "lib/param/s3_param.h"
@@ -71,6 +72,7 @@
 #include "libds/common/roles.h"
 #include "lib/util/samba_util.h"
 #include "libcli/auth/ntlm_check.h"
+#include "lib/crypto/gnutls_helpers.h"
 
 #ifdef HAVE_HTTPCONNECTENCRYPT
 #include <cups/http.h>
@@ -93,6 +95,19 @@ int lpcfg_rpc_low_port(struct loadparm_context *lp_ctx)
 int lpcfg_rpc_high_port(struct loadparm_context *lp_ctx)
 {
 	return lp_ctx->globals->rpc_high_port;
+}
+
+enum samba_weak_crypto lpcfg_weak_crypto(struct loadparm_context *lp_ctx)
+{
+	if (lp_ctx->globals->weak_crypto == SAMBA_WEAK_CRYPTO_UNKNOWN) {
+		lp_ctx->globals->weak_crypto = SAMBA_WEAK_CRYPTO_DISALLOWED;
+
+		if (samba_gnutls_weak_crypto_allowed()) {
+			lp_ctx->globals->weak_crypto = SAMBA_WEAK_CRYPTO_ALLOWED;
+		}
+	}
+
+	return lp_ctx->globals->weak_crypto;
 }
 
 /**
@@ -157,13 +172,13 @@ static const char *lpcfg_string(const char *s)
 /* this global context supports the lp_*() function varients */
 static struct loadparm_context *global_loadparm_context;
 
-#define FN_GLOBAL_STRING(fn_name,var_name) \
- _PUBLIC_ char *lpcfg_ ## fn_name(struct loadparm_context *lp_ctx, TALLOC_CTX *ctx) {\
+#define FN_GLOBAL_SUBSTITUTED_STRING(fn_name,var_name) \
+ _PUBLIC_ char *lpcfg_ ## fn_name(struct loadparm_context *lp_ctx, \
+		 const struct loadparm_substitution *lp_sub, TALLOC_CTX *mem_ctx) \
+{ \
 	 if (lp_ctx == NULL) return NULL;				\
-	 if (lp_ctx->s3_fns) {						\
-		 return lp_ctx->globals->var_name ? lp_ctx->s3_fns->lp_string(ctx, lp_ctx->globals->var_name) : talloc_strdup(ctx, ""); \
-	 }								\
-	 return lp_ctx->globals->var_name ? talloc_strdup(ctx, lpcfg_string(lp_ctx->globals->var_name)) : talloc_strdup(ctx, ""); \
+	 return lpcfg_substituted_string(mem_ctx, lp_sub, \
+			 lp_ctx->globals->var_name ? lp_ctx->globals->var_name : ""); \
 }
 
 #define FN_GLOBAL_CONST_STRING(fn_name,var_name)				\
@@ -192,7 +207,7 @@ static struct loadparm_context *global_loadparm_context;
 /* Local parameters don't need the ->s3_fns because the struct
  * loadparm_service is shared and lpcfg_service() checks the ->s3_fns
  * hook */
-#define FN_LOCAL_STRING(fn_name,val) \
+#define FN_LOCAL_SUBSTITUTED_STRING(fn_name,val) \
  _PUBLIC_ char *lpcfg_ ## fn_name(struct loadparm_service *service, \
 					struct loadparm_service *sDefault, TALLOC_CTX *ctx) { \
 	 return(talloc_strdup(ctx, lpcfg_string((const char *)((service != NULL && service->val != NULL) ? service->val : sDefault->val)))); \
@@ -1445,7 +1460,7 @@ bool handle_smb_ports(struct loadparm_context *lp_ctx, struct loadparm_service *
 		}
 	}
 
-	if(!set_variable_helper(lp_ctx->globals->ctx, parm_num, ptr, "smb ports",
+	if (!set_variable_helper(lp_ctx->globals->ctx, parm_num, ptr, "smb ports",
 			       	pszParmValue)) {
 		return false;
 	}
@@ -1474,8 +1489,16 @@ bool handle_rpc_server_dynamic_port_range(struct loadparm_context *lp_ctx,
 					  const char *pszParmValue,
 					  char **ptr)
 {
+	static int parm_num = -1;
 	int low_port = -1, high_port = -1;
 	int rc;
+
+	if (parm_num == -1) {
+		parm_num = lpcfg_map_parameter("rpc server dynamic port range");
+		if (parm_num == -1) {
+			return false;
+		}
+	}
 
 	if (pszParmValue == NULL || pszParmValue[0] == '\0') {
 		return false;
@@ -1491,6 +1514,12 @@ bool handle_rpc_server_dynamic_port_range(struct loadparm_context *lp_ctx,
 	}
 
 	if (low_port < SERVER_TCP_PORT_MIN|| high_port > SERVER_TCP_PORT_MAX) {
+		return false;
+	}
+
+	if (!set_variable_helper(lp_ctx->globals->ctx, parm_num, ptr,
+				 "rpc server dynamic port range",
+				 pszParmValue)) {
 		return false;
 	}
 
@@ -1834,8 +1863,15 @@ bool lpcfg_do_global_parameter(struct loadparm_context *lp_ctx,
 	}
 
 	if (parm_table[parmnum].flags & FLAG_DEPRECATED) {
-		DEBUG(1, ("WARNING: The \"%s\" option is deprecated\n",
-			  pszParmName));
+		char *suppress_env = getenv("SAMBA_DEPRECATED_SUPPRESS");
+		bool print_warning = (suppress_env == NULL
+				      || suppress_env[0] == '\0');
+		if (print_warning) {
+			DBG_WARNING("WARNING: The \"%s\" option "
+				    "is deprecated\n",
+				    pszParmName);
+
+		}
 	}
 
 	parm_ptr = lpcfg_parm_ptr(lp_ctx, NULL, &parm_table[parmnum]);
@@ -1867,8 +1903,15 @@ bool lpcfg_do_service_parameter(struct loadparm_context *lp_ctx,
 	}
 
 	if (parm_table[parmnum].flags & FLAG_DEPRECATED) {
-		DEBUG(1, ("WARNING: The \"%s\" option is deprecated\n",
-			  pszParmName));
+		char *suppress_env = getenv("SAMBA_DEPRECATED_SUPPRESS");
+		bool print_warning = (suppress_env == NULL
+				      || suppress_env[0] == '\0');
+		if (print_warning) {
+			DBG_WARNING("WARNING: The \"%s\" option "
+				    "is deprecated\n",
+				    pszParmName);
+
+		}
 	}
 
 	if (parm_table[parmnum].p_class == P_GLOBAL) {
@@ -2592,6 +2635,7 @@ struct loadparm_context *loadparm_init(TALLOC_CTX *mem_ctx)
 	lp_ctx->globals->ctx = lp_ctx->globals;
 	lp_ctx->globals->rpc_low_port = SERVER_TCP_LOW_PORT;
 	lp_ctx->globals->rpc_high_port = SERVER_TCP_HIGH_PORT;
+	lp_ctx->globals->weak_crypto = SAMBA_WEAK_CRYPTO_UNKNOWN;
 	lp_ctx->sDefault = talloc_zero(lp_ctx, struct loadparm_service);
 	lp_ctx->flags = talloc_zero_array(lp_ctx, unsigned int, num_parameters());
 
@@ -2788,9 +2832,10 @@ struct loadparm_context *loadparm_init(TALLOC_CTX *mem_ctx)
 	lpcfg_do_global_parameter(lp_ctx, "tls keyfile", "tls/key.pem");
 	lpcfg_do_global_parameter(lp_ctx, "tls certfile", "tls/cert.pem");
 	lpcfg_do_global_parameter(lp_ctx, "tls cafile", "tls/ca.pem");
-	lpcfg_do_global_parameter(lp_ctx, "tls priority", "NORMAL:-VERS-SSL3.0");
+	lpcfg_do_global_parameter(lp_ctx,
+				  "tls priority",
+				  "NORMAL:-VERS-SSL3.0");
 
-	lpcfg_do_global_parameter(lp_ctx, "rndc command", "/usr/sbin/rndc");
 	lpcfg_do_global_parameter(lp_ctx, "nsupdate command", "/usr/bin/nsupdate -g");
 
         lpcfg_do_global_parameter(lp_ctx, "allow dns updates", "secure only");
@@ -3025,6 +3070,19 @@ struct loadparm_context *loadparm_init(TALLOC_CTX *mem_ctx)
 
 	lpcfg_do_global_parameter(lp_ctx, "debug encryption", "no");
 
+	lpcfg_do_global_parameter(lp_ctx, "spotlight backend", "noindex");
+
+	lpcfg_do_global_parameter(
+		lp_ctx, "ldap max anonymous request size", "256000");
+	lpcfg_do_global_parameter(
+		lp_ctx, "ldap max authenticated request size", "16777216");
+	lpcfg_do_global_parameter(
+		lp_ctx, "ldap max search request size", "256000");
+
+	lpcfg_do_global_parameter(lp_ctx,
+				  "min domain uid",
+				  "1000");
+
 	for (i = 0; parm_table[i].label; i++) {
 		if (!(lp_ctx->flags[i] & FLAG_CMDLINE)) {
 			lp_ctx->flags[i] |= FLAG_DEFAULT;
@@ -3102,14 +3160,17 @@ const char *lp_default_path(void)
 static bool lpcfg_update(struct loadparm_context *lp_ctx)
 {
 	struct debug_settings settings;
+	int max_protocol, min_protocol;
 	TALLOC_CTX *tmp_ctx;
+	const struct loadparm_substitution *lp_sub =
+		lpcfg_noop_substitution();
 
 	tmp_ctx = talloc_new(lp_ctx);
 	if (tmp_ctx == NULL) {
 		return false;
 	}
 
-	lpcfg_add_auto_services(lp_ctx, lpcfg_auto_services(lp_ctx, tmp_ctx));
+	lpcfg_add_auto_services(lp_ctx, lpcfg_auto_services(lp_ctx, lp_sub, tmp_ctx));
 
 	if (!lp_ctx->globals->wins_server_list && lp_ctx->globals->we_are_a_wins_server) {
 		lpcfg_do_global_parameter(lp_ctx, "wins server", "127.0.0.1");
@@ -3133,6 +3194,7 @@ static bool lpcfg_update(struct loadparm_context *lp_ctx)
 	settings.debug_pid = lp_ctx->globals->debug_pid;
 	settings.debug_uid = lp_ctx->globals->debug_uid;
 	settings.debug_class = lp_ctx->globals->debug_class;
+	settings.max_log_size = lp_ctx->globals->max_log_size;
 	debug_set_settings(&settings, lp_ctx->globals->logging,
 			   lp_ctx->globals->syslog,
 			   lp_ctx->globals->syslog_only);
@@ -3143,6 +3205,19 @@ static bool lpcfg_update(struct loadparm_context *lp_ctx)
 		setenv("SOCKET_TESTNONBLOCK", "1", 1);
 	} else {
 		unsetenv("SOCKET_TESTNONBLOCK");
+	}
+
+	/* Check if command line max protocol < min protocol, if so
+	 * report a warning to the user.
+	 */
+	max_protocol = lpcfg_client_max_protocol(lp_ctx);
+	min_protocol = lpcfg_client_min_protocol(lp_ctx);
+	if (lpcfg_client_max_protocol(lp_ctx) < lpcfg_client_min_protocol(lp_ctx)) {
+		const char *max_protocolp, *min_protocolp;
+		max_protocolp = lpcfg_get_smb_protocol(max_protocol);
+		min_protocolp = lpcfg_get_smb_protocol(min_protocol);
+		DBG_ERR("Max protocol %s is less than min protocol %s.\n",
+			max_protocolp, min_protocolp);
 	}
 
 	TALLOC_FREE(tmp_ctx);
@@ -3175,9 +3250,12 @@ static bool lpcfg_load_internal(struct loadparm_context *lp_ctx,
 	char *n2;
 	bool bRetval;
 
-	filename = talloc_strdup(lp_ctx, filename);
+	if (lp_ctx->szConfigFile != NULL) {
+		talloc_free(discard_const_p(char, lp_ctx->szConfigFile));
+		lp_ctx->szConfigFile = NULL;
+	}
 
-	lp_ctx->szConfigFile = filename;
+	lp_ctx->szConfigFile = talloc_strdup(lp_ctx, filename);
 
 	if (lp_ctx->s3_fns) {
 		return lp_ctx->s3_fns->load(filename);
@@ -3568,4 +3646,32 @@ bool lpcfg_lanman_auth(struct loadparm_context *lp_ctx)
 	} else {
 		return false;
 	}
+}
+
+static char *lpcfg_noop_substitution_fn(
+			TALLOC_CTX *mem_ctx,
+			const struct loadparm_substitution *lp_sub,
+			const char *raw_value,
+			void *private_data)
+{
+	return talloc_strdup(mem_ctx, raw_value);
+}
+
+static const struct loadparm_substitution global_noop_substitution = {
+	.substituted_string_fn = lpcfg_noop_substitution_fn,
+};
+
+const struct loadparm_substitution *lpcfg_noop_substitution(void)
+{
+	return &global_noop_substitution;
+}
+
+char *lpcfg_substituted_string(TALLOC_CTX *mem_ctx,
+			       const struct loadparm_substitution *lp_sub,
+			       const char *raw_value)
+{
+	return lp_sub->substituted_string_fn(mem_ctx,
+					     lp_sub,
+					     raw_value,
+					     lp_sub->private_data);
 }

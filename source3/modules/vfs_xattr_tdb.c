@@ -38,7 +38,12 @@ static int xattr_tdb_get_file_id(struct vfs_handle_struct *handle,
 	TALLOC_CTX *frame = talloc_stackframe();
 	struct smb_filename *smb_fname;
 
-	smb_fname = synthetic_smb_fname(frame, path, NULL, NULL, 0);
+	smb_fname = synthetic_smb_fname(frame,
+					path,
+					NULL,
+					NULL,
+					0,
+					0);
 	if (smb_fname == NULL) {
 		TALLOC_FREE(frame);
 		errno = ENOMEM;
@@ -487,20 +492,24 @@ static bool xattr_tdb_init(int snum, TALLOC_CTX *mem_ctx, struct db_context **p_
 	return true;
 }
 
-static int xattr_tdb_open(vfs_handle_struct *handle,
-			struct smb_filename *smb_fname,
-			files_struct *fsp,
-			int flags,
-			mode_t mode)
+static int xattr_tdb_openat(struct vfs_handle_struct *handle,
+			    const struct files_struct *dirfsp,
+			    const struct smb_filename *smb_fname,
+			    struct files_struct *fsp,
+			    int flags,
+			    mode_t mode)
 {
 	struct db_context *db = NULL;
 	TALLOC_CTX *frame = NULL;
+	SMB_STRUCT_STAT sbuf;
 	int ret;
 
-	fsp->fh->fd = SMB_VFS_NEXT_OPEN(handle,
-				smb_fname, fsp,
-				flags,
-				mode);
+	fsp->fh->fd = SMB_VFS_NEXT_OPENAT(handle,
+					  dirfsp,
+					  smb_fname,
+					  fsp,
+					  flags,
+					  mode);
 
 	if (fsp->fh->fd < 0) {
 		return fsp->fh->fd;
@@ -515,17 +524,19 @@ static int xattr_tdb_open(vfs_handle_struct *handle,
 	 * We must have created the file.
 	 */
 
-	ret = SMB_VFS_FSTAT(fsp, &smb_fname->st);
+	ret = SMB_VFS_FSTAT(fsp, &sbuf);
 	if (ret == -1) {
 		/* Can't happen... */
 		DBG_WARNING("SMB_VFS_FSTAT failed on file %s (%s)\n",
-			smb_fname_str_dbg(smb_fname),
-			strerror(errno));
+			    smb_fname_str_dbg(smb_fname),
+			    strerror(errno));
 		return -1;
 	}
-	fsp->file_id = SMB_VFS_FILE_ID_CREATE(fsp->conn, &smb_fname->st);
+
+	fsp->file_id = SMB_VFS_FILE_ID_CREATE(fsp->conn, &sbuf);
 
 	frame = talloc_stackframe();
+
 	SMB_VFS_HANDLE_GET_DATA(handle, db, struct db_context,
 				if (!xattr_tdb_init(-1, frame, &db))
 				{
@@ -533,11 +544,13 @@ static int xattr_tdb_open(vfs_handle_struct *handle,
 				});
 
 	xattr_tdb_remove_all_attrs(db, &fsp->file_id);
+
 	TALLOC_FREE(frame);
 	return fsp->fh->fd;
 }
 
-static int xattr_tdb_mkdir(vfs_handle_struct *handle,
+static int xattr_tdb_mkdirat(vfs_handle_struct *handle,
+		struct files_struct *dirfsp,
 		const struct smb_filename *smb_fname,
 		mode_t mode)
 {
@@ -547,7 +560,10 @@ static int xattr_tdb_mkdir(vfs_handle_struct *handle,
 	int ret;
 	struct smb_filename *smb_fname_tmp = NULL;
 
-	ret = SMB_VFS_NEXT_MKDIR(handle, smb_fname, mode);
+	ret = SMB_VFS_NEXT_MKDIRAT(handle,
+				dirfsp,
+				smb_fname,
+				mode);
 	if (ret < 0) {
 		return ret;
 	}
@@ -589,8 +605,10 @@ static int xattr_tdb_mkdir(vfs_handle_struct *handle,
 /*
  * On unlink we need to delete the tdb record
  */
-static int xattr_tdb_unlink(vfs_handle_struct *handle,
-			    const struct smb_filename *smb_fname)
+static int xattr_tdb_unlinkat(vfs_handle_struct *handle,
+			struct files_struct *dirfsp,
+			const struct smb_filename *smb_fname,
+			int flags)
 {
 	struct smb_filename *smb_fname_tmp = NULL;
 	struct file_id id;
@@ -621,12 +639,20 @@ static int xattr_tdb_unlink(vfs_handle_struct *handle,
 		goto out;
 	}
 
-	if (smb_fname_tmp->st.st_ex_nlink == 1) {
-		/* Only remove record on last link to file. */
+	if (flags & AT_REMOVEDIR) {
+		/* Always remove record when removing a directory succeeds. */
 		remove_record = true;
+	} else {
+		if (smb_fname_tmp->st.st_ex_nlink == 1) {
+			/* Only remove record on last link to file. */
+			remove_record = true;
+		}
 	}
 
-	ret = SMB_VFS_NEXT_UNLINK(handle, smb_fname_tmp);
+	ret = SMB_VFS_NEXT_UNLINKAT(handle,
+				dirfsp,
+				smb_fname_tmp,
+				flags);
 
 	if (ret == -1) {
 		goto out;
@@ -643,46 +669,6 @@ static int xattr_tdb_unlink(vfs_handle_struct *handle,
  out:
 	TALLOC_FREE(frame);
 	return ret;
-}
-
-/*
- * On rmdir we need to delete the tdb record
- */
-static int xattr_tdb_rmdir(vfs_handle_struct *handle,
-			const struct smb_filename *smb_fname)
-{
-	SMB_STRUCT_STAT sbuf;
-	struct file_id id;
-	struct db_context *db;
-	int ret;
-	TALLOC_CTX *frame = talloc_stackframe();
-
-	SMB_VFS_HANDLE_GET_DATA(handle, db, struct db_context,
-				if (!xattr_tdb_init(-1, frame, &db))
-				{
-					TALLOC_FREE(frame); return -1;
-				});
-
-	if (vfs_stat_smb_basename(handle->conn,
-				smb_fname,
-				&sbuf) == -1) {
-		TALLOC_FREE(frame);
-		return -1;
-	}
-
-	ret = SMB_VFS_NEXT_RMDIR(handle, smb_fname);
-
-	if (ret == -1) {
-		TALLOC_FREE(frame);
-		return -1;
-	}
-
-	id = SMB_VFS_NEXT_FILE_ID_CREATE(handle, &sbuf);
-
-	xattr_tdb_remove_all_attrs(db, &id);
-
-	TALLOC_FREE(frame);
-	return 0;
 }
 
 /*
@@ -740,10 +726,9 @@ static struct vfs_fn_pointers vfs_xattr_tdb_fns = {
 	.flistxattr_fn = xattr_tdb_flistxattr,
 	.removexattr_fn = xattr_tdb_removexattr,
 	.fremovexattr_fn = xattr_tdb_fremovexattr,
-	.open_fn = xattr_tdb_open,
-	.mkdir_fn = xattr_tdb_mkdir,
-	.unlink_fn = xattr_tdb_unlink,
-	.rmdir_fn = xattr_tdb_rmdir,
+	.openat_fn = xattr_tdb_openat,
+	.mkdirat_fn = xattr_tdb_mkdirat,
+	.unlinkat_fn = xattr_tdb_unlinkat,
 	.connect_fn = xattr_tdb_connect,
 };
 

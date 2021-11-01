@@ -8,11 +8,11 @@ Forwarded: http://bugs.debian.org/cgi-bin/bugreport.cgi?bug=221618#27
  1 file changed, 10 insertions(+)
 
 diff --git a/source3/include/libsmbclient.h b/source3/include/libsmbclient.h
-index cf67b1d..ff9ed53 100644
+index c47e7c2a872..8f9eb93c97a 100644
 --- a/source3/include/libsmbclient.h
 +++ b/source3/include/libsmbclient.h
-@@ -80,6 +80,16 @@ extern "C" {
- #include <fcntl.h>
+@@ -81,6 +81,16 @@ extern "C" {
+ #include <time.h>
  #include <utime.h>
  
 +  /* Debian bug #221618 */

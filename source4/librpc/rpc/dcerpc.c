@@ -26,6 +26,8 @@
 #include "lib/events/events.h"
 #include "librpc/rpc/dcerpc.h"
 #include "librpc/rpc/dcerpc_proto.h"
+#include "librpc/rpc/dcerpc_util.h"
+#include "librpc/rpc/dcerpc_pkt_auth.h"
 #include "librpc/gen_ndr/ndr_misc.h"
 #include "librpc/gen_ndr/ndr_dcerpc.h"
 #include "auth/gensec/gensec.h"
@@ -144,7 +146,7 @@ static struct dcecli_connection *dcerpc_connection_init(TALLOC_CTX *mem_ctx,
 	c->security_state.auth_type = DCERPC_AUTH_TYPE_NONE;
 	c->security_state.auth_level = DCERPC_AUTH_LEVEL_NONE;
 	c->security_state.auth_context_id = 0;
-	c->security_state.session_key = dcerpc_generic_session_key;
+	c->security_state.session_key = dcecli_generic_session_key;
 	c->security_state.generic_state = NULL;
 	c->flags = 0;
 	/*
@@ -724,6 +726,7 @@ static NTSTATUS ncacn_pull_pkt_auth(struct dcecli_connection *c,
 
 	status = dcerpc_ncacn_pull_pkt_auth(&tmp_auth,
 					    c->security_state.generic_state,
+					    true, /* check_pkt_auth_fields */
 					    mem_ctx,
 					    ptype,
 					    required_flags,
@@ -1041,8 +1044,10 @@ struct tevent_req *dcerpc_bind_send(TALLOC_CTX *mem_ctx,
 	pkt.u.bind.auth_info = data_blob(NULL, 0);
 
 	/* construct the NDR form of the packet */
-	status = ncacn_push_auth(&blob, state, &pkt,
-				 p->conn->security_state.tmp_auth_info.out);
+	status = dcerpc_ncacn_push_auth(&blob,
+				state,
+				&pkt,
+				p->conn->security_state.tmp_auth_info.out);
 	if (tevent_req_nterror(req, status)) {
 		return tevent_req_post(req, ev);
 	}
@@ -1290,8 +1295,10 @@ NTSTATUS dcerpc_auth3(struct dcerpc_pipe *p,
 	}
 
 	/* construct the NDR form of the packet */
-	status = ncacn_push_auth(&blob, mem_ctx, &pkt,
-				 p->conn->security_state.tmp_auth_info.out);
+	status = dcerpc_ncacn_push_auth(&blob,
+				mem_ctx,
+				&pkt,
+				p->conn->security_state.tmp_auth_info.out);
 	if (!NT_STATUS_IS_OK(status)) {
 		return status;
 	}
@@ -2126,8 +2133,10 @@ struct tevent_req *dcerpc_alter_context_send(TALLOC_CTX *mem_ctx,
 	pkt.u.alter.auth_info = data_blob(NULL, 0);
 
 	/* construct the NDR form of the packet */
-	status = ncacn_push_auth(&blob, state, &pkt,
-				 p->conn->security_state.tmp_auth_info.out);
+	status = dcerpc_ncacn_push_auth(&blob,
+				state,
+				&pkt,
+				p->conn->security_state.tmp_auth_info.out);
 	if (tevent_req_nterror(req, status)) {
 		return tevent_req_post(req, ev);
 	}

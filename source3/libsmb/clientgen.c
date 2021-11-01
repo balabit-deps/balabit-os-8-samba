@@ -28,21 +28,6 @@
 #include "../librpc/ndr/libndr.h"
 #include "../include/client.h"
 
-/*******************************************************************
- Setup the word count and byte count for a client smb message.
-********************************************************************/
-
-int cli_set_message(char *buf,int num_words,int num_bytes,bool zero)
-{
-	if (zero && (num_words || num_bytes)) {
-		memset(buf + smb_size,'\0',num_words*2 + num_bytes);
-	}
-	SCVAL(buf,smb_wct,num_words);
-	SSVAL(buf,smb_vwv + num_words*SIZEOFWORD,num_bytes);
-	smb_setlen(buf,smb_size + num_words*2 + num_bytes - 4);
-	return (smb_size + num_words*2 + num_bytes);
-}
-
 /****************************************************************************
  Change the timeout (in milliseconds).
 ****************************************************************************/
@@ -146,20 +131,6 @@ struct cli_state *cli_state_create(TALLOC_CTX *mem_ctx,
 
 	if (flags & CLI_FULL_CONNECTION_DONT_SPNEGO) {
 		use_spnego = false;
-	} else if (flags & CLI_FULL_CONNECTION_USE_KERBEROS) {
-		cli->use_kerberos = true;
-	}
-	if ((flags & CLI_FULL_CONNECTION_FALLBACK_AFTER_KERBEROS) &&
-	     cli->use_kerberos) {
-		cli->fallback_after_kerberos = true;
-	}
-
-	if (flags & CLI_FULL_CONNECTION_USE_CCACHE) {
-		cli->use_ccache = true;
-	}
-
-	if (flags & CLI_FULL_CONNECTION_USE_NT_HASH) {
-		cli->pw_nt_hash = true;
 	}
 
 	if (flags & CLI_FULL_CONNECTION_OPLOCKS) {
@@ -381,11 +352,37 @@ uint32_t cli_state_set_tid(struct cli_state *cli, uint32_t tid)
 
 struct smbXcli_tcon *cli_state_save_tcon(struct cli_state *cli)
 {
+	/*
+	 * Note. This used to make a deep copy of either
+	 * cli->smb2.tcon or cli->smb1.tcon, but this leaves
+	 * the original pointer in place which will then get
+	 * TALLOC_FREE()'d when the new connection is made on
+	 * this cli_state.
+	 *
+	 * As there may be pipes open on the old connection with
+	 * talloc'ed state allocated using the tcon pointer as a
+	 * parent we can't deep copy and then free this as that
+	 * closes the open pipes.
+	 *
+	 * This call is used to temporarily swap out a tcon pointer
+	 * to allow a new tcon on the same cli_state.
+	 *
+	 * Just return the raw pointer and set the old value to NULL.
+	 * We know we MUST be calling cli_state_restore_tcon() below
+	 * to restore before closing the session.
+	 *
+	 * See BUG: https://bugzilla.samba.org/show_bug.cgi?id=13992
+	 */
+	struct smbXcli_tcon *tcon_ret = NULL;
+
 	if (smbXcli_conn_protocol(cli->conn) >= PROTOCOL_SMB2_02) {
-		return smbXcli_tcon_copy(cli, cli->smb2.tcon);
+		tcon_ret = cli->smb2.tcon;
+		cli->smb2.tcon = NULL; /* *Not* TALLOC_FREE(). */
 	} else {
-		return smbXcli_tcon_copy(cli, cli->smb1.tcon);
+		tcon_ret = cli->smb1.tcon;
+		cli->smb1.tcon = NULL; /* *Not* TALLOC_FREE(). */
 	}
+	return tcon_ret;
 }
 
 void cli_state_restore_tcon(struct cli_state *cli, struct smbXcli_tcon *tcon)

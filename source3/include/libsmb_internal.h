@@ -38,7 +38,7 @@
 /*
  * DOS Attribute values (used internally)
  */
-typedef struct DOS_ATTR_DESC {
+struct DOS_ATTR_DESC {
 	int mode;
 	off_t size;
 	time_t create_time;
@@ -46,7 +46,7 @@ typedef struct DOS_ATTR_DESC {
 	time_t write_time;
 	time_t change_time;
 	SMB_INO_T inode;
-} DOS_ATTR_DESC;
+};
 
 /*
  * Extension of libsmbclient.h's #defines
@@ -65,8 +65,6 @@ typedef struct DOS_ATTR_DESC {
 #define SMBC_XATTR_MODE_CHOWN        5
 #define SMBC_XATTR_MODE_CHGRP        6
 
-#define CREATE_ACCESS_READ      READ_CONTROL_ACCESS
-
 /*We should test for this in configure ... */
 #ifndef ENOTSUP
 #define ENOTSUP EOPNOTSUPP
@@ -76,7 +74,6 @@ typedef struct DOS_ATTR_DESC {
 struct _SMBCSRV {
 	struct cli_state *cli;
 	dev_t dev;
-	bool try_posixinfo;
 	bool no_pathinfo;
 	bool no_pathinfo2;
 	bool no_pathinfo3;
@@ -98,6 +95,7 @@ struct smbc_dir_list {
 struct smbc_dirplus_list {
 	struct smbc_dirplus_list *next;
 	struct libsmb_file_info *smb_finfo;
+	uint64_t ino;
 };
 
 /*
@@ -306,6 +304,11 @@ const struct libsmb_file_info *
 SMBC_readdirplus_ctx(SMBCCTX *context,
                      SMBCFILE *dir);
 
+const struct libsmb_file_info *
+SMBC_readdirplus2_ctx(SMBCCTX *context,
+		SMBCFILE *dir,
+		struct stat *st);
+
 int
 SMBC_getdents_ctx(SMBCCTX *context,
                   SMBCFILE *dir,
@@ -406,10 +409,10 @@ SMBC_getatr(SMBCCTX * context,
 
 bool
 SMBC_setatr(SMBCCTX * context, SMBCSRV *srv, char *path,
-            time_t create_time,
-            time_t access_time,
-            time_t write_time,
-            time_t change_time,
+            struct timespec create_time,
+            struct timespec access_time,
+            struct timespec write_time,
+            struct timespec change_time,
             uint16_t mode);
 
 off_t
@@ -425,8 +428,7 @@ SMBC_ftruncate_ctx(SMBCCTX *context,
 
 
 /* Functions in libsmb_misc.c */
-int
-SMBC_dlist_contains(SMBCFILE * list, SMBCFILE *p);
+bool SMBC_dlist_contains(SMBCFILE * list, SMBCFILE *p);
 
 int
 SMBC_errno(SMBCCTX *context,

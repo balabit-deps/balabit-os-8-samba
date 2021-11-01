@@ -29,7 +29,7 @@ bld.SAMBA3_BINARY('smbtree',
                  deps='''
                  talloc
                  smbconf
-                 libsmb
+                 smbclient
                  msrpc3
                  popt_samba3_cmdline
                  RPC_NDR_SRVSVC''')
@@ -175,12 +175,14 @@ bld.SAMBA3_BINARY('testparm',
                  smbconf
                  popt_samba3
                  cmdline_contexts
+                 GNUTLS_HELPERS
                  ''')
 
 bld.SAMBA3_BINARY('net',
                  source='''net.c
                  net_ads.c
                  net_help.c
+                 clirap2.c
                  net_rap.c
                  net_rpc.c
                  net_rpc_samsync.c
@@ -224,10 +226,11 @@ bld.SAMBA3_BINARY('net',
                  net_afs.c
                  net_notify.c
                  net_tdb.c
-                 ../registry/reg_parse.c
+                 net_vfs.c
                  ../registry/reg_format.c
                  ../registry/reg_import.c
                  net_registry_util.c
+                 ../lib/util_sd.c
                  net_help_common.c''',
                  deps='''
                  talloc
@@ -269,6 +272,7 @@ bld.SAMBA3_BINARY('net',
                  CONN_TDB
                  jansson
                  common_auth
+                 ADOUBLE
                  ''')
 
 bld.SAMBA3_BINARY('mvxattr',
@@ -307,3 +311,17 @@ bld.SAMBA3_BINARY('smbstatus',
                       PROFILE
                       CONN_TDB
                       ''')
+
+bld.SAMBA3_BINARY('mdfind',
+                 source='mdfind.c',
+                 deps='''
+                 talloc
+                 tevent
+                 smbconf
+                 popt_samba3
+                 popt_samba3_cmdline
+                 libsmb
+                 msrpc3
+                 RPCCLI_MDSSVC
+                 mdssvc
+                 ''')

@@ -183,7 +183,7 @@ static int lmdb_store(struct ldb_kv_private *ldb_kv,
 
 	if (flags == TDB_INSERT) {
 		mdb_flags = MDB_NOOVERWRITE;
-	} else if ((flags == TDB_MODIFY)) {
+	} else if (flags == TDB_MODIFY) {
 		/*
 		 * Modifying a record, ensure that it exists.
 		 * This mimics the TDB semantics
@@ -640,6 +640,23 @@ static int lmdb_transaction_start(struct ldb_kv_private *ldb_kv)
 		lmdb->error = MDB_BAD_TXN;
 		return LDB_ERR_PROTOCOL_ERROR;
 	}
+
+	/*
+	 * Clear out any stale readers
+	 */
+	{
+		int stale = 0;
+		mdb_reader_check(lmdb->env, &stale);
+		if (stale > 0) {
+			ldb_debug(
+				lmdb->ldb,
+				LDB_DEBUG_ERROR,
+				"LMDB Stale readers, deleted (%d)",
+				stale);
+		}
+	}
+
+
 
 	ltx_head = lmdb_private_trans_head(lmdb);
 

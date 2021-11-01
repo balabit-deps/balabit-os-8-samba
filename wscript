@@ -47,6 +47,25 @@ def options(opt):
     opt.RECURSE('lib/crypto')
     opt.RECURSE('ctdb')
 
+# Optional Libraries
+# ------------------
+#
+# Most of the calls to opt.add_option() use default=True for the --with case
+#
+# To assist users and distributors to build Samba with the full feature
+# set, the build system will abort if our dependent libraries and their
+# header files are not found on the target system.  This will mean for
+# example, that xattr, acl and ldap headers must be installed for the
+# default build to complete.  The configure system will check for these
+# headers, and the error message will indicate the option (such as
+# --without-acl-support) that can be specified to skip this requirement.
+#
+# This will assist users and in particular distributors in building fully
+# functional packages, while allowing those on systems truly without these
+# facilities to continue to build Samba after careful consideration.
+#
+# It also ensures our container image generation in bootstrap/ is correct
+# as otherwise a missing package there would just silently work
 
     opt.samba_add_onoff_option('pthreadpool', with_name="enable", without_name="disable", default=True)
 
@@ -129,11 +148,21 @@ def configure(conf):
         conf.env.DEVELOPER = True
         # if we are in a git tree without a pre-commit hook, install a
         # simple default.
-        pre_commit_hook = os.path.join(Context.g_module.top, '.git/hooks/pre-commit')
-        if (os.path.isdir(os.path.dirname(pre_commit_hook)) and
-            not os.path.exists(pre_commit_hook)):
-            shutil.copy(os.path.join(Context.g_module.top, 'script/git-hooks/pre-commit-hook'),
-                        pre_commit_hook)
+        # we need git for 'waf dist'
+        githooksdir = None
+        conf.find_program('git', var='GIT')
+        if 'GIT' in conf.env:
+            githooksdir = conf.CHECK_COMMAND('%s rev-parse --git-path hooks' % conf.env.GIT[0],
+                               msg='Finding githooks directory',
+                               define=None,
+                               on_target=False)
+        if githooksdir and os.path.isdir(githooksdir):
+            pre_commit_hook = os.path.join(githooksdir, 'pre-commit')
+            if not os.path.exists(pre_commit_hook):
+                Logs.info("Installing script/git-hooks/pre-commit-hook as %s" %
+                          pre_commit_hook)
+                shutil.copy(os.path.join(Context.g_module.top, 'script/git-hooks/pre-commit-hook'),
+                            pre_commit_hook)
 
     conf.ADD_EXTRA_INCLUDES('#include/public #source4 #lib #source4/lib #source4/include #include #lib/replace')
 
@@ -167,13 +196,14 @@ def configure(conf):
     conf.RECURSE('dynconfig')
     conf.RECURSE('selftest')
 
+    conf.CHECK_CFG(package='zlib', minversion='1.2.3',
+                   args='--cflags --libs',
+                   mandatory=True)
+    conf.CHECK_FUNCS_IN('inflateInit2', 'z')
+
     if conf.CHECK_FOR_THIRD_PARTY():
         conf.RECURSE('third_party')
     else:
-        if not conf.CHECK_ZLIB():
-            raise Errors.WafError('zlib development packages have not been found.\nIf third_party is installed, check that it is in the proper place.')
-        else:
-            conf.define('USING_SYSTEM_ZLIB',1)
 
         if not conf.CHECK_POPT():
             raise Errors.WafError('popt development packages have not been found.\nIf third_party is installed, check that it is in the proper place.')
@@ -320,7 +350,8 @@ def configure(conf):
     # allows us to find problems on our development hosts faster.
     # It also results in faster load time.
 
-    conf.env.asneeded_ldflags = conf.ADD_LDFLAGS('-Wl,--as-needed', testflags=True)
+    if conf.CHECK_LDFLAGS('-Wl,--as-needed'):
+        conf.env.append_unique('LINKFLAGS', '-Wl,--as-needed')
 
     if not conf.CHECK_NEED_LC("-lc not needed"):
         conf.ADD_LDFLAGS('-lc', testflags=False)
@@ -418,10 +449,9 @@ def wafdocs(ctx):
     os.system('pwd')
     list = recursive_dirlist('../buildtools/wafsamba', '.', pattern='*.py')
 
-    cmd='PYTHONPATH=bin/python pydoctor --project-name=wafsamba --project-url=http://www.samba.org --make-html --docformat=restructuredtext'
     print(list)
-    for f in list:
-        cmd += ' --add-module %s' % f
+    cmd='PYTHONPATH=bin/python pydoctor --project-name=wafsamba --project-url=http://www.samba.org --make-html --docformat=restructuredtext' +\
+        "".join(' --add-module %s' % f for f in list)
     print("Running: %s" % cmd)
     status = os.system(cmd)
     if os.WEXITSTATUS(status):

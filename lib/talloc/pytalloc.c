@@ -37,7 +37,7 @@ static PyObject *pytalloc_report_full(PyObject *self, PyObject *args)
 	} else {
 		talloc_report_full(pytalloc_get_mem_ctx(py_obj), stdout);
 	}
-	return Py_None;
+	Py_RETURN_NONE;
 }
 
 /* enable null tracking */
@@ -45,7 +45,7 @@ static PyObject *pytalloc_enable_null_tracking(PyObject *self,
 		PyObject *Py_UNUSED(ignored))
 {
 	talloc_enable_null_tracking();
-	return Py_None;
+	Py_RETURN_NONE;
 }
 
 /* return the number of talloc blocks */
@@ -70,7 +70,7 @@ static PyMethodDef talloc_methods[] = {
 		"enable tracking of the NULL object"},
 	{ "total_blocks", (PyCFunction)pytalloc_total_blocks, METH_VARARGS,
 		"return talloc block count"},
-	{ NULL }
+	{0}
 };
 
 /**

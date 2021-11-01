@@ -22,12 +22,19 @@
 #ifndef _SRV_EPMAPPER_H_
 #define _SRV_EPMAPPER_H_
 
+struct dcesrv_connection;
+
 /**
  * @brief Cleanup memory and other stuff.
  */
 void srv_epmapper_cleanup(void);
 
-bool srv_epmapper_delete_endpoints(struct pipes_struct *p);
+/**
+ * @brief Cleanup function used to delete endpoints when a ncalrpc connection
+ *        from an external daemon is lost
+ */
+void srv_epmapper_delete_endpoints(struct dcesrv_connection *conn,
+				   void *private_data);
 
 #endif /*_SRV_EPMAPPER_H_ */
 

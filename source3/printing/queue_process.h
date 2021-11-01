@@ -20,8 +20,14 @@
    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
+#ifndef _SOURCE3_PRINTING_QUEUE_PROCESS_H_
+#define _SOURCE3_PRINTING_QUEUE_PROCESS_H_
+
+struct dcesrv_context;
+
 bool printing_subsystem_init(struct tevent_context *ev_ctx,
 			     struct messaging_context *msg_ctx,
+			     struct dcesrv_context *dce_ctx,
 			     bool start_daemons,
 			     bool background_queue);
 void printing_subsystem_update(struct tevent_context *ev_ctx,
@@ -30,3 +36,5 @@ void printing_subsystem_update(struct tevent_context *ev_ctx,
 pid_t start_background_queue(struct tevent_context *ev,
 			     struct messaging_context *msg,
 			     char *logfile);
+
+#endif /* _SOURCE3_PRINTING_QUEUE_PROCESS_H_ */

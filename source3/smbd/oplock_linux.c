@@ -33,10 +33,6 @@
 #define F_GETLEASE	1025
 #endif
 
-#ifndef CAP_LEASE
-#define CAP_LEASE 28
-#endif
-
 #ifndef RT_SIGNAL_LEASE
 #define RT_SIGNAL_LEASE (SIGRTMIN+1)
 #endif
@@ -44,14 +40,6 @@
 #ifndef F_SETSIG
 #define F_SETSIG 10
 #endif
-
-/*
- * public function to get linux lease capability. Needed by some VFS modules (eg. gpfs.c)
- */
-void linux_set_lease_capability(void)
-{
-	set_effective_capability(LEASE_CAPABILITY);
-}
 
 /* 
  * Call to set the kernel lease signal handler
@@ -140,19 +128,23 @@ static void linux_oplock_signal_handler(struct tevent_context *ev_ctx,
 static bool linux_set_kernel_oplock(struct kernel_oplocks *ctx,
 				    files_struct *fsp, int oplock_type)
 {
+	struct file_id_buf idbuf;
+
 	if ( SMB_VFS_LINUX_SETLEASE(fsp, F_WRLCK) == -1) {
-		DEBUG(3,("linux_set_kernel_oplock: Refused oplock on file %s, "
-			 "fd = %d, file_id = %s. (%s)\n",
-			 fsp_str_dbg(fsp), fsp->fh->fd,
-			 file_id_string_tos(&fsp->file_id),
-			 strerror(errno)));
+		DBG_NOTICE("Refused oplock on file %s, "
+			   "fd = %d, file_id = %s. (%s)\n",
+			   fsp_str_dbg(fsp),
+			   fsp->fh->fd,
+			   file_id_str_buf(fsp->file_id, &idbuf),
+			   strerror(errno));
 		return False;
 	}
 	
-	DEBUG(3,("linux_set_kernel_oplock: got kernel oplock on file %s, "
-		 "file_id = %s gen_id = %lu\n",
-		 fsp_str_dbg(fsp), file_id_string_tos(&fsp->file_id),
-		 fsp->fh->gen_id));
+	DBG_NOTICE("got kernel oplock on file %s, "
+		   "file_id = %s gen_id = %"PRIu64"\n",
+		   fsp_str_dbg(fsp),
+		   file_id_str_buf(fsp->file_id, &idbuf),
+		   fsp->fh->gen_id);
 
 	return True;
 }
@@ -164,6 +156,8 @@ static bool linux_set_kernel_oplock(struct kernel_oplocks *ctx,
 static void linux_release_kernel_oplock(struct kernel_oplocks *ctx,
 					files_struct *fsp, int oplock_type)
 {
+	struct file_id_buf idbuf;
+
 	if (DEBUGLVL(10)) {
 		/*
 		 * Check and print out the current kernel
@@ -171,10 +165,12 @@ static void linux_release_kernel_oplock(struct kernel_oplocks *ctx,
 		 */
 		int state = fcntl(fsp->fh->fd, F_GETLEASE, 0);
 		dbgtext("linux_release_kernel_oplock: file %s, file_id = %s "
-			"gen_id = %lu has kernel oplock state "
-			"of %x.\n", fsp_str_dbg(fsp),
-		        file_id_string_tos(&fsp->file_id),
-			fsp->fh->gen_id, state );
+			"gen_id = %"PRIu64" has kernel oplock state "
+			"of %x.\n",
+			fsp_str_dbg(fsp),
+		        file_id_str_buf(fsp->file_id, &idbuf),
+			fsp->fh->gen_id,
+			state);
 	}
 
 	/*
@@ -184,10 +180,12 @@ static void linux_release_kernel_oplock(struct kernel_oplocks *ctx,
 		if (DEBUGLVL(0)) {
 			dbgtext("linux_release_kernel_oplock: Error when "
 				"removing kernel oplock on file " );
-			dbgtext("%s, file_id = %s, gen_id = %lu. "
-				"Error was %s\n", fsp_str_dbg(fsp),
-				file_id_string_tos(&fsp->file_id),
-				fsp->fh->gen_id, strerror(errno) );
+			dbgtext("%s, file_id = %s, gen_id = %"PRIu64". "
+				"Error was %s\n",
+				fsp_str_dbg(fsp),
+				file_id_str_buf(fsp->file_id, &idbuf),
+				fsp->fh->gen_id,
+				strerror(errno));
 		}
 	}
 }

@@ -33,6 +33,7 @@
 #include "lib/util/dlinklist.h"
 #include "dsdb/kcc/garbage_collect_tombstones.h"
 #include "dsdb/kcc/scavenge_dns_records.h"
+#include "libds/common/flag_mapping.h"
 
 
 /* FIXME: These should be in a header file somewhere */
@@ -41,14 +42,14 @@
 		PyErr_SetString(PyExc_TypeError, "Ldb connection object required"); \
 		return NULL; \
 	} \
-	ldb = pyldb_Ldb_AsLdbContext(py_ldb);
+	ldb = pyldb_Ldb_AS_LDBCONTEXT(py_ldb);
 
 #define PyErr_LDB_DN_OR_RAISE(py_ldb_dn, dn) \
 	if (!py_check_dcerpc_type(py_ldb_dn, "ldb", "Dn")) { \
 		PyErr_SetString(PyExc_TypeError, "ldb Dn object required"); \
 		return NULL; \
 	} \
-	dn = pyldb_Dn_AsDn(py_ldb_dn);
+	dn = pyldb_Dn_AS_DN(py_ldb_dn);
 
 static PyObject *py_ldb_get_exception(void)
 {
@@ -129,18 +130,25 @@ static PyObject *py_dsdb_convert_schema_to_openldap(PyObject *self,
 }
 
 static PyObject *py_samdb_set_domain_sid(PyLdbObject *self, PyObject *args)
-{ 
+{
 	PyObject *py_ldb, *py_sid;
 	struct ldb_context *ldb;
 	struct dom_sid *sid;
 	bool ret;
+	const char *sid_str = NULL;
 
 	if (!PyArg_ParseTuple(args, "OO", &py_ldb, &py_sid))
 		return NULL;
-	
+
 	PyErr_LDB_OR_RAISE(py_ldb, ldb);
 
-	sid = dom_sid_parse_talloc(NULL, PyUnicode_AsUTF8(py_sid));
+	sid_str = PyUnicode_AsUTF8(py_sid);
+	if (sid_str == NULL) {
+		PyErr_NoMemory();
+		return NULL;
+	}
+
+	sid = dom_sid_parse_talloc(NULL, sid_str);
 	if (sid == NULL) {
 		PyErr_NoMemory();
 		return NULL;
@@ -359,7 +367,7 @@ static PyObject *py_dsdb_get_systemFlags_from_lDAPDisplayName(PyObject *self, Py
 		return NULL;
 	}
 
-	return PyInt_FromLong(attribute->systemFlags);
+	return PyLong_FromLong(attribute->systemFlags);
 }
 
 /*
@@ -391,7 +399,7 @@ static PyObject *py_dsdb_get_linkId_from_lDAPDisplayName(PyObject *self, PyObjec
 		return NULL;
 	}
 
-	return PyInt_FromLong(attribute->linkID);
+	return PyLong_FromLong(attribute->linkID);
 }
 
 /*
@@ -1157,7 +1165,7 @@ static PyObject *py_dsdb_allocate_rid(PyObject *self, PyObject *args)
 	TALLOC_FREE(rid_return);
 	TALLOC_FREE(ext_res);
 
-	return PyInt_FromLong(rid);
+	return PyLong_FromLong(rid);
 }
 
 static PyObject *py_dns_delete_tombstones(PyObject *self, PyObject *args)
@@ -1393,6 +1401,30 @@ static PyObject *py_dsdb_load_udv_v2(PyObject *self, PyObject *args)
 	return pylist;
 }
 
+static PyObject *py_dsdb_user_account_control_flag_bit_to_string(PyObject *self, PyObject *args)
+{
+	const char *str;
+	long long uf;
+	if (!PyArg_ParseTuple(args, "L", &uf)) {
+		return NULL;
+	}
+
+	if (uf > UINT32_MAX) {
+		return PyErr_Format(PyExc_OverflowError, "No UF_ flags are over UINT32_MAX");
+	}
+	if (uf < 0) {
+		return PyErr_Format(PyExc_KeyError, "No UF_ flags are less then zero");
+	}
+
+	str = dsdb_user_account_control_flag_bit_to_string(uf);
+	if (str == NULL) {
+		return PyErr_Format(PyExc_KeyError,
+				    "No such UF_ flag 0x%08x",
+				    (unsigned int)uf);
+	}
+	return PyUnicode_FromString(str);
+}
+
 static PyMethodDef py_dsdb_methods[] = {
 	{ "_samdb_server_site_name", (PyCFunction)py_samdb_server_site_name,
 		METH_VARARGS, "Get the server site name as a string"},
@@ -1472,7 +1504,12 @@ static PyMethodDef py_dsdb_methods[] = {
 		"_dsdb_allocate_rid(samdb)"
 		" -> RID" },
 	{ "_dsdb_load_udv_v2", (PyCFunction)py_dsdb_load_udv_v2, METH_VARARGS, NULL },
-	{ NULL }
+	{ "user_account_control_flag_bit_to_string",
+	        (PyCFunction)py_dsdb_user_account_control_flag_bit_to_string,
+	        METH_VARARGS,
+	        "user_account_control_flag_bit_to_string(bit)"
+                " -> string name" },
+	{0}
 };
 
 static struct PyModuleDef moduledef = {
@@ -1492,7 +1529,7 @@ MODULE_INIT_FUNC(dsdb)
 	if (m == NULL)
 		return NULL;
 
-#define ADD_DSDB_FLAG(val)  PyModule_AddObject(m, #val, PyInt_FromLong(val))
+#define ADD_DSDB_FLAG(val)  PyModule_AddObject(m, #val, PyLong_FromLong(val))
 
 	/* "userAccountControl" flags */
 	ADD_DSDB_FLAG(UF_NORMAL_ACCOUNT);

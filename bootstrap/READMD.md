@@ -12,7 +12,7 @@ A pure python3 module with CLI to bootstrap Samba envs for multiple distribution
 
 ## Supported Distributions
 
-deb: Debian 7|8|9, Ubuntu 1404|1604|1804
+deb: Debian 7|8|9|10, Ubuntu 1404|1604|1804
 rpm: CentOS 6|7, Fedora 28|29, openSUSE Leap 15.0|15.1
 
 Easy to add more.
@@ -82,6 +82,10 @@ With Docker:
  docker login
  docker pull registry.gitlab.com/samba-team/devel/samba/samba-ci-ubuntu1804:${sha1sum}
  docker run -it -v $(pwd):/home/samba/samba samba-ci-ubuntu1804:${sha1sum} bash
+
+With podman:
+
+  podman run -ti --cap-add=SYS_PTRACE --security-opt seccomp=unconfined registry.gitlab.com/samba-team/devel/samba/samba-ci-ubuntu1804:${sha1sum} bash
 
 With Vagrant:
 

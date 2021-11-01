@@ -46,6 +46,7 @@
 #include "lib/util/base64.h"
 #include "lib/util/time.h"
 #include "lib/gencache.h"
+#include "lib/util/sys_rw.h"
 #include "lib/util/asn1.h"
 #include "lib/param/param.h"
 #include "auth/gensec/gensec.h"
@@ -145,10 +146,6 @@ static struct cli_state *open_nbt_connection(void)
 
 	if (use_level_II_oplocks) {
 		flags |= CLI_FULL_CONNECTION_LEVEL_II_OPLOCKS;
-	}
-
-	if (use_kerberos) {
-		flags |= CLI_FULL_CONNECTION_USE_KERBEROS;
 	}
 
 	if (force_dos_errors) {
@@ -1013,21 +1010,6 @@ static bool run_readwritelarge_internal(void)
 		correct = False;
 	}
 
-#if 0
-	/* ToDo - set allocation. JRA */
-	if(!cli_set_allocation_size(cli1, fnum1, 0)) {
-		printf("set allocation size to zero failed (%s)\n", cli_errstr(&cli1));
-		return False;
-	}
-	if (!cli_qfileinfo_basic(cli1, fnum1, NULL, &fsize, NULL, NULL, NULL,
-				 NULL, NULL)) {
-		printf("qfileinfo failed (%s)\n", cli_errstr(cli1));
-		correct = False;
-	}
-	if (fsize != 0)
-		printf("readwritelarge test 3 (truncate test) succeeded (size = %x)\n", fsize);
-#endif
-
 	status = cli_close(cli1, fnum1);
 	if (!NT_STATUS_IS_OK(status)) {
 		printf("close failed (%s)\n", nt_errstr(status));
@@ -1361,6 +1343,7 @@ static bool run_tcon_test(int dummy)
 	if (!NT_STATUS_IS_OK(status)) {
 		printf("%s refused 2nd tree connect (%s)\n", host,
 		       nt_errstr(status));
+		cli_state_restore_tcon(cli, orig_tcon);
 		cli_shutdown(cli);
 		return False;
 	}
@@ -1413,6 +1396,8 @@ static bool run_tcon_test(int dummy)
 	status = cli_close(cli, fnum1);
 	if (!NT_STATUS_IS_OK(status)) {
 		printf("close failed (%s)\n", nt_errstr(status));
+		cli_state_restore_tcon(cli, orig_tcon);
+		cli_shutdown(cli);
 		return False;
 	}
 
@@ -1421,6 +1406,8 @@ static bool run_tcon_test(int dummy)
 	status = cli_tdis(cli);
 	if (!NT_STATUS_IS_OK(status)) {
 		printf("secondary tdis failed (%s)\n", nt_errstr(status));
+		cli_state_restore_tcon(cli, orig_tcon);
+		cli_shutdown(cli);
 		return False;
 	}
 
@@ -3341,7 +3328,9 @@ static bool run_locktest12(int dummy)
 
 	ret = true;
 done:
-	torture_close_connection(cli);
+	if (cli != NULL) {
+		torture_close_connection(cli);
+	}
 	return ret;
 }
 
@@ -3542,7 +3531,9 @@ static bool run_locktest13(int dummy)
 
 	ret = true;
 done:
-	torture_close_connection(cli);
+	if (cli != NULL) {
+		torture_close_connection(cli);
+	}
 	return ret;
 }
 
@@ -3989,9 +3980,9 @@ static bool run_browsetest(int dummy)
 
 static bool check_attributes(struct cli_state *cli,
 				const char *fname,
-				uint16_t expected_attrs)
+				uint32_t expected_attrs)
 {
-	uint16_t attrs = 0;
+	uint32_t attrs = 0;
 	NTSTATUS status = cli_getatr(cli,
 				fname,
 				&attrs,
@@ -4029,6 +4020,13 @@ static bool run_attrtest(int dummy)
 		return False;
 	}
 
+	/* Ensure we can't unlink with out-of-range (unknown) attribute. */
+	status = cli_unlink(cli, fname, 0x20000);
+	if (!NT_STATUS_EQUAL(status, NT_STATUS_INVALID_PARAMETER)) {
+		correct = false;
+		goto out;
+	}
+
 	cli_unlink(cli, fname, FILE_ATTRIBUTE_SYSTEM | FILE_ATTRIBUTE_HIDDEN);
 	cli_openx(cli, fname, 
 			O_RDWR | O_CREAT | O_TRUNC, DENY_NONE, &fnum);
@@ -4048,6 +4046,13 @@ static bool run_attrtest(int dummy)
 	}
 
 	t2 = t-60*60*24; /* 1 day ago */
+
+	/* Ensure we can't set with out-of-range (unknown) attribute. */
+	status = cli_setatr(cli, fname, 0x20000, t2);
+	if (!NT_STATUS_EQUAL(status, NT_STATUS_INVALID_PARAMETER)) {
+		correct = false;
+		goto out;
+	}
 
 	status = cli_setatr(cli, fname, 0, t2);
 	if (!NT_STATUS_IS_OK(status)) {
@@ -4070,7 +4075,7 @@ static bool run_attrtest(int dummy)
 
 	cli_unlink(cli, fname, FILE_ATTRIBUTE_SYSTEM | FILE_ATTRIBUTE_HIDDEN);
 
-	/* Check cli_setpathinfo_basic() */
+	/* Check cli_setpathinfo_ext() */
 	/* Re-create the file. */
 	status = cli_openx(cli, fname,
 			O_RDWR | O_CREAT | O_TRUNC, DENY_NONE, &fnum);
@@ -4081,17 +4086,18 @@ static bool run_attrtest(int dummy)
 	}
 	cli_close(cli, fnum);
 
-	status = cli_setpathinfo_basic(cli,
-					fname,
-					0, /* create */
-					0, /* access */
-					0, /* write */
-					0, /* change */
-					FILE_ATTRIBUTE_SYSTEM |
-					FILE_ATTRIBUTE_HIDDEN |
-					FILE_ATTRIBUTE_READONLY);
+	status = cli_setpathinfo_ext(
+		cli,
+		fname,
+		(struct timespec) { .tv_nsec = SAMBA_UTIME_OMIT }, /* create */
+		(struct timespec) { .tv_nsec = SAMBA_UTIME_OMIT }, /* access */
+		(struct timespec) { .tv_nsec = SAMBA_UTIME_OMIT }, /* write */
+		(struct timespec) { .tv_nsec = SAMBA_UTIME_OMIT }, /* change */
+		FILE_ATTRIBUTE_SYSTEM |
+		FILE_ATTRIBUTE_HIDDEN |
+		FILE_ATTRIBUTE_READONLY);
 	if (!NT_STATUS_IS_OK(status)) {
-		printf("cli_setpathinfo_basic failed with %s\n",
+		printf("cli_setpathinfo_ext failed with %s\n",
 			nt_errstr(status));
 		correct = false;
 	}
@@ -4107,15 +4113,16 @@ static bool run_attrtest(int dummy)
 	}
 
 	/* Setting to FILE_ATTRIBUTE_NORMAL should be ignored. */
-	status = cli_setpathinfo_basic(cli,
-					fname,
-					0, /* create */
-					0, /* access */
-					0, /* write */
-					0, /* change */
-					FILE_ATTRIBUTE_NORMAL);
+	status = cli_setpathinfo_ext(
+		cli,
+		fname,
+		(struct timespec) { .tv_nsec = SAMBA_UTIME_OMIT }, /* create */
+		(struct timespec) { .tv_nsec = SAMBA_UTIME_OMIT }, /* access */
+		(struct timespec) { .tv_nsec = SAMBA_UTIME_OMIT }, /* write */
+		(struct timespec) { .tv_nsec = SAMBA_UTIME_OMIT }, /* change */
+		FILE_ATTRIBUTE_NORMAL);
 	if (!NT_STATUS_IS_OK(status)) {
-		printf("cli_setpathinfo_basic failed with %s\n",
+		printf("cli_setpathinfo_ext failed with %s\n",
 			nt_errstr(status));
 		correct = false;
 	}
@@ -4131,15 +4138,16 @@ static bool run_attrtest(int dummy)
 	}
 
 	/* Setting to (uint16_t)-1 should also be ignored. */
-	status = cli_setpathinfo_basic(cli,
-					fname,
-					0, /* create */
-					0, /* access */
-					0, /* write */
-					0, /* change */
-					(uint16_t)-1);
+	status = cli_setpathinfo_ext(
+		cli,
+		fname,
+		(struct timespec) { .tv_nsec = SAMBA_UTIME_OMIT }, /* create */
+		(struct timespec) { .tv_nsec = SAMBA_UTIME_OMIT }, /* access */
+		(struct timespec) { .tv_nsec = SAMBA_UTIME_OMIT }, /* write */
+		(struct timespec) { .tv_nsec = SAMBA_UTIME_OMIT }, /* change */
+		(uint32_t)-1);
 	if (!NT_STATUS_IS_OK(status)) {
-		printf("cli_setpathinfo_basic failed with %s\n",
+		printf("cli_setpathinfo_ext failed with %s\n",
 			nt_errstr(status));
 		correct = false;
 	}
@@ -4155,15 +4163,16 @@ static bool run_attrtest(int dummy)
 	}
 
 	/* Setting to 0 should clear them all. */
-	status = cli_setpathinfo_basic(cli,
-					fname,
-					0, /* create */
-					0, /* access */
-					0, /* write */
-					0, /* change */
-					0);
+	status = cli_setpathinfo_ext(
+		cli,
+		fname,
+		(struct timespec) { .tv_nsec = SAMBA_UTIME_OMIT }, /* create */
+		(struct timespec) { .tv_nsec = SAMBA_UTIME_OMIT }, /* access */
+		(struct timespec) { .tv_nsec = SAMBA_UTIME_OMIT }, /* write */
+		(struct timespec) { .tv_nsec = SAMBA_UTIME_OMIT }, /* change */
+		0);
 	if (!NT_STATUS_IS_OK(status)) {
-		printf("cli_setpathinfo_basic failed with %s\n",
+		printf("cli_setpathinfo_ext failed with %s\n",
 			nt_errstr(status));
 		correct = false;
 	}
@@ -4837,6 +4846,274 @@ static void oplock4_got_open(struct tevent_req *req)
 	}
 }
 
+#ifdef HAVE_KERNEL_OPLOCKS_LINUX
+
+struct oplock5_state {
+	int pipe_down_fd;
+};
+
+/*
+ * Async open the file that has a kernel oplock, do an echo to get
+ * that 100% across, close the file to signal to the child fd that the
+ * oplock can be dropped, wait for the open reply.
+ */
+
+static void oplock5_opened(struct tevent_req *subreq);
+static void oplock5_pong(struct tevent_req *subreq);
+static void oplock5_timedout(struct tevent_req *subreq);
+
+static struct tevent_req *oplock5_send(
+	TALLOC_CTX *mem_ctx,
+	struct tevent_context *ev,
+	struct cli_state *cli,
+	const char *fname,
+	int pipe_down_fd)
+{
+	struct tevent_req *req = NULL, *subreq = NULL;
+	struct oplock5_state *state = NULL;
+	static uint8_t data = 0;
+
+	req = tevent_req_create(mem_ctx, &state, struct oplock5_state);
+	if (req == NULL) {
+		return NULL;
+	}
+	state->pipe_down_fd = pipe_down_fd;
+
+	subreq = cli_ntcreate_send(
+		state,
+		ev,
+		cli,
+		fname,
+		0,			/* CreatFlags */
+		SEC_FILE_READ_DATA,    /* DesiredAccess */
+		FILE_ATTRIBUTE_NORMAL,  /* FileAttributes */
+		FILE_SHARE_WRITE|FILE_SHARE_READ, /* ShareAccess */
+		FILE_OPEN,		 /* CreateDisposition */
+		FILE_NON_DIRECTORY_FILE, /* CreateOptions */
+		0,			 /* Impersonation */
+		0);			 /* SecurityFlags */
+	if (tevent_req_nomem(subreq, req)) {
+		return tevent_req_post(req, ev);
+	}
+	tevent_req_set_callback(subreq, oplock5_opened, req);
+
+	subreq = cli_echo_send(
+		state,
+		ev,
+		cli,
+		1,
+		(DATA_BLOB) { .data = &data, .length = sizeof(data) });
+	if (tevent_req_nomem(subreq, req)) {
+		return tevent_req_post(req, ev);
+	}
+	tevent_req_set_callback(subreq, oplock5_pong, req);
+
+	subreq = tevent_wakeup_send(state, ev, timeval_current_ofs(20, 0));
+	if (tevent_req_nomem(subreq, req)) {
+		return tevent_req_post(req, ev);
+	}
+	tevent_req_set_callback(subreq, oplock5_timedout, req);
+
+	return req;
+}
+
+static void oplock5_opened(struct tevent_req *subreq)
+{
+	struct tevent_req *req = tevent_req_callback_data(
+		subreq, struct tevent_req);
+	NTSTATUS status;
+	uint16_t fnum;
+
+	status = cli_ntcreate_recv(subreq, &fnum, NULL);
+	TALLOC_FREE(subreq);
+	if (tevent_req_nterror(req, status)) {
+		return;
+	}
+	tevent_req_done(req);
+}
+
+static void oplock5_pong(struct tevent_req *subreq)
+{
+	struct tevent_req *req = tevent_req_callback_data(
+		subreq, struct tevent_req);
+	struct oplock5_state *state = tevent_req_data(
+		req, struct oplock5_state);
+	NTSTATUS status;
+
+	status = cli_echo_recv(subreq);
+	TALLOC_FREE(subreq);
+	if (tevent_req_nterror(req, status)) {
+		return;
+	}
+
+	close(state->pipe_down_fd);
+}
+
+static void oplock5_timedout(struct tevent_req *subreq)
+{
+	struct tevent_req *req = tevent_req_callback_data(
+		subreq, struct tevent_req);
+	bool ok;
+
+	ok = tevent_wakeup_recv(subreq);
+	TALLOC_FREE(subreq);
+	if (!ok) {
+		tevent_req_oom(req);
+		return;
+	}
+	tevent_req_nterror(req, NT_STATUS_TIMEOUT);
+}
+
+static NTSTATUS oplock5_recv(struct tevent_req *req)
+{
+	return tevent_req_simple_recv_ntstatus(req);
+}
+
+static bool run_oplock5(int dummy)
+{
+	struct tevent_context *ev = NULL;
+	struct tevent_req *req = NULL;
+	struct cli_state *cli = NULL;
+	const char *fname = "oplock5.txt";
+	int pipe_down[2], pipe_up[2];
+	pid_t child_pid;
+	uint8_t c = '\0';
+	NTSTATUS status;
+	int ret;
+	bool ok;
+
+	printf("starting oplock5\n");
+
+	if (local_path == NULL) {
+		d_fprintf(stderr, "oplock5 must be given a local path via "
+			  "-l <localpath>\n");
+		return false;
+	}
+
+	ret = pipe(pipe_down);
+	if (ret == -1) {
+		d_fprintf(stderr, "pipe() failed: %s\n", strerror(errno));
+		return false;
+	}
+	ret = pipe(pipe_up);
+	if (ret == -1) {
+		d_fprintf(stderr, "pipe() failed: %s\n", strerror(errno));
+		return false;
+	}
+
+	child_pid = fork();
+	if (child_pid == -1) {
+		d_fprintf(stderr, "fork() failed: %s\n", strerror(errno));
+		return false;
+	}
+
+	if (child_pid == 0) {
+		char *local_file = NULL;
+		int fd;
+
+		close(pipe_down[1]);
+		close(pipe_up[0]);
+
+		local_file = talloc_asprintf(
+			talloc_tos(), "%s/%s", local_path, fname);
+		if (local_file == 0) {
+			c = 1;
+			goto do_write;
+		}
+		fd = open(local_file, O_RDWR|O_CREAT, 0644);
+		if (fd == -1) {
+			d_fprintf(stderr,
+				  "open(%s) in child failed: %s\n",
+				  local_file,
+				  strerror(errno));
+			c = 2;
+			goto do_write;
+		}
+
+		signal(SIGIO, SIG_IGN);
+
+		ret = fcntl(fd, F_SETLEASE, F_WRLCK);
+		if (ret == -1) {
+			d_fprintf(stderr,
+				  "SETLEASE in child failed: %s\n",
+				  strerror(errno));
+			c = 3;
+			goto do_write;
+		}
+
+	do_write:
+		ret = sys_write(pipe_up[1], &c, sizeof(c));
+		if (ret == -1) {
+			d_fprintf(stderr,
+				  "sys_write failed: %s\n",
+				  strerror(errno));
+			exit(4);
+		}
+		ret = sys_read(pipe_down[0], &c, sizeof(c));
+		if (ret == -1) {
+			d_fprintf(stderr,
+				  "sys_read failed: %s\n",
+				  strerror(errno));
+			exit(5);
+		}
+		exit(0);
+	}
+
+	close(pipe_up[1]);
+	close(pipe_down[0]);
+
+	ret = sys_read(pipe_up[0], &c, sizeof(c));
+	if (ret != 1) {
+		d_fprintf(stderr,
+			  "sys_read failed: %s\n",
+			  strerror(errno));
+		return false;
+	}
+	if (c != 0) {
+		d_fprintf(stderr, "got error code %"PRIu8"\n", c);
+		return false;
+	}
+
+	ok = torture_open_connection(&cli, 0);
+	if (!ok) {
+		d_fprintf(stderr, "torture_open_connection failed\n");
+		return false;
+	}
+
+	ev = samba_tevent_context_init(talloc_tos());
+	if (ev == NULL) {
+		d_fprintf(stderr, "samba_tevent_context_init failed\n");
+		return false;
+	}
+
+	req = oplock5_send(ev, ev, cli, fname, pipe_down[1]);
+	if (req == NULL) {
+		d_fprintf(stderr, "oplock5_send failed\n");
+		return false;
+	}
+
+	ok = tevent_req_poll_ntstatus(req, ev, &status);
+	if (!ok) {
+		d_fprintf(stderr,
+			  "tevent_req_poll_ntstatus failed: %s\n",
+			  nt_errstr(status));
+		return false;
+	}
+
+	status = oplock5_recv(req);
+	TALLOC_FREE(req);
+	if (!NT_STATUS_IS_OK(status)) {
+		d_fprintf(stderr,
+			  "oplock5 failed: %s\n",
+			  nt_errstr(status));
+		return false;
+	}
+
+	return true;
+}
+
+#endif /* HAVE_KERNEL_OPLOCKS_LINUX */
+
 /*
   Test delete on close semantics.
  */
@@ -5406,6 +5683,240 @@ static bool run_deletetest(int dummy)
 	return correct;
 }
 
+struct delete_stream_state {
+	bool closed;
+};
+
+static void delete_stream_unlinked(struct tevent_req *subreq);
+static void delete_stream_closed(struct tevent_req *subreq);
+
+static struct tevent_req *delete_stream_send(
+	TALLOC_CTX *mem_ctx,
+	struct tevent_context *ev,
+	struct cli_state *cli,
+	const char *base_fname,
+	uint16_t stream_fnum)
+{
+	struct tevent_req *req = NULL, *subreq = NULL;
+	struct delete_stream_state *state = NULL;
+
+	req = tevent_req_create(
+		mem_ctx, &state, struct delete_stream_state);
+	if (req == NULL) {
+		return NULL;
+	}
+
+	subreq = cli_unlink_send(
+		state,
+		ev,
+		cli,
+		base_fname,
+		FILE_ATTRIBUTE_SYSTEM | FILE_ATTRIBUTE_HIDDEN);
+	if (tevent_req_nomem(subreq, req)) {
+		return tevent_req_post(req, ev);
+	}
+	tevent_req_set_callback(subreq, delete_stream_unlinked, req);
+
+	subreq = cli_close_send(state, ev, cli, stream_fnum);
+	if (tevent_req_nomem(subreq, req)) {
+		return tevent_req_post(req, ev);
+	}
+	tevent_req_set_callback(subreq, delete_stream_closed, req);
+
+	return req;
+}
+
+static void delete_stream_unlinked(struct tevent_req *subreq)
+{
+	struct tevent_req *req = tevent_req_callback_data(
+		subreq, struct tevent_req);
+	struct delete_stream_state *state = tevent_req_data(
+		req, struct delete_stream_state);
+	NTSTATUS status;
+
+	status = cli_unlink_recv(subreq);
+	TALLOC_FREE(subreq);
+	if (!NT_STATUS_EQUAL(status, NT_STATUS_SHARING_VIOLATION)) {
+		printf("cli_unlink returned %s\n",
+		       nt_errstr(status));
+		tevent_req_nterror(req, NT_STATUS_UNSUCCESSFUL);
+		return;
+	}
+	if (!state->closed) {
+		/* close reply should have come in first */
+		printf("Not closed\n");
+		tevent_req_nterror(req, NT_STATUS_UNSUCCESSFUL);
+		return;
+	}
+	tevent_req_done(req);
+}
+
+static void delete_stream_closed(struct tevent_req *subreq)
+{
+	struct tevent_req *req = tevent_req_callback_data(
+		subreq, struct tevent_req);
+	struct delete_stream_state *state = tevent_req_data(
+		req, struct delete_stream_state);
+	NTSTATUS status;
+
+	status = cli_close_recv(subreq);
+	TALLOC_FREE(subreq);
+	if (tevent_req_nterror(req, status)) {
+		return;
+	}
+	/* also waiting for the unlink to come back */
+	state->closed = true;
+}
+
+static NTSTATUS delete_stream_recv(struct tevent_req *req)
+{
+	return tevent_req_simple_recv_ntstatus(req);
+}
+
+static bool run_delete_stream(int dummy)
+{
+	struct tevent_context *ev = NULL;
+	struct tevent_req *req = NULL;
+	struct cli_state *cli = NULL;
+	const char fname[] = "delete_stream";
+	const char fname_stream[] = "delete_stream:Zone.Identifier:$DATA";
+	uint16_t fnum1, fnum2;
+	NTSTATUS status;
+	bool ok;
+
+	printf("Starting stream delete test\n");
+
+	ok = torture_open_connection(&cli, 0);
+	if (!ok) {
+		return false;
+	}
+
+	cli_setatr(cli, fname, 0, 0);
+	cli_unlink(cli, fname, FILE_ATTRIBUTE_SYSTEM | FILE_ATTRIBUTE_HIDDEN);
+
+	/* Create the file. */
+	status = cli_ntcreate(
+		cli,
+		fname,
+		0,
+		READ_CONTROL_ACCESS,
+		0,
+		FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,
+		FILE_CREATE,
+		0x0,
+		0x0,
+		&fnum1,
+		NULL);
+	if (!NT_STATUS_IS_OK(status)) {
+		d_fprintf(stderr,
+			  "cli_ntcreate of %s failed (%s)\n",
+			  fname,
+			  nt_errstr(status));
+		return false;
+	}
+	status = cli_close(cli, fnum1);
+	if (!NT_STATUS_IS_OK(status)) {
+		d_fprintf(stderr,
+			  "cli_close of %s failed (%s)\n",
+			  fname,
+			  nt_errstr(status));
+		return false;
+	}
+
+	/* Now create the stream. */
+	status = cli_ntcreate(
+		cli,
+		fname_stream,
+		0,
+		FILE_WRITE_DATA,
+		0,
+		FILE_SHARE_READ|FILE_SHARE_WRITE,
+		FILE_CREATE,
+		0x0,
+		0x0,
+		&fnum1,
+		NULL);
+
+	if (!NT_STATUS_IS_OK(status)) {
+		d_fprintf(stderr,
+			  "cli_ntcreate of %s failed (%s)\n",
+			  fname_stream,
+			  nt_errstr(status));
+		return false;
+	}
+
+	/* open it a second time */
+
+	status = cli_ntcreate(
+		cli,
+		fname_stream,
+		0,
+		FILE_WRITE_DATA,
+		0,
+		FILE_SHARE_READ|FILE_SHARE_WRITE,
+		FILE_OPEN,
+		0x0,
+		0x0,
+		&fnum2,
+		NULL);
+
+	if (!NT_STATUS_IS_OK(status)) {
+		d_fprintf(stderr,
+			  "2nd cli_ntcreate of %s failed (%s)\n",
+			  fname_stream,
+			  nt_errstr(status));
+		return false;
+	}
+
+	ev = samba_tevent_context_init(talloc_tos());
+	if (ev == NULL) {
+		d_fprintf(stderr, "samba_tevent_context_init failed\n");
+		return false;
+	}
+
+	req = delete_stream_send(ev, ev, cli, fname, fnum1);
+	if (req == NULL) {
+		d_fprintf(stderr, "delete_stream_send failed\n");
+		return false;
+	}
+
+	ok = tevent_req_poll_ntstatus(req, ev, &status);
+	if (!ok) {
+		d_fprintf(stderr,
+			  "tevent_req_poll_ntstatus failed: %s\n",
+			  nt_errstr(status));
+		return false;
+	}
+
+	status = delete_stream_recv(req);
+	TALLOC_FREE(req);
+	if (!NT_STATUS_IS_OK(status)) {
+		d_fprintf(stderr,
+			  "delete_stream failed: %s\n",
+			  nt_errstr(status));
+		return false;
+	}
+
+	status = cli_close(cli, fnum2);
+	if (!NT_STATUS_IS_OK(status)) {
+		d_fprintf(stderr,
+			  "close failed: %s\n",
+			  nt_errstr(status));
+		return false;
+	}
+
+	status = cli_unlink(
+		cli, fname, FILE_ATTRIBUTE_SYSTEM | FILE_ATTRIBUTE_HIDDEN);
+	if (!NT_STATUS_IS_OK(status)) {
+		d_fprintf(stderr,
+			  "unlink failed: %s\n",
+			  nt_errstr(status));
+		return false;
+	}
+
+	return true;
+}
+
 /*
   Exercise delete on close semantics - use on the PRINT1 share in torture
   testing.
@@ -5756,7 +6267,7 @@ static bool run_rename(int dummy)
 	const char *fname1 = "\\test1.txt";
 	bool correct = True;
 	uint16_t fnum1;
-	uint16_t attr;
+	uint32_t attr;
 	NTSTATUS status;
 
 	printf("starting rename test\n");
@@ -5830,27 +6341,6 @@ static bool run_rename(int dummy)
 	}
 
 
-#if 0
-  {
-	uint16_t fnum2;
-
-	if (!NT_STATUS_IS_OK(cli_ntcreate(cli1, fname, 0, DELETE_ACCESS, FILE_ATTRIBUTE_NORMAL,
-				   FILE_SHARE_NONE, FILE_OVERWRITE_IF, 0, 0, &fnum2, NULL))) {
-		printf("Fourth open failed - %s\n", cli_errstr(cli1));
-		return False;
-	}
-	if (!NT_STATUS_IS_OK(cli_nt_delete_on_close(cli1, fnum2, true))) {
-		printf("[8] setting delete_on_close on file failed !\n");
-		return False;
-	}
-
-	if (!NT_STATUS_IS_OK(cli_close(cli1, fnum2))) {
-		printf("close - 4 failed (%s)\n", cli_errstr(cli1));
-		return False;
-	}
-  }
-#endif
-
 	status = cli_rename(cli1, fname, fname1, false);
 	if (!NT_STATUS_IS_OK(status)) {
 		printf("Third rename failed (SHARE_NONE) - this should have succeeded - %s\n", nt_errstr(status));
@@ -5914,21 +6404,6 @@ static bool run_rename(int dummy)
 	} else {
 		printf("Fifth rename succeeded (SHARE_READ | SHARE_WRITE | SHARE_DELETE) (this is correct) - %s\n", nt_errstr(status));
 	}
-
-        /*
-         * Now check if the first name still exists ...
-         */
-
-        /* if (!NT_STATUS_OP(cli_ntcreate(cli1, fname, 0, GENERIC_READ_ACCESS, FILE_ATTRIBUTE_NORMAL,
-				   FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-				   FILE_OVERWRITE_IF, 0, 0, &fnum2, NULL))) {
-          printf("Opening original file after rename of open file fails: %s\n",
-              cli_errstr(cli1));
-        }
-        else {
-          printf("Opening original file after rename of open file works ...\n");
-          (void)cli_close(cli1, fnum2);
-          } */
 
         /*--*/
 	status = cli_close(cli1, fnum1);
@@ -6524,6 +6999,100 @@ static bool run_owner_rights(int dummy)
 	cli_unlink(cli, fname,
 		FILE_ATTRIBUTE_SYSTEM | FILE_ATTRIBUTE_HIDDEN);
 
+	TALLOC_FREE(frame);
+	return true;
+
+  fail:
+
+	if (cli) {
+		if (fnum != (uint16_t)-1) {
+			cli_close(cli, fnum);
+		}
+		cli_unlink(cli, fname,
+			FILE_ATTRIBUTE_SYSTEM | FILE_ATTRIBUTE_HIDDEN);
+		torture_close_connection(cli);
+	}
+
+	TALLOC_FREE(frame);
+	return false;
+}
+
+/*
+ * Test SMB1-specific open with SEC_FLAG_SYSTEM_SECURITY.
+ * Note this test only works with a user with SeSecurityPrivilege set.
+ *
+ * NB. This is also tested in samba3.base.createx_access
+ * but this makes it very explicit what we're looking for.
+ */
+static bool run_smb1_system_security(int dummy)
+{
+	static struct cli_state *cli = NULL;
+	const char *fname = "system_security.txt";
+	uint16_t fnum = (uint16_t)-1;
+	NTSTATUS status;
+	TALLOC_CTX *frame = NULL;
+
+	frame = talloc_stackframe();
+	printf("starting smb1 system security test\n");
+
+	/* SMB1 connection - torture_open_connection() forces this. */
+	if (!torture_open_connection(&cli, 0)) {
+		goto fail;
+	}
+
+	smbXcli_conn_set_sockopt(cli->conn, sockops);
+
+	/* Start with a clean slate. */
+	cli_unlink(cli, fname, FILE_ATTRIBUTE_SYSTEM | FILE_ATTRIBUTE_HIDDEN);
+
+	/* Create the test file. */
+	status = cli_ntcreate(cli,
+				fname,
+				0,
+				GENERIC_ALL_ACCESS,
+				FILE_ATTRIBUTE_NORMAL,
+				FILE_SHARE_READ|FILE_SHARE_WRITE|
+					FILE_SHARE_DELETE,
+				FILE_CREATE,
+				0,
+				0,
+				&fnum,
+				NULL);
+	if (!NT_STATUS_IS_OK(status)) {
+		printf("Create of %s - %s\n", fname, nt_errstr(status));
+		goto fail;
+	}
+
+	status = cli_close(cli, fnum);
+
+	/* Open with SEC_FLAG_SYSTEM_SECURITY only. */
+	/*
+	 * On SMB1 this succeeds - SMB2 it fails,
+	 * see the SMB2-SACL test.
+	 */
+	status = cli_ntcreate(cli,
+				fname,
+				0,
+				SEC_FLAG_SYSTEM_SECURITY,
+				FILE_ATTRIBUTE_NORMAL,
+				FILE_SHARE_READ|FILE_SHARE_WRITE|
+					FILE_SHARE_DELETE,
+				FILE_OPEN,
+				0,
+				0,
+				&fnum,
+				NULL);
+	if (!NT_STATUS_IS_OK(status)) {
+		printf("Open of %s - %s\n", fname, nt_errstr(status));
+		goto fail;
+	}
+
+	status = cli_close(cli, fnum);
+
+	cli_unlink(cli, fname,
+		FILE_ATTRIBUTE_SYSTEM | FILE_ATTRIBUTE_HIDDEN);
+
+	torture_close_connection(cli);
 	TALLOC_FREE(frame);
 	return true;
 
@@ -8989,7 +9558,7 @@ static bool run_openattrtest(int dummy)
 	const char *fname = "\\openattr.file";
 	uint16_t fnum1;
 	bool correct = True;
-	uint16_t attr;
+	uint32_t attr;
 	unsigned int i, j, k, l;
 	NTSTATUS status;
 
@@ -9179,7 +9748,7 @@ static NTSTATUS del_fn(const char *mnt, struct file_info *finfo, const char *mas
 	if (strcmp(finfo->name, ".") == 0 || strcmp(finfo->name, "..") == 0)
 		return NT_STATUS_OK;
 
-	if (finfo->mode & FILE_ATTRIBUTE_DIRECTORY) {
+	if (finfo->attr & FILE_ATTRIBUTE_DIRECTORY) {
 		if (!NT_STATUS_IS_OK(cli_rmdir(pcli, fname)))
 			printf("del_fn: failed to rmdir %s\n,", fname );
 	} else {
@@ -10301,7 +10870,7 @@ static bool run_mangle1(int dummy)
 	NTSTATUS status;
 	time_t change_time, access_time, write_time;
 	off_t size;
-	uint16_t mode;
+	uint32_t attr;
 
 	printf("starting mangle1 test\n");
 	if (!torture_open_connection(&cli, 0)) {
@@ -10336,7 +10905,7 @@ static bool run_mangle1(int dummy)
 	cli_close(cli, fnum);
 
 	status = cli_qpathinfo1(cli, alt_name, &change_time, &access_time,
-				&write_time, &size, &mode);
+				&write_time, &size, &attr);
 	if (!NT_STATUS_IS_OK(status)) {
 		d_printf("cli_qpathinfo1(%s) failed: %s\n", alt_name,
 			 nt_errstr(status));
@@ -10898,6 +11467,81 @@ static bool run_large_readx(int dummy)
 	return correct;
 }
 
+static NTSTATUS msdfs_attribute_list_fn(const char *mnt,
+				  struct file_info *finfo,
+				  const char *mask,
+				  void *private_data)
+{
+	uint32_t *p_attr = (uint32_t *)private_data;
+
+	if (strequal(finfo->name, test_filename)) {
+		*p_attr = finfo->attr;
+	}
+
+	return NT_STATUS_OK;
+}
+
+static bool run_msdfs_attribute(int dummy)
+{
+	static struct cli_state *cli;
+	bool correct = false;
+	uint32_t attr = 0;
+	NTSTATUS status;
+
+	printf("Starting MSDFS-ATTRIBUTE test\n");
+
+	if (test_filename == NULL || test_filename[0] == '\0') {
+		printf("MSDFS-ATTRIBUTE test "
+			"needs -f filename-of-msdfs-link\n");
+		return false;
+	}
+
+	/*
+	 * NB. We use torture_open_connection_flags() not
+	 * torture_open_connection() as the latter forces
+	 * SMB1.
+	 */
+	if (!torture_open_connection_flags(&cli, 0, 0)) {
+		return false;
+	}
+
+	smbXcli_conn_set_sockopt(cli->conn, sockops);
+
+	status = cli_list(cli,
+			"*",
+			FILE_ATTRIBUTE_DIRECTORY,
+			msdfs_attribute_list_fn,
+			&attr);
+
+	if (!NT_STATUS_IS_OK(status)) {
+		printf("cli_list failed with %s\n",
+			nt_errstr(status));
+		goto out;
+	}
+	if ((attr & FILE_ATTRIBUTE_REPARSE_POINT) == 0) {
+		printf("file %s should have "
+			"FILE_ATTRIBUTE_REPARSE_POINT set. attr = 0x%x\n",
+			test_filename,
+			(unsigned int)attr);
+		goto out;
+	}
+
+	if ((attr & FILE_ATTRIBUTE_DIRECTORY) == 0) {
+		printf("file %s should have "
+			"FILE_ATTRIBUTE_DIRECTORY set. attr = 0x%x\n",
+			test_filename,
+			(unsigned int)attr);
+		goto out;
+	}
+
+	correct = true;
+
+  out:
+
+	torture_close_connection(cli);
+	return correct;
+}
+
 static bool run_cli_echo(int dummy)
 {
 	struct cli_state *cli;
@@ -11075,7 +11719,7 @@ static bool run_uid_regression_test(int dummy)
 	int16_t old_vuid;
 	int32_t old_cnum;
 	bool correct = True;
-	struct smbXcli_tcon *orig_tcon = NULL;
+	struct smbXcli_tcon *tcon_copy = NULL;
 	NTSTATUS status;
 
 	printf("starting uid regression test\n");
@@ -11116,8 +11760,20 @@ static bool run_uid_regression_test(int dummy)
 	}
 
 	old_cnum = cli_state_get_tid(cli);
-	orig_tcon = cli_state_save_tcon(cli);
-	if (orig_tcon == NULL) {
+	/*
+	 * This is an SMB1-only test.
+	 * Copy the tcon, not "save/restore".
+	 *
+	 * In SMB1 the cli_tdis() below frees
+	 * cli->smb1.tcon so we need a copy
+	 * of the struct to put back for the
+	 * second tdis call with invalid vuid.
+	 *
+	 * This is a test-only hack. Real client code
+	 * uses cli_state_save_tcon()/cli_state_restore_tcon().
+	 */
+	tcon_copy = smbXcli_tcon_copy(cli, cli->smb1.tcon);
+	if (tcon_copy == NULL) {
 		correct = false;
 		goto out;
 	}
@@ -11133,11 +11789,11 @@ static bool run_uid_regression_test(int dummy)
 	} else {
 		d_printf("First tdis failed (%s)\n", nt_errstr(status));
 		correct = false;
-		cli_state_restore_tcon(cli, orig_tcon);
+		cli->smb1.tcon = tcon_copy;
 		goto out;
 	}
 
-	cli_state_restore_tcon(cli, orig_tcon);
+	cli->smb1.tcon = tcon_copy;
 	cli_state_set_uid(cli, old_vuid);
 	cli_state_set_tid(cli, old_cnum);
 
@@ -11180,7 +11836,7 @@ static NTSTATUS shortname_del_fn(const char *mnt, struct file_info *finfo,
 	if (strcmp(finfo->name, ".") == 0 || strcmp(finfo->name, "..") == 0)
 		return NT_STATUS_OK;
 
-	if (finfo->mode & FILE_ATTRIBUTE_DIRECTORY) {
+	if (finfo->attr & FILE_ATTRIBUTE_DIRECTORY) {
 		status = cli_rmdir(pcli, fname);
 		if (!NT_STATUS_IS_OK(status)) {
 			printf("del_fn: failed to rmdir %s\n,", fname );
@@ -11370,7 +12026,7 @@ tldap_build_extended_control(enum tldap_extended_val val)
 	ZERO_STRUCT(empty_control);
 
 	if (val != EXTENDED_NONE) {
-		data = asn1_init(talloc_tos());
+		data = asn1_init(talloc_tos(), ASN1_MAX_TREE_DEPTH);
 
 		if (!data) {
 			return NULL;
@@ -11705,7 +12361,8 @@ static bool run_streamerror(int dummy)
 	NTSTATUS status;
 	time_t change_time, access_time, write_time;
 	off_t size;
-	uint16_t mode, fnum;
+	uint16_t fnum;
+	uint32_t attr;
 	bool ret = true;
 
 	if (!torture_open_connection(&cli, 0)) {
@@ -11722,7 +12379,7 @@ static bool run_streamerror(int dummy)
 	}
 
 	status = cli_qpathinfo1(cli, streamname, &change_time, &access_time,
-				&write_time, &size, &mode);
+				&write_time, &size, &attr);
 	if (!NT_STATUS_EQUAL(status, NT_STATUS_OBJECT_NAME_NOT_FOUND)) {
 		printf("pathinfo returned %s, expected "
 		       "NT_STATUS_OBJECT_NAME_NOT_FOUND\n",
@@ -12240,6 +12897,54 @@ static bool run_local_gencache(int dummy)
 	return True;
 }
 
+static bool rbt_testflags(struct db_context *db, const char *key,
+			  const char *value)
+{
+	bool ret = false;
+	NTSTATUS status;
+	struct db_record *rec;
+
+	rec = dbwrap_fetch_locked(db, db, string_tdb_data(key));
+	if (rec == NULL) {
+		d_fprintf(stderr, "fetch_locked failed\n");
+		goto done;
+	}
+
+	status = dbwrap_record_store(rec, string_tdb_data(value), TDB_MODIFY);
+	if (!NT_STATUS_EQUAL(status, NT_STATUS_OBJECT_NAME_NOT_FOUND)) {
+		d_fprintf(stderr, "store TDB_MODIFY unexpected status: %s\n",
+			  nt_errstr(status));
+		goto done;
+	}
+
+	status = dbwrap_record_store(rec, string_tdb_data("overwriteme"),
+				     TDB_INSERT);
+	if (!NT_STATUS_IS_OK(status)) {
+		d_fprintf(stderr, "store TDB_INSERT failed: %s\n",
+			  nt_errstr(status));
+		goto done;
+	}
+
+	status = dbwrap_record_store(rec, string_tdb_data(value), TDB_INSERT);
+	if (!NT_STATUS_EQUAL(status, NT_STATUS_OBJECT_NAME_COLLISION)) {
+		d_fprintf(stderr, "store TDB_INSERT unexpected status: %s\n",
+			  nt_errstr(status));
+		goto done;
+	}
+
+	status = dbwrap_record_store(rec, string_tdb_data(value), TDB_MODIFY);
+	if (!NT_STATUS_IS_OK(status)) {
+		d_fprintf(stderr, "store TDB_MODIFY failed: %s\n",
+			  nt_errstr(status));
+		goto done;
+	}
+
+	ret = true;
+done:
+	TALLOC_FREE(rec);
+	return ret;
+}
+
 static bool rbt_testval(struct db_context *db, const char *key,
 			const char *value)
 {
@@ -12311,37 +13016,26 @@ static bool run_local_rbtree(int dummy)
 		return false;
 	}
 
-	for (i=0; i<1000; i++) {
-		char *key, *value;
+	if (!rbt_testflags(db, "firstkey", "firstval")) {
+		goto done;
+	}
 
-		if (asprintf(&key, "key%ld", random()) == -1) {
-			goto done;
-		}
-		if (asprintf(&value, "value%ld", random()) == -1) {
-			SAFE_FREE(key);
-			goto done;
-		}
+	for (i = 0; i < 999; i++) {
+		char key[sizeof("key-9223372036854775807")];
+		char value[sizeof("value-9223372036854775807")];
 
-		if (!rbt_testval(db, key, value)) {
-			SAFE_FREE(key);
-			SAFE_FREE(value);
-			goto done;
-		}
-
-		SAFE_FREE(value);
-		if (asprintf(&value, "value%ld", random()) == -1) {
-			SAFE_FREE(key);
-			goto done;
-		}
+		snprintf(key, sizeof(key), "key%ld", random());
+		snprintf(value, sizeof(value) ,"value%ld", random());
 
 		if (!rbt_testval(db, key, value)) {
-			SAFE_FREE(key);
-			SAFE_FREE(value);
 			goto done;
 		}
 
-		SAFE_FREE(key);
-		SAFE_FREE(value);
+		snprintf(value, sizeof(value) ,"value%ld", random());
+
+		if (!rbt_testval(db, key, value)) {
+			goto done;
+		}
 	}
 
 	ret = true;
@@ -13461,6 +14155,25 @@ static bool run_local_canonicalize_path(int dummy)
 			".././././",
 			".././././../../../boo",
 			"./..",
+			"/",
+			"/../../",
+			"/foo/../",
+			"/./././",
+			"/./././.",
+			"/.../././.",
+			"/./././.foo",
+			"/./././.foo.",
+			"/./././foo.",
+			"/foo/bar/..",
+			"/foo/bar/../baz/",
+			"////////////////",
+			"/////////./././././.",
+			"/./.././../.boo/../baz",
+			"/a/component/path",
+			"/a/component/path/",
+			"/a/component/path/..",
+			"/a/component/../path/",
+			"///a/./././///component/../////path/",
 			NULL
 			};
 	const char *dst[] = {
@@ -13472,6 +14185,25 @@ static bool run_local_canonicalize_path(int dummy)
 			"/",
 			"/boo",
 			"/",
+			"/",
+			"/",
+			"/",
+			"/",
+			"/",
+			"/...",
+			"/.foo",
+			"/.foo.",
+			"/foo.",
+			"/foo",
+			"/foo/baz",
+			"/",
+			"/",
+			"/baz",
+			"/a/component/path",
+			"/a/component/path",
+			"/a/component",
+			"/a/path",
+			"/a/path",
 			NULL
 			};
 	unsigned int i;
@@ -13783,6 +14515,12 @@ static struct {
 		.name  = "OPLOCK4",
 		.fn    =  run_oplock4,
 	},
+#ifdef HAVE_KERNEL_OPLOCKS_LINUX
+	{
+		.name  = "OPLOCK5",
+		.fn    =  run_oplock5,
+	},
+#endif
 	{
 		.name  = "DIR",
 		.fn    =  run_dirtest,
@@ -13923,6 +14661,10 @@ static struct {
 		.fn    = run_deletetest,
 	},
 	{
+		.name  = "DELETE-STREAM",
+		.fn    = run_delete_stream,
+	},
+	{
 		.name  = "DELETE-PRINT",
 		.fn    = run_delete_print_test,
 	},
@@ -14023,6 +14765,10 @@ static struct {
 		.fn    = run_large_readx,
 	},
 	{
+		.name  = "MSDFS-ATTRIBUTE",
+		.fn    = run_msdfs_attribute,
+	},
+	{
 		.name  = "NTTRANS-CREATE",
 		.fn    = run_nttrans_create,
 	},
@@ -14111,16 +14857,28 @@ static struct {
 		.fn    = run_smb2_dir_fsync,
 	},
 	{
+		.name  = "SMB2-PATH-SLASH",
+		.fn    = run_smb2_path_slash,
+	},
+	{
+		.name  = "SMB1-SYSTEM-SECURITY",
+		.fn    = run_smb1_system_security,
+	},
+	{
+		.name  = "SMB2-SACL",
+		.fn    = run_smb2_sacl,
+	},
+	{
+		.name  = "SMB2-QUOTA1",
+		.fn    = run_smb2_quota1,
+	},
+	{
 		.name  = "CLEANUP1",
 		.fn    = run_cleanup1,
 	},
 	{
 		.name  = "CLEANUP2",
 		.fn    = run_cleanup2,
-	},
-	{
-		.name  = "CLEANUP3",
-		.fn    = run_cleanup3,
 	},
 	{
 		.name  = "CLEANUP4",
@@ -14149,6 +14907,14 @@ static struct {
 	{
 		.name  = "LOCAL-DBWRAP-WATCH2",
 		.fn    = run_dbwrap_watch2,
+	},
+	{
+		.name  = "LOCAL-DBWRAP-WATCH3",
+		.fn    = run_dbwrap_watch3,
+	},
+	{
+		.name  = "LOCAL-DBWRAP-WATCH4",
+		.fn    = run_dbwrap_watch4,
 	},
 	{
 		.name  = "LOCAL-DBWRAP-DO-LOCKED1",
@@ -14259,8 +15025,8 @@ static struct {
 		.fn    = run_local_tdb_writer,
 	},
 	{
-		.name  = "LOCAL-DBWRAP-CTDB",
-		.fn    = run_local_dbwrap_ctdb,
+		.name  = "LOCAL-DBWRAP-CTDB1",
+		.fn    = run_local_dbwrap_ctdb1,
 	},
 	{
 		.name  = "LOCAL-BENCH-PTHREADPOOL",
@@ -14287,12 +15053,24 @@ static struct {
 		.fn    = run_g_lock4,
 	},
 	{
+		.name  = "LOCAL-G-LOCK4A",
+		.fn    = run_g_lock4a,
+	},
+	{
 		.name  = "LOCAL-G-LOCK5",
 		.fn    = run_g_lock5,
 	},
 	{
 		.name  = "LOCAL-G-LOCK6",
 		.fn    = run_g_lock6,
+	},
+	{
+		.name  = "LOCAL-G-LOCK7",
+		.fn    = run_g_lock7,
+	},
+	{
+		.name  = "LOCAL-G-LOCK8",
+		.fn    = run_g_lock8,
 	},
 	{
 		.name  = "LOCAL-G-LOCK-PING-PONG",
@@ -14317,6 +15095,16 @@ static struct {
 	{
 		.name  = "hide-new-files-timeout",
 		.fn    = run_hidenewfiles,
+	},
+#ifdef CLUSTER_SUPPORT
+	{
+		.name  = "ctdbd-conn1",
+		.fn    = run_ctdbd_conn1,
+	},
+#endif
+	{
+		.name  = "readdir-timestamp",
+		.fn    = run_readdir_timestamp,
 	},
 	{
 		.name = NULL,

@@ -143,7 +143,6 @@ static NTSTATUS smb2_create_blob_push_one(TALLOC_CTX *mem_ctx, DATA_BLOB *buffer
 	memcpy(buffer->data+ofs+blob_offset, blob->data.data, blob->data.length);
 	if (next_pad > 0) {
 		memset(buffer->data+ofs+next_offset, 0, next_pad);
-		next_offset += next_pad;
 	}
 
 	return NT_STATUS_OK;
@@ -214,6 +213,10 @@ struct smb2_create_blob *smb2_create_blob_find(const struct smb2_create_blobs *b
 {
 	uint32_t i;
 
+	if (b == NULL) {
+		return NULL;
+	}
+
 	for (i=0; i < b->num_blobs; i++) {
 		if (strcmp(b->blobs[i].tag, tag) == 0) {
 			return &b->blobs[i];
@@ -221,4 +224,19 @@ struct smb2_create_blob *smb2_create_blob_find(const struct smb2_create_blobs *b
 	}
 
 	return NULL;
+}
+
+void smb2_create_blob_remove(struct smb2_create_blobs *b, const char *tag)
+{
+	struct smb2_create_blob *blob = smb2_create_blob_find(b, tag);
+
+	if (blob == NULL) {
+		return;
+	}
+
+	TALLOC_FREE(blob->tag);
+	data_blob_free(&blob->data);
+
+	*blob = b->blobs[b->num_blobs-1];
+	b->num_blobs -= 1;
 }

@@ -359,10 +359,10 @@ static krb5_error_code samba_kdc_message2entry_keys(krb5_context context,
 
 	/* If UF_USE_DES_KEY_ONLY has been set, then don't allow use of the newer enc types */
 	if (userAccountControl & UF_USE_DES_KEY_ONLY) {
-		supported_enctypes = ENC_CRC32|ENC_RSA_MD5;
+		supported_enctypes = 0;
 	} else {
 		/* Otherwise, add in the default enc types */
-		supported_enctypes |= ENC_CRC32 | ENC_RSA_MD5 | ENC_RC4_HMAC_MD5;
+		supported_enctypes |= ENC_RC4_HMAC_MD5;
 	}
 
 	/* Is this the krbtgt or a RODC krbtgt */
@@ -631,17 +631,17 @@ static krb5_error_code samba_kdc_message2entry_keys(krb5_context context,
 							      pkb4->keys[i].value->data,
 							      pkb4->keys[i].value->length,
 							      &key.key);
-			if (ret == KRB5_PROG_ETYPE_NOSUPP) {
-				DEBUG(2,("Unsupported keytype ignored - type %u\n",
-					 pkb4->keys[i].keytype));
-				ret = 0;
-				continue;
-			}
 			if (ret) {
 				if (key.salt) {
 					smb_krb5_free_data_contents(context, &key.salt->salt);
 					free(key.salt);
 					key.salt = NULL;
+				}
+				if (ret == KRB5_PROG_ETYPE_NOSUPP) {
+					DEBUG(2,("Unsupported keytype ignored - type %u\n",
+						 pkb4->keys[i].keytype));
+					ret = 0;
+					continue;
 				}
 				goto out;
 			}
@@ -692,6 +692,12 @@ static krb5_error_code samba_kdc_message2entry_keys(krb5_context context,
 					smb_krb5_free_data_contents(context, &key.salt->salt);
 					free(key.salt);
 					key.salt = NULL;
+				}
+				if (ret == KRB5_PROG_ETYPE_NOSUPP) {
+					DEBUG(2,("Unsupported keytype ignored - type %u\n",
+						 pkb3->keys[i].keytype));
+					ret = 0;
+					continue;
 				}
 				goto out;
 			}
@@ -959,6 +965,29 @@ static krb5_error_code samba_kdc_message2entry(krb5_context context,
 	if (entry_ex->entry.flags.server
 	    && lpcfg_parm_bool(lp_ctx, NULL, "kdc", "require spn for service", true)) {
 		if (!is_computer && !ldb_msg_find_attr_as_string(msg, "servicePrincipalName", NULL)) {
+			entry_ex->entry.flags.server = 0;
+		}
+	}
+
+	/*
+	 * We restrict a 3-part SPN ending in my domain/realm to full
+	 * domain controllers.
+	 *
+	 * This avoids any cases where (eg) a demoted DC still has
+	 * these more restricted SPNs.
+	 */
+	if (krb5_princ_size(context, principal) > 2) {
+		char *third_part
+			= smb_krb5_principal_get_comp_string(mem_ctx,
+							     context,
+							     principal,
+							     2);
+		bool is_our_realm =
+			 lpcfg_is_my_domain_or_realm(lp_ctx,
+						     third_part);
+		bool is_dc = userAccountControl &
+			(UF_SERVER_TRUST_ACCOUNT | UF_PARTIAL_SECRETS_ACCOUNT);
+		if (is_our_realm && !is_dc) {
 			entry_ex->entry.flags.server = 0;
 		}
 	}
@@ -1555,6 +1584,9 @@ static krb5_error_code samba_kdc_trust_message2entry(krb5_context context,
 	entry_ex->entry.max_life = NULL;
 
 	entry_ex->entry.max_renew = NULL;
+
+	/* Match Windows behavior and allow forwardable flag in cross-realm. */
+	entry_ex->entry.flags.forwardable = 1;
 
 	ret = samba_kdc_sort_encryption_keys(entry_ex);
 	if (ret != 0) {
@@ -2499,53 +2531,37 @@ krb5_error_code samba_kdc_nextkey(krb5_context context,
 
 /* Check if a given entry may delegate or do s4u2self to this target principal
  *
- * This is currently a very nasty hack - allowing only delegation to itself.
+ * The safest way to determine 'self' is to check the DB record made at
+ * the time the principal was presented to the KDC.
  */
 krb5_error_code
 samba_kdc_check_s4u2self(krb5_context context,
-			 struct samba_kdc_db_context *kdc_db_ctx,
-			 struct samba_kdc_entry *skdc_entry,
-			 krb5_const_principal target_principal)
+			 struct samba_kdc_entry *skdc_entry_client,
+			 struct samba_kdc_entry *skdc_entry_server_target)
 {
-	krb5_error_code ret;
-	struct ldb_dn *realm_dn;
-	struct ldb_message *msg;
 	struct dom_sid *orig_sid;
 	struct dom_sid *target_sid;
-	const char *delegation_check_attrs[] = {
-		"objectSid", NULL
-	};
+	TALLOC_CTX *frame = talloc_stackframe();
 
-	TALLOC_CTX *mem_ctx = talloc_named(kdc_db_ctx, 0, "samba_kdc_check_s4u2self");
+	orig_sid = samdb_result_dom_sid(frame,
+					skdc_entry_client->msg,
+					"objectSid");
+	target_sid = samdb_result_dom_sid(frame,
+					  skdc_entry_server_target->msg,
+					  "objectSid");
 
-	if (!mem_ctx) {
-		ret = ENOMEM;
-		krb5_set_error_message(context, ret, "samba_kdc_check_s4u2self: talloc_named() failed!");
-		return ret;
-	}
-
-	ret = samba_kdc_lookup_server(context, kdc_db_ctx, mem_ctx, target_principal,
-				      SDB_F_GET_CLIENT|SDB_F_GET_SERVER,
-				      delegation_check_attrs, &realm_dn, &msg);
-
-	if (ret != 0) {
-		talloc_free(mem_ctx);
-		return ret;
-	}
-
-	orig_sid = samdb_result_dom_sid(mem_ctx, skdc_entry->msg, "objectSid");
-	target_sid = samdb_result_dom_sid(mem_ctx, msg, "objectSid");
-
-	/* Allow delegation to the same principal, even if by a different
-	 * name.  The easy and safe way to prove this is by SID
-	 * comparison */
+	/*
+	 * Allow delegation to the same record (representing a
+	 * principal), even if by a different name.  The easy and safe
+	 * way to prove this is by SID comparison
+	 */
 	if (!(orig_sid && target_sid && dom_sid_equal(orig_sid, target_sid))) {
-		talloc_free(mem_ctx);
+		talloc_free(frame);
 		return KRB5KDC_ERR_BADOPTION;
 	}
 
-	talloc_free(mem_ctx);
-	return ret;
+	talloc_free(frame);
+	return 0;
 }
 
 /* Certificates printed by a the Certificate Authority might have a

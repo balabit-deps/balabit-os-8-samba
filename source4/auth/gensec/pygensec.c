@@ -189,7 +189,7 @@ static PyObject *py_gensec_start_server(PyTypeObject *type, PyObject *args, PyOb
 		if (!auth_context) {
 			PyErr_Format(PyExc_TypeError,
 				     "Expected auth.AuthContext for auth_context argument, got %s",
-				     talloc_get_name(pytalloc_get_ptr(py_auth_context)));
+				     pytalloc_get_name(py_auth_context));
 			return NULL;
 		}
 	}
@@ -281,9 +281,10 @@ static PyObject *py_gensec_set_credentials(PyObject *self, PyObject *args)
 
 	creds = PyCredentials_AsCliCredentials(py_creds);
 	if (!creds) {
-		PyErr_Format(PyExc_TypeError,
-			     "Expected samba.credentaials for credentials argument got  %s",
-			     talloc_get_name(pytalloc_get_ptr(py_creds)));
+		PyErr_Format(
+			PyExc_TypeError,
+			"Expected samba.credentials for credentials argument, "
+			"got %s", pytalloc_get_name(py_creds));
 		return NULL;
 	}
 
@@ -309,9 +310,13 @@ static PyObject *py_gensec_session_info(PyObject *self,
 		return NULL;
 	}
 	mem_ctx = talloc_new(NULL);
+	if (mem_ctx == NULL) {
+		return PyErr_NoMemory();
+	}
 
 	status = gensec_session_info(security, mem_ctx, &info);
 	if (NT_STATUS_IS_ERR(status)) {
+		talloc_free(mem_ctx);
 		PyErr_SetNTSTATUS(status);
 		return NULL;
 	}
@@ -336,6 +341,9 @@ static PyObject *py_gensec_session_key(PyObject *self,
 		return NULL;
 	}
 	mem_ctx = talloc_new(NULL);
+	if (mem_ctx == NULL) {
+		return PyErr_NoMemory();
+	}
 
 	status = gensec_session_key(security, mem_ctx, &session_key);
 	if (!NT_STATUS_IS_OK(status)) {
@@ -425,9 +433,9 @@ static PyObject *py_gensec_have_feature(PyObject *self, PyObject *args)
 		return NULL;
 
 	if (gensec_have_feature(security, feature)) {
-		return Py_True;
+		Py_RETURN_TRUE;
 	} 
-	return Py_False;
+	Py_RETURN_FALSE;
 }
 
 static PyObject *py_gensec_set_max_update_size(PyObject *self, PyObject *args)
@@ -449,7 +457,7 @@ static PyObject *py_gensec_max_update_size(PyObject *self,
 	struct gensec_security *security = pytalloc_get_type(self, struct gensec_security);
 	unsigned int max_update_size = gensec_max_update_size(security);
 
-	return PyInt_FromLong(max_update_size);
+	return PyLong_FromLong(max_update_size);
 }
 
 static PyObject *py_gensec_update(PyObject *self, PyObject *args)
@@ -460,18 +468,33 @@ static PyObject *py_gensec_update(PyObject *self, PyObject *args)
 	PyObject *py_bytes, *result, *py_in;
 	struct gensec_security *security = pytalloc_get_type(self, struct gensec_security);
 	PyObject *finished_processing;
+	char *data = NULL;
+	Py_ssize_t len;
+	int err;
 
 	if (!PyArg_ParseTuple(args, "O", &py_in))
 		return NULL;
 
 	mem_ctx = talloc_new(NULL);
-	if (!PyBytes_Check(py_in)) {
-		PyErr_Format(PyExc_TypeError, "bytes expected");
+	if (mem_ctx == NULL) {
+		return PyErr_NoMemory();
+	}
+
+	err = PyBytes_AsStringAndSize(py_in, &data, &len);
+	if (err) {
+		talloc_free(mem_ctx);
 		return NULL;
 	}
 
-	in.data = (uint8_t *)PyBytes_AsString(py_in);
-	in.length = PyBytes_Size(py_in);
+	/*
+	 * Make a copy of the input buffer, as gensec_update may modify its
+	 * input argument.
+	 */
+	in = data_blob_talloc(mem_ctx, data, len);
+	if (!in.data) {
+		talloc_free(mem_ctx);
+		return PyErr_NoMemory();
+	}
 
 	status = gensec_update(security, mem_ctx, in, &out);
 
@@ -509,8 +532,12 @@ static PyObject *py_gensec_wrap(PyObject *self, PyObject *args)
 		return NULL;
 
 	mem_ctx = talloc_new(NULL);
+	if (mem_ctx == NULL) {
+		return PyErr_NoMemory();
+	}
 
 	if (!PyBytes_Check(py_in)) {
+		talloc_free(mem_ctx);
 		PyErr_Format(PyExc_TypeError, "bytes expected");
 		return NULL;
 	}
@@ -539,19 +566,33 @@ static PyObject *py_gensec_unwrap(PyObject *self, PyObject *args)
 	DATA_BLOB in, out;
 	PyObject *ret, *py_in;
 	struct gensec_security *security = pytalloc_get_type(self, struct gensec_security);
+	char *data = NULL;
+	Py_ssize_t len;
+	int err;
 
 	if (!PyArg_ParseTuple(args, "O", &py_in))
 		return NULL;
 
 	mem_ctx = talloc_new(NULL);
+	if (mem_ctx == NULL) {
+		return PyErr_NoMemory();
+	}
 
-	if (!PyBytes_Check(py_in)) {
-		PyErr_Format(PyExc_TypeError, "bytes expected");
+	err = PyBytes_AsStringAndSize(py_in, &data, &len);
+	if (err) {
+		talloc_free(mem_ctx);
 		return NULL;
 	}
 
-	in.data = (uint8_t *)PyBytes_AsString(py_in);
-	in.length = PyBytes_Size(py_in);
+	/*
+	 * Make a copy of the input buffer, as gensec_unwrap may modify its
+	 * input argument.
+	 */
+	in = data_blob_talloc(mem_ctx, data, len);
+	if (!in.data) {
+		talloc_free(mem_ctx);
+		return PyErr_NoMemory();
+	}
 
 	status = gensec_unwrap(security, mem_ctx, &in, &out);
 
@@ -598,6 +639,9 @@ static PyObject *py_gensec_sign_packet(PyObject *self, PyObject *args)
 	pdu.length = pdu_length;
 
 	mem_ctx = talloc_new(NULL);
+	if (mem_ctx == NULL) {
+		return PyErr_NoMemory();
+	}
 
 	status = gensec_sign_packet(security, mem_ctx,
 				    data.data, data.length,
@@ -653,13 +697,13 @@ static PyMethodDef py_gensec_security_methods[] = {
 		METH_VARARGS|METH_KEYWORDS|METH_CLASS,
 		"S.start_server(auth_ctx, settings) -> gensec" },
 	{ "set_credentials", (PyCFunction)py_gensec_set_credentials, METH_VARARGS, 
-		"S.start_client(credentials)" },
+		"S.set_credentials(credentials)" },
 	{ "set_target_hostname", (PyCFunction)py_gensec_set_target_hostname, METH_VARARGS, 
-		"S.start_target_hostname(target_hostname) \n This sets the Kerberos target hostname to obtain a ticket for." },
+		"S.set_target_hostname(target_hostname) \n This sets the Kerberos target hostname to obtain a ticket for." },
 	{ "set_target_service", (PyCFunction)py_gensec_set_target_service, METH_VARARGS, 
-		"S.start_target_service(target_service) \n This sets the Kerberos target service to obtain a ticket for.  The default value is 'host'" },
+		"S.set_target_service(target_service) \n This sets the Kerberos target service to obtain a ticket for.  The default value is 'host'" },
 	{ "set_target_service_description", (PyCFunction)py_gensec_set_target_service_description, METH_VARARGS,
-		"S.start_target_service_description(target_service_description) \n This description is set server-side and used in authentication and authorization logs.  The default value is that provided to set_target_service() or None."},
+		"S.set_target_service_description(target_service_description) \n This description is set server-side and used in authentication and authorization logs.  The default value is that provided to set_target_service() or None."},
 	{ "session_info", (PyCFunction)py_gensec_session_info, METH_NOARGS,
 		"S.session_info() -> info" },
 	{ "session_key", (PyCFunction)py_gensec_session_key, METH_NOARGS,
@@ -692,7 +736,7 @@ static PyMethodDef py_gensec_security_methods[] = {
 		"S.sign_packet(data, whole_pdu) -> sig\nSign a DCERPC packet." },
 	{ "check_packet",  (PyCFunction)py_gensec_check_packet, METH_VARARGS,
 		"S.check_packet(data, whole_pdu, sig)\nCheck a DCERPC packet." },
-	{ NULL }
+	{0}
 };
 
 static struct PyModuleDef moduledef = {
@@ -719,14 +763,14 @@ MODULE_INIT_FUNC(gensec)
 	if (m == NULL)
 		return NULL;
 
-	PyModule_AddObject(m, "FEATURE_SESSION_KEY",     PyInt_FromLong(GENSEC_FEATURE_SESSION_KEY));
-	PyModule_AddObject(m, "FEATURE_SIGN",            PyInt_FromLong(GENSEC_FEATURE_SIGN));
-	PyModule_AddObject(m, "FEATURE_SEAL",            PyInt_FromLong(GENSEC_FEATURE_SEAL));
-	PyModule_AddObject(m, "FEATURE_DCE_STYLE",       PyInt_FromLong(GENSEC_FEATURE_DCE_STYLE));
-	PyModule_AddObject(m, "FEATURE_ASYNC_REPLIES",   PyInt_FromLong(GENSEC_FEATURE_ASYNC_REPLIES));
-	PyModule_AddObject(m, "FEATURE_DATAGRAM_MODE",   PyInt_FromLong(GENSEC_FEATURE_DATAGRAM_MODE));
-	PyModule_AddObject(m, "FEATURE_SIGN_PKT_HEADER", PyInt_FromLong(GENSEC_FEATURE_SIGN_PKT_HEADER));
-	PyModule_AddObject(m, "FEATURE_NEW_SPNEGO",      PyInt_FromLong(GENSEC_FEATURE_NEW_SPNEGO));
+	PyModule_AddObject(m, "FEATURE_SESSION_KEY",     PyLong_FromLong(GENSEC_FEATURE_SESSION_KEY));
+	PyModule_AddObject(m, "FEATURE_SIGN",            PyLong_FromLong(GENSEC_FEATURE_SIGN));
+	PyModule_AddObject(m, "FEATURE_SEAL",            PyLong_FromLong(GENSEC_FEATURE_SEAL));
+	PyModule_AddObject(m, "FEATURE_DCE_STYLE",       PyLong_FromLong(GENSEC_FEATURE_DCE_STYLE));
+	PyModule_AddObject(m, "FEATURE_ASYNC_REPLIES",   PyLong_FromLong(GENSEC_FEATURE_ASYNC_REPLIES));
+	PyModule_AddObject(m, "FEATURE_DATAGRAM_MODE",   PyLong_FromLong(GENSEC_FEATURE_DATAGRAM_MODE));
+	PyModule_AddObject(m, "FEATURE_SIGN_PKT_HEADER", PyLong_FromLong(GENSEC_FEATURE_SIGN_PKT_HEADER));
+	PyModule_AddObject(m, "FEATURE_NEW_SPNEGO",      PyLong_FromLong(GENSEC_FEATURE_NEW_SPNEGO));
 
 	Py_INCREF(&Py_Security);
 	PyModule_AddObject(m, "Security", (PyObject *)&Py_Security);

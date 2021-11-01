@@ -28,7 +28,7 @@ from samba.dcerpc import misc
 from samba.dcerpc import drsuapi
 from samba.ndr import ndr_unpack, ndr_pack
 from samba.dcerpc import drsblobs
-from samba.common import dsdb_Dn
+from samba.samdb import dsdb_Dn
 from samba.dcerpc import security
 from samba.descriptor import get_wellknown_sds, get_diff_sds
 from samba.auth import system_session, admin_session
@@ -621,7 +621,29 @@ newSuperior: %s""" % (str(from_dn), str(to_rdn), str(to_base)))
                 return 0
 
             nc_root = self.samdb.get_nc_root(dn)
-            target_nc_root = self.samdb.get_nc_root(dsdb_dn.dn)
+            try:
+                target_nc_root = self.samdb.get_nc_root(dsdb_dn.dn)
+            except ldb.LdbError as e:
+                (enum, estr) = e.args
+                if enum != ldb.ERR_NO_SUCH_OBJECT:
+                    raise
+                target_nc_root = None
+
+            if target_nc_root is None:
+                # We don't bump the error count as Samba produces
+                # these in normal operation creating a lab domain (due
+                # to the way the rename is handled, links to
+                # now-expunged objects will never be fixed to stay
+                # inside the NC
+                self.report("WARNING: no target object found for GUID "
+                            "component for link "
+                            "%s in object to %s outside our NCs"
+                            "%s - %s" % (attrname, dsdb_dn.dn, dn, val))
+                self.report("Not removing dangling one-way "
+                            "left-over link outside our NCs "
+                            "(we might be building a renamed/lab domain)")
+                return 0
+
             if nc_root != target_nc_root:
                 # We don't bump the error count as Samba produces these
                 # in normal operation
@@ -870,15 +892,15 @@ newSuperior: %s""" % (str(from_dn), str(to_rdn), str(to_base)))
                                 scope=ldb.SCOPE_BASE, attrs=["dsServiceName"])
         assert len(res) == 1
         serviceName = str(res[0]["dsServiceName"][0])
-        if not self.confirm_all('Sieze role %s onto current DC by adding fSMORoleOwner=%s' % (obj.dn, serviceName), 'seize_fsmo_role'):
-            self.report("Not Siezing role %s onto current DC by adding fSMORoleOwner=%s" % (obj.dn, serviceName))
+        if not self.confirm_all('Seize role %s onto current DC by adding fSMORoleOwner=%s' % (obj.dn, serviceName), 'seize_fsmo_role'):
+            self.report("Not Seizing role %s onto current DC by adding fSMORoleOwner=%s" % (obj.dn, serviceName))
             return
         m = ldb.Message()
         m.dn = obj.dn
         m['value'] = ldb.MessageElement(serviceName, ldb.FLAG_MOD_ADD, 'fSMORoleOwner')
         if self.do_modify(m, [],
-                          "Failed to sieze role %s onto current DC by adding fSMORoleOwner=%s" % (obj.dn, serviceName)):
-            self.report("Siezed role %s onto current DC by adding fSMORoleOwner=%s" % (obj.dn, serviceName))
+                          "Failed to seize role %s onto current DC by adding fSMORoleOwner=%s" % (obj.dn, serviceName)):
+            self.report("Seized role %s onto current DC by adding fSMORoleOwner=%s" % (obj.dn, serviceName))
 
     def err_missing_parent(self, obj):
         '''handle a missing parent'''
@@ -1797,6 +1819,11 @@ newSuperior: %s""" % (str(from_dn), str(to_rdn), str(to_base)))
             # old static provision dumps
             return False
 
+        if dn in self.deleted_objects_containers:
+            # The Deleted Objects container will look like an expired
+            # tombstone
+            return False
+
         repl = ndr_unpack(drsblobs.replPropertyMetaDataBlob, repl_val)
 
         isDeleted = self.find_repl_attid(repl, drsuapi.DRSUAPI_ATTID_isDeleted)
@@ -1810,7 +1837,25 @@ newSuperior: %s""" % (str(from_dn), str(to_rdn), str(to_base)))
         if delta <= tombstone_delta:
             return False
 
-        self.report("SKIPING: object %s is an expired tombstone" % dn)
+        expunge_time = delete_time + tombstone_delta
+
+        delta_days = delta / (24 * 60 * 60)
+
+        if delta_days <= 2:
+            self.report("SKIPPING additional checks on object "
+                        "%s which very recently "
+                        "became an expired tombstone (normal)" % dn)
+            self.report("INFO: it is expected this will be expunged "
+                        "by the next daily task some time after %s, "
+                        "%d hours ago"
+                        % (time.ctime(expunge_time), delta // (60 * 60)))
+        else:
+            self.report("SKIPPING: object %s is an expired tombstone" % dn)
+            self.report("INFO: it was expected this object would have "
+                        "been expunged soon after"
+                        "%s, %d days ago"
+                        % (time.ctime(expunge_time), delta_days))
+
         self.report("isDeleted: attid=0x%08x version=%d invocation=%s usn=%s (local=%s) at %s" % (
                     isDeleted.attid,
                     isDeleted.version,

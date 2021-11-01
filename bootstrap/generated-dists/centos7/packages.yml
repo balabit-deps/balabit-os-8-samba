@@ -8,6 +8,9 @@ packages:
   - bind-utils
   - binutils
   - bison
+  - ccache
+  - chrpath
+  - compat-gnutls34-devel
   - cups-devel
   - curl
   - dbus-devel
@@ -20,7 +23,6 @@ packages:
   - git
   - glib2-devel
   - glibc-common
-  - gnutls-devel
   - gpgme-devel
   - gzip
   - hostname
@@ -31,7 +33,6 @@ packages:
   - krb5-server
   - lcov
   - libacl-devel
-  - libaio-devel
   - libarchive-devel
   - libattr-devel
   - libblkid-devel
@@ -52,7 +53,6 @@ packages:
   - make
   - mingw64-gcc
   - ncurses-devel
-  - nettle-devel
   - openldap-devel
   - pam-devel
   - patch
@@ -69,16 +69,12 @@ packages:
   - popt-devel
   - procps-ng
   - psmisc
-  - pygpgme
-  - python-crypto
-  - python-devel
-  - python-dns
-  - python-markdown
   - python36
-  - python36-crypto
+  - python36-cryptography
   - python36-devel
   - python36-dns
   - python36-markdown
+  - python36-pyasn1
   - quota-devel
   - readline-devel
   - redhat-lsb
@@ -90,6 +86,7 @@ packages:
   - systemd-devel
   - tar
   - tree
+  - wget
   - which
   - xfsprogs-devel
   - yum-utils

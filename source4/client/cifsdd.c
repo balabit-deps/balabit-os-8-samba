@@ -622,7 +622,7 @@ int main(int argc, const char ** argv)
 		POPT_COMMON_CONNECTION
 		POPT_COMMON_CREDENTIALS
 		POPT_COMMON_VERSION
-		{ NULL }
+		{0}
 	};
 
 	/* Block sizes. */
@@ -689,6 +689,8 @@ int main(int argc, const char ** argv)
 	CatchSignal(SIGINT, dd_handle_signal);
 	CatchSignal(SIGUSR1, dd_handle_signal);
 	rc = copy_files(ev, cmdline_lp_ctx);
+
+	poptFreeContext(pctx);
 	talloc_free(ev);
 	return rc;
 }

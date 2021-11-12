@@ -1,3 +1,10 @@
+samba (2:4.13.14+dfsg-0ubuntu0.20.04.2) focal; urgency=medium
+
+  * samba.postinst: do not populate sambashare from the Ubuntu admin group
+    (LP: #1942195)
+
+ -- Paride Legovini <paride@ubuntu.com>  Fri, 12 Nov 2021 14:42:02 +0100
+
 samba (2:4.13.14+dfsg-0ubuntu0.20.04.1) focal-security; urgency=medium
 
   * Update to 4.13.14 as a security update (LP: #1950363)

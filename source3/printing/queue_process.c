@@ -31,13 +31,11 @@
 #include "smbd/smbd.h"
 #include "rpc_server/rpc_config.h"
 #include "printing/load.h"
+#include "printing/spoolssd.h"
 #include "rpc_server/spoolss/srv_spoolss_nt.h"
 #include "auth.h"
 #include "nt_printing.h"
 #include "util_event.h"
-
-extern pid_t start_spoolssd(struct tevent_context *ev_ctx,
-			    struct messaging_context *msg_ctx);
 
 /**
  * @brief Purge stale printers and reload from pre-populated pcap cache.
@@ -58,6 +56,8 @@ static void delete_and_reload_printers_full(struct tevent_context *ev,
 {
 	struct auth_session_info *session_info = NULL;
 	struct spoolss_PrinterInfo2 *pinfo2 = NULL;
+	const struct loadparm_substitution *lp_sub =
+		loadparm_s3_global_substitution();
 	int n_services;
 	int pnum;
 	int snum;
@@ -93,7 +93,7 @@ static void delete_and_reload_printers_full(struct tevent_context *ev,
 		}
 
 		sname = lp_const_servicename(snum);
-		pname = lp_printername(session_info, snum);
+		pname = lp_printername(session_info, lp_sub, snum);
 
 		/* check printer, but avoid removing non-autoloaded printers */
 		if (lp_autoloaded(snum) && !pcap_printername_ok(pname)) {
@@ -103,6 +103,7 @@ static void delete_and_reload_printers_full(struct tevent_context *ev,
 						 msg_ctx,
 						 NULL,
 						 lp_servicename(session_info,
+								lp_sub,
 								snum),
 						 &pinfo2)) {
 				nt_printer_publish(session_info,
@@ -431,6 +432,7 @@ pid_t start_background_queue(struct tevent_context *ev,
 /* Run before the parent forks */
 bool printing_subsystem_init(struct tevent_context *ev_ctx,
 			     struct messaging_context *msg_ctx,
+			     struct dcesrv_context *dce_ctx,
 			     bool start_daemons,
 			     bool background_queue)
 {
@@ -444,7 +446,7 @@ bool printing_subsystem_init(struct tevent_context *ev_ctx,
 	/* start as a separate daemon only if enabled */
 	if (start_daemons && rpc_spoolss_daemon() == RPC_DAEMON_FORK) {
 
-		pid = start_spoolssd(ev_ctx, msg_ctx);
+		pid = start_spoolssd(ev_ctx, msg_ctx, dce_ctx);
 
 	} else if (start_daemons && background_queue) {
 

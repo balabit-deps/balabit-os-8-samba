@@ -903,12 +903,6 @@ NTSTATUS tstream_tls_params_client(TALLOC_CTX *mem_ctx,
 	struct tstream_tls_params *tlsp;
 	int ret;
 
-	ret = gnutls_global_init();
-	if (ret != GNUTLS_E_SUCCESS) {
-		DEBUG(0,("TLS %s - %s\n", __location__, gnutls_strerror(ret)));
-		return NT_STATUS_NOT_SUPPORTED;
-	}
-
 	tlsp = talloc_zero(mem_ctx, struct tstream_tls_params);
 	NT_STATUS_HAVE_NO_MEMORY(tlsp);
 
@@ -1041,14 +1035,24 @@ struct tevent_req *_tstream_tls_connect_send(TALLOC_CTX *mem_ctx,
 		return tevent_req_post(req, ev);
 	}
 
-	ret = gnutls_priority_set_direct(tlss->tls_session,
-					 tls_params->tls_priority,
-					 &error_pos);
+	ret = gnutls_set_default_priority(tlss->tls_session);
 	if (ret != GNUTLS_E_SUCCESS) {
-		DEBUG(0,("TLS %s - %s.  Check 'tls priority' option at '%s'\n",
-			 __location__, gnutls_strerror(ret), error_pos));
+		DBG_ERR("TLS %s - %s. Failed to set default priorities\n",
+			__location__, gnutls_strerror(ret));
 		tevent_req_error(req, EINVAL);
 		return tevent_req_post(req, ev);
+	}
+
+	if (strlen(tls_params->tls_priority) > 0) {
+		ret = gnutls_priority_set_direct(tlss->tls_session,
+						 tls_params->tls_priority,
+						 &error_pos);
+		if (ret != GNUTLS_E_SUCCESS) {
+			DEBUG(0,("TLS %s - %s.  Check 'tls priority' option at '%s'\n",
+				 __location__, gnutls_strerror(ret), error_pos));
+			tevent_req_error(req, EINVAL);
+			return tevent_req_post(req, ev);
+		}
 	}
 
 	ret = gnutls_credentials_set(tlss->tls_session,
@@ -1121,12 +1125,6 @@ NTSTATUS tstream_tls_params_server(TALLOC_CTX *mem_ctx,
 
 		*_tlsp = tlsp;
 		return NT_STATUS_OK;
-	}
-
-	ret = gnutls_global_init();
-	if (ret != GNUTLS_E_SUCCESS) {
-		DEBUG(0,("TLS %s - %s\n", __location__, gnutls_strerror(ret)));
-		return NT_STATUS_NOT_SUPPORTED;
 	}
 
 	tlsp = talloc_zero(mem_ctx, struct tstream_tls_params);
@@ -1296,14 +1294,24 @@ struct tevent_req *_tstream_tls_accept_send(TALLOC_CTX *mem_ctx,
 		return tevent_req_post(req, ev);
 	}
 
-	ret = gnutls_priority_set_direct(tlss->tls_session,
-					 tlsp->tls_priority,
-					 &error_pos);
+	ret = gnutls_set_default_priority(tlss->tls_session);
 	if (ret != GNUTLS_E_SUCCESS) {
-		DEBUG(0,("TLS %s - %s.  Check 'tls priority' option at '%s'\n",
-			 __location__, gnutls_strerror(ret), error_pos));
+		DBG_ERR("TLS %s - %s. Failed to set default priorities\n",
+			__location__, gnutls_strerror(ret));
 		tevent_req_error(req, EINVAL);
 		return tevent_req_post(req, ev);
+	}
+
+	if (strlen(tlsp->tls_priority) > 0) {
+		ret = gnutls_priority_set_direct(tlss->tls_session,
+						 tlsp->tls_priority,
+						 &error_pos);
+		if (ret != GNUTLS_E_SUCCESS) {
+			DEBUG(0,("TLS %s - %s.  Check 'tls priority' option at '%s'\n",
+				 __location__, gnutls_strerror(ret), error_pos));
+			tevent_req_error(req, EINVAL);
+			return tevent_req_post(req, ev);
+		}
 	}
 
 	ret = gnutls_credentials_set(tlss->tls_session, GNUTLS_CRD_CERTIFICATE,

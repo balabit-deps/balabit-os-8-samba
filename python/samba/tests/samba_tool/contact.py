@@ -78,8 +78,8 @@ class ContactCmdTestCase(SambaToolCmdTest):
             self.assertIsNotNone(found)
 
             contactname = contact["expectedname"]
-            self.assertEquals("%s" % found.get("name"), contactname)
-            self.assertEquals("%s" % found.get("description"),
+            self.assertEqual("%s" % found.get("name"), contactname)
+            self.assertEqual("%s" % found.get("description"),
                               contact["description"])
 
     def tearDown(self):
@@ -122,15 +122,15 @@ class ContactCmdTestCase(SambaToolCmdTest):
             (result, out, err) = self._create_contact(contact, ou="OU=testOU")
 
             self.assertCmdSuccess(result, out, err)
-            self.assertEquals(err, "", "There shouldn't be any error message")
+            self.assertEqual(err, "", "There shouldn't be any error message")
             self.assertIn("Contact '%s' created successfully" %
                           contact["expectedname"], out)
 
             found = self._find_contact(contact["expectedname"])
 
             contactname = contact["expectedname"]
-            self.assertEquals("%s" % found.get("name"), contactname)
-            self.assertEquals("%s" % found.get("description"),
+            self.assertEqual("%s" % found.get("name"), contactname)
+            self.assertEqual("%s" % found.get("description"),
                               contact["description"])
 
         # try to delete all the contacts we just created, by DN
@@ -160,15 +160,15 @@ class ContactCmdTestCase(SambaToolCmdTest):
             (result, out, err) = self._create_contact(contact)
 
             self.assertCmdSuccess(result, out, err)
-            self.assertEquals(err, "", "There shouldn't be any error message")
+            self.assertEqual(err, "", "There shouldn't be any error message")
             self.assertIn("Contact '%s' created successfully" %
                           contact["expectedname"], out)
 
             found = self._find_contact(contact["expectedname"])
 
             contactname = contact["expectedname"]
-            self.assertEquals("%s" % found.get("name"), contactname)
-            self.assertEquals("%s" % found.get("description"),
+            self.assertEqual("%s" % found.get("name"), contactname)
+            self.assertEqual("%s" % found.get("description"),
                               contact["description"])
 
     def test_list(self):
@@ -204,6 +204,25 @@ class ContactCmdTestCase(SambaToolCmdTest):
             self.assertMatch(out, str(contactobj.dn),
                              "contact '%s' not found" % str(contactobj.dn))
 
+    def test_list_base_dn(self):
+        base_dn = str(self.samdb.domain_dn())
+        (result, out, err) = self.runsubcmd("contact", "list",
+                                            "-b", base_dn)
+        self.assertCmdSuccess(result, out, err, "Error running list")
+
+        search_filter = "(objectClass=contact)"
+        contactlist = self.samdb.search(base=base_dn,
+                                         scope=ldb.SCOPE_SUBTREE,
+                                         expression=search_filter,
+                                         attrs=["name"])
+
+        self.assertTrue(len(contactlist) > 0, "no contacts found in samdb")
+
+        for contactobj in contactlist:
+            name = contactobj.get("name", idx=0)
+            self.assertMatch(out, str(name),
+                             "contact '%s' not found" % name)
+
     def test_move(self):
         parentou = self._randomOU({"name": "parentOU"})
         (result, out, err) = self._create_ou(parentou)
@@ -218,7 +237,7 @@ class ContactCmdTestCase(SambaToolCmdTest):
             self.assertCmdSuccess(result, out, err,
                                   "Failed to move contact '%s'" %
                                   contact["expectedname"])
-            self.assertEquals(err, "", "There shouldn't be any error message")
+            self.assertEqual(err, "", "There shouldn't be any error message")
             self.assertIn('Moved contact "%s"' % contact["expectedname"], out)
 
             found = self._find_contact(contact["expectedname"])
@@ -231,7 +250,7 @@ class ContactCmdTestCase(SambaToolCmdTest):
                                    (contactname,
                                     parentou["name"],
                                     self.samdb.domain_dn()))
-            self.assertEquals(found.get("dn"), newexpecteddn,
+            self.assertEqual(found.get("dn"), newexpecteddn,
                               "Moved contact '%s' does not exist" %
                               contact["expectedname"])
 

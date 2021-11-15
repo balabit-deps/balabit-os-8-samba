@@ -573,15 +573,15 @@ static void reprocess_deferred_call(struct tevent_context *ev,
    fetch-lock has finished.
    at this stage, immediately start reprocessing the queued up deferred
    calls so they get reprocessed immediately (and since we are dmaster at
-   this stage, trigger the waiting smbd processes to pick up and aquire the
+   this stage, trigger the waiting smbd processes to pick up and acquire the
    record right away.
 */
 static int deferred_fetch_queue_destructor(struct ctdb_deferred_fetch_queue *dfq)
 {
 
-	/* need to reprocess the packets from the queue explicitely instead of
-	   just using a normal destructor since we want, need, to
-	   call the clients in the same oder as the requests queued up
+	/* need to reprocess the packets from the queue explicitly instead of
+	   just using a normal destructor since we need to
+	   call the clients in the same order as the requests queued up
 	*/
 	while (dfq->deferred_calls != NULL) {
 		struct ctdb_client *client;
@@ -1173,7 +1173,7 @@ static void ctdb_accept_client(struct tevent_context *ev,
 */
 static int ux_socket_bind(struct ctdb_context *ctdb)
 {
-	struct sockaddr_un addr;
+	struct sockaddr_un addr = { .sun_family = AF_UNIX };
 	int ret;
 
 	ctdb->daemon.sd = socket(AF_UNIX, SOCK_STREAM, 0);
@@ -1181,8 +1181,6 @@ static int ux_socket_bind(struct ctdb_context *ctdb)
 		return -1;
 	}
 
-	memset(&addr, 0, sizeof(addr));
-	addr.sun_family = AF_UNIX;
 	strncpy(addr.sun_path, ctdb->daemon.name, sizeof(addr.sun_path)-1);
 
 	if (! sock_clean(ctdb->daemon.name)) {
@@ -1227,28 +1225,51 @@ failed:
 	return -1;	
 }
 
-static void initialise_node_flags (struct ctdb_context *ctdb)
+struct ctdb_node *ctdb_find_node(struct ctdb_context *ctdb, uint32_t pnn)
 {
+	struct ctdb_node *node = NULL;
 	unsigned int i;
+
+	if (pnn == CTDB_CURRENT_NODE) {
+		pnn = ctdb->pnn;
+	}
 
 	/* Always found: PNN correctly set just before this is called */
 	for (i = 0; i < ctdb->num_nodes; i++) {
-		if (ctdb->pnn == ctdb->nodes[i]->pnn) {
-			break;
+		node = ctdb->nodes[i];
+		if (pnn == node->pnn) {
+			return node;
 		}
 	}
 
-	ctdb->nodes[i]->flags &= ~NODE_FLAGS_DISCONNECTED;
+	return NULL;
+}
+
+static void initialise_node_flags (struct ctdb_context *ctdb)
+{
+	struct ctdb_node *node = NULL;
+
+	node = ctdb_find_node(ctdb, CTDB_CURRENT_NODE);
+	/*
+	 * PNN correctly set just before this is called so always
+	 * found but keep static analysers happy...
+	 */
+	if (node == NULL) {
+		DBG_ERR("Unable to find current node\n");
+		return;
+	}
+
+	node->flags &= ~NODE_FLAGS_DISCONNECTED;
 
 	/* do we start out in DISABLED mode? */
 	if (ctdb->start_as_disabled != 0) {
 		D_ERR("This node is configured to start in DISABLED state\n");
-		ctdb->nodes[i]->flags |= NODE_FLAGS_DISABLED;
+		node->flags |= NODE_FLAGS_PERMANENTLY_DISABLED;
 	}
 	/* do we start out in STOPPED mode? */
 	if (ctdb->start_as_stopped != 0) {
 		D_ERR("This node is configured to start in STOPPED state\n");
-		ctdb->nodes[i]->flags |= NODE_FLAGS_STOPPED;
+		node->flags |= NODE_FLAGS_STOPPED;
 	}
 }
 
@@ -1391,15 +1412,92 @@ static void ctdb_set_my_pnn(struct ctdb_context *ctdb)
 	D_NOTICE("PNN is %u\n", ctdb->pnn);
 }
 
+static void stdin_handler(struct tevent_context *ev,
+			  struct tevent_fd *fde,
+			  uint16_t flags,
+			  void *private_data)
+{
+	struct ctdb_context *ctdb = talloc_get_type_abort(
+		private_data, struct ctdb_context);
+	ssize_t nread;
+	char c;
+
+	nread = read(STDIN_FILENO, &c, 1);
+	if (nread != 1) {
+		D_ERR("stdin closed, exiting\n");
+		talloc_free(fde);
+		ctdb_shutdown_sequence(ctdb, EPIPE);
+	}
+}
+
+static int setup_stdin_handler(struct ctdb_context *ctdb)
+{
+	struct tevent_fd *fde;
+	struct stat st;
+	int ret;
+
+	ret = fstat(STDIN_FILENO, &st);
+	if (ret != 0) {
+		/* Problem with stdin, ignore... */
+		DBG_INFO("Can't fstat() stdin\n");
+		return 0;
+	}
+
+	if (!S_ISFIFO(st.st_mode)) {
+		DBG_INFO("Not a pipe...\n");
+		return 0;
+	}
+
+	fde = tevent_add_fd(ctdb->ev,
+			    ctdb,
+			    STDIN_FILENO,
+			    TEVENT_FD_READ,
+			    stdin_handler,
+			    ctdb);
+	if (fde == NULL) {
+		return ENOMEM;
+	}
+
+	DBG_INFO("Set up stdin handler\n");
+	return 0;
+}
+
+static void fork_only(void)
+{
+	pid_t pid;
+
+	pid = fork();
+	if (pid == -1) {
+		D_ERR("Fork failed (errno=%d)\n", errno);
+		exit(1);
+	}
+
+	if (pid != 0) {
+		/* Parent simply exits... */
+		exit(0);
+	}
+}
+
 /*
   start the protocol going as a daemon
 */
-int ctdb_start_daemon(struct ctdb_context *ctdb, bool do_fork)
+int ctdb_start_daemon(struct ctdb_context *ctdb,
+		      bool interactive,
+		      bool test_mode_enabled)
 {
 	int res, ret = -1;
 	struct tevent_fd *fde;
 
-	become_daemon(do_fork, !do_fork, false);
+	/* Fork if not interactive */
+	if (!interactive) {
+		if (test_mode_enabled) {
+			/* Keep stdin open */
+			fork_only();
+		} else {
+			/* Fork, close stdin, start a session */
+			become_daemon(true, false, false);
+		}
+	}
 
 	ignore_signal(SIGPIPE);
 	ignore_signal(SIGUSR1);
@@ -1446,8 +1544,17 @@ int ctdb_start_daemon(struct ctdb_context *ctdb, bool do_fork)
 		exit(1);
 	}
 
-	if (do_fork) {
+	if (!interactive) {
 		ctdb_set_child_logging(ctdb);
+	}
+
+	/* Exit if stdin is closed */
+	if (test_mode_enabled) {
+		ret = setup_stdin_handler(ctdb);
+		if (ret != 0) {
+			DBG_ERR("Failed to setup stdin handler\n");
+			exit(1);
+		}
 	}
 
 	TALLOC_FREE(ctdb->srv);

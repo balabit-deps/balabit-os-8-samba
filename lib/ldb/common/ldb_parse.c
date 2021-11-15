@@ -43,25 +43,15 @@
 #include "ldb_private.h"
 #include "system/locale.h"
 
-static int ldb_parse_hex2char(const char *x)
-{
-	if (isxdigit(x[0]) && isxdigit(x[1])) {
-		const char h1 = x[0], h2 = x[1];
-		int c = 0;
-
-		if (h1 >= 'a') c = h1 - (int)'a' + 10;
-		else if (h1 >= 'A') c = h1 - (int)'A' + 10;
-		else if (h1 >= '0') c = h1 - (int)'0';
-		c = c << 4;
-		if (h2 >= 'a') c += h2 - (int)'a' + 10;
-		else if (h2 >= 'A') c += h2 - (int)'A' + 10;
-		else if (h2 >= '0') c += h2 - (int)'0';
-
-		return c;
-	}
-
-	return -1;
-}
+/*
+ * Maximum depth of the filter parse tree, the value chosen is small enough to
+ * avoid triggering ASAN stack overflow checks. But large enough to be useful.
+ *
+ * On Windows clients the maximum number of levels of recursion allowed is 100.
+ * In the LDAP server, Windows restricts clients to 512 nested
+ * (eg) OR statements.
+ */
+#define LDB_MAX_PARSE_TREE_DEPTH 128
 
 /*
 a filter is defined by:
@@ -91,10 +81,11 @@ struct ldb_val ldb_binary_decode(TALLOC_CTX *mem_ctx, const char *str)
 
 	for (i=j=0;i<slen;i++) {
 		if (str[i] == '\\') {
-			int c;
+			uint8_t c;
+			bool ok;
 
-			c = ldb_parse_hex2char(&str[i+1]);
-			if (c == -1) {
+			ok = hex_byte(&str[i+1], &c);
+			if (!ok) {
 				talloc_free(ret.data);
 				memset(&ret, 0, sizeof(ret));
 				return ret;
@@ -231,7 +222,11 @@ static struct ldb_val **ldb_wildcard_decode(TALLOC_CTX *mem_ctx, const char *str
 	return ret;
 }
 
-static struct ldb_parse_tree *ldb_parse_filter(TALLOC_CTX *mem_ctx, const char **s);
+static struct ldb_parse_tree *ldb_parse_filter(
+	TALLOC_CTX *mem_ctx,
+	const char **s,
+	unsigned depth,
+	unsigned max_depth);
 
 
 /*
@@ -498,7 +493,11 @@ static struct ldb_parse_tree *ldb_parse_simple(TALLOC_CTX *mem_ctx, const char *
   <or> ::= '|' <filterlist>
   <filterlist> ::= <filter> | <filter> <filterlist>
 */
-static struct ldb_parse_tree *ldb_parse_filterlist(TALLOC_CTX *mem_ctx, const char **s)
+static struct ldb_parse_tree *ldb_parse_filterlist(
+	TALLOC_CTX *mem_ctx,
+	const char **s,
+	unsigned depth,
+	unsigned max_depth)
 {
 	struct ldb_parse_tree *ret, *next;
 	enum ldb_parse_op op;
@@ -533,7 +532,8 @@ static struct ldb_parse_tree *ldb_parse_filterlist(TALLOC_CTX *mem_ctx, const ch
 		return NULL;
 	}
 
-	ret->u.list.elements[0] = ldb_parse_filter(ret->u.list.elements, &p);
+	ret->u.list.elements[0] =
+		ldb_parse_filter(ret->u.list.elements, &p, depth, max_depth);
 	if (!ret->u.list.elements[0]) {
 		talloc_free(ret);
 		return NULL;
@@ -547,7 +547,8 @@ static struct ldb_parse_tree *ldb_parse_filterlist(TALLOC_CTX *mem_ctx, const ch
 			break;
 		}
 
-		next = ldb_parse_filter(ret->u.list.elements, &p);
+		next = ldb_parse_filter(
+			ret->u.list.elements, &p, depth, max_depth);
 		if (next == NULL) {
 			/* an invalid filter element */
 			talloc_free(ret);
@@ -576,7 +577,11 @@ static struct ldb_parse_tree *ldb_parse_filterlist(TALLOC_CTX *mem_ctx, const ch
 /*
   <not> ::= '!' <filter>
 */
-static struct ldb_parse_tree *ldb_parse_not(TALLOC_CTX *mem_ctx, const char **s)
+static struct ldb_parse_tree *ldb_parse_not(
+	TALLOC_CTX *mem_ctx,
+	const char **s,
+	unsigned depth,
+	unsigned max_depth)
 {
 	struct ldb_parse_tree *ret;
 	const char *p = *s;
@@ -593,7 +598,7 @@ static struct ldb_parse_tree *ldb_parse_not(TALLOC_CTX *mem_ctx, const char **s)
 	}
 
 	ret->operation = LDB_OP_NOT;
-	ret->u.isnot.child = ldb_parse_filter(ret, &p);
+	ret->u.isnot.child = ldb_parse_filter(ret, &p, depth, max_depth);
 	if (!ret->u.isnot.child) {
 		talloc_free(ret);
 		return NULL;
@@ -608,7 +613,11 @@ static struct ldb_parse_tree *ldb_parse_not(TALLOC_CTX *mem_ctx, const char **s)
   parse a filtercomp
   <filtercomp> ::= <and> | <or> | <not> | <simple>
 */
-static struct ldb_parse_tree *ldb_parse_filtercomp(TALLOC_CTX *mem_ctx, const char **s)
+static struct ldb_parse_tree *ldb_parse_filtercomp(
+	TALLOC_CTX *mem_ctx,
+	const char **s,
+	unsigned depth,
+	unsigned max_depth)
 {
 	struct ldb_parse_tree *ret;
 	const char *p = *s;
@@ -617,15 +626,15 @@ static struct ldb_parse_tree *ldb_parse_filtercomp(TALLOC_CTX *mem_ctx, const ch
 
 	switch (*p) {
 	case '&':
-		ret = ldb_parse_filterlist(mem_ctx, &p);
+		ret = ldb_parse_filterlist(mem_ctx, &p, depth, max_depth);
 		break;
 
 	case '|':
-		ret = ldb_parse_filterlist(mem_ctx, &p);
+		ret = ldb_parse_filterlist(mem_ctx, &p, depth, max_depth);
 		break;
 
 	case '!':
-		ret = ldb_parse_not(mem_ctx, &p);
+		ret = ldb_parse_not(mem_ctx, &p, depth, max_depth);
 		break;
 
 	case '(':
@@ -641,21 +650,34 @@ static struct ldb_parse_tree *ldb_parse_filtercomp(TALLOC_CTX *mem_ctx, const ch
 	return ret;
 }
 
-
 /*
   <filter> ::= '(' <filtercomp> ')'
 */
-static struct ldb_parse_tree *ldb_parse_filter(TALLOC_CTX *mem_ctx, const char **s)
+static struct ldb_parse_tree *ldb_parse_filter(
+	TALLOC_CTX *mem_ctx,
+	const char **s,
+	unsigned depth,
+	unsigned max_depth)
 {
 	struct ldb_parse_tree *ret;
 	const char *p = *s;
+
+	/*
+	 * Check the depth of the parse tree, and reject the input if
+	 * max_depth exceeded. This avoids stack overflow
+	 * issues.
+	 */
+	if (depth > max_depth) {
+		return NULL;
+	}
+	depth++;
 
 	if (*p != '(') {
 		return NULL;
 	}
 	p++;
 
-	ret = ldb_parse_filtercomp(mem_ctx, &p);
+	ret = ldb_parse_filtercomp(mem_ctx, &p, depth, max_depth);
 
 	if (*p != ')') {
 		return NULL;
@@ -679,6 +701,8 @@ static struct ldb_parse_tree *ldb_parse_filter(TALLOC_CTX *mem_ctx, const char *
 */
 struct ldb_parse_tree *ldb_parse_tree(TALLOC_CTX *mem_ctx, const char *s)
 {
+	unsigned depth = 0;
+
 	while (s && isspace((unsigned char)*s)) s++;
 
 	if (s == NULL || *s == 0) {
@@ -686,7 +710,8 @@ struct ldb_parse_tree *ldb_parse_tree(TALLOC_CTX *mem_ctx, const char *s)
 	}
 
 	if (*s == '(') {
-		return ldb_parse_filter(mem_ctx, &s);
+		return ldb_parse_filter(
+			mem_ctx, &s, depth, LDB_MAX_PARSE_TREE_DEPTH);
 	}
 
 	return ldb_parse_simple(mem_ctx, &s);

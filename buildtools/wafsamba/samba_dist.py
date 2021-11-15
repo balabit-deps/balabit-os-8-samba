@@ -4,7 +4,7 @@
 import os, sys, tarfile
 from waflib import Utils, Scripting, Logs, Options
 from waflib.Configure import conf
-from samba_utils import os_path_relpath, get_string
+from samba_utils import get_string
 from waflib import Context
 
 dist_dirs = None
@@ -109,9 +109,9 @@ def vcs_dir_contents(path):
     """
     repo = path
     while repo != "/":
-        if os.path.isdir(os.path.join(repo, ".git")):
+        if os.path.exists(os.path.join(repo, ".git")):
             ls_files_cmd = [ 'git', 'ls-files', '--full-name',
-                             os_path_relpath(path, repo) ]
+                             os.path.relpath(path, repo) ]
             cwd = None
             env = dict(os.environ)
             env["GIT_DIR"] = os.path.join(repo, ".git")

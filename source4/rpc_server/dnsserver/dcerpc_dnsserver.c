@@ -22,6 +22,7 @@
 #include "includes.h"
 #include "talloc.h"
 #include "rpc_server/dcerpc_server.h"
+#include "rpc_server/common/common.h"
 #include "dsdb/samdb/samdb.h"
 #include "lib/util/dlinklist.h"
 #include "librpc/gen_ndr/ndr_dnsserver.h"
@@ -104,8 +105,6 @@ static void dnsserver_reload_zones(struct dnsserver_state *dsstate)
 
 static struct dnsserver_state *dnsserver_connect(struct dcesrv_call_state *dce_call)
 {
-	struct auth_session_info *session_info =
-		dcesrv_call_session_info(dce_call);
 	struct dnsserver_state *dsstate;
 	struct dnsserver_zone *zones, *z, *znext;
 	struct dnsserver_partition *partitions, *p;
@@ -125,13 +124,7 @@ static struct dnsserver_state *dnsserver_connect(struct dcesrv_call_state *dce_c
 
 	dsstate->lp_ctx = dce_call->conn->dce_ctx->lp_ctx;
 
-	/* FIXME: create correct auth_session_info for connecting user */
-	dsstate->samdb = samdb_connect(dsstate,
-				       dce_call->event_ctx,
-				       dsstate->lp_ctx,
-				       session_info,
-				       dce_call->conn->remote_address,
-				       0);
+	dsstate->samdb = dcesrv_samdb_connect_as_user(dsstate, dce_call);
 	if (dsstate->samdb == NULL) {
 		DEBUG(0,("dnsserver: Failed to open samdb"));
 		goto failed;
@@ -1759,15 +1752,17 @@ static WERROR dnsserver_enumerate_records(struct dnsserver_state *dsstate,
 	TALLOC_CTX *tmp_ctx;
 	char *name;
 	const char * const attrs[] = { "name", "dnsRecord", NULL };
-	struct ldb_result *res;
-	struct DNS_RPC_RECORDS_ARRAY *recs;
+	struct ldb_result *res = NULL;
+	struct DNS_RPC_RECORDS_ARRAY *recs = NULL;
 	char **add_names = NULL;
-	char *rname;
+	char *rname = NULL;
 	const char *preference_name = NULL;
 	int add_count = 0;
 	int i, ret, len;
 	WERROR status;
-	struct dns_tree *tree, *base, *node;
+	struct dns_tree *tree = NULL;
+	struct dns_tree *base = NULL;
+	struct dns_tree *node = NULL;
 
 	tmp_ctx = talloc_new(mem_ctx);
 	W_ERROR_HAVE_NO_MEMORY(tmp_ctx);
@@ -1850,15 +1845,15 @@ static WERROR dnsserver_enumerate_records(struct dnsserver_state *dsstate,
 		}
 	}
 
-	talloc_free(res);
-	talloc_free(tree);
-	talloc_free(name);
+	TALLOC_FREE(res);
+	TALLOC_FREE(tree);
+	TALLOC_FREE(name);
 
 	/* Add any additional records */
 	if (select_flag & DNS_RPC_VIEW_ADDITIONAL_DATA) {
 		for (i=0; i<add_count; i++) {
-			struct dnsserver_zone *z2;
-
+			struct dnsserver_zone *z2 = NULL;
+			struct ldb_message *msg = NULL;
 			/* Search all the available zones for additional name */
 			for (z2 = dsstate->zones; z2; z2 = z2->next) {
 				char *encoded_name;
@@ -1870,14 +1865,15 @@ static WERROR dnsserver_enumerate_records(struct dnsserver_state *dsstate,
 						LDB_SCOPE_ONELEVEL, attrs,
 						"(&(objectClass=dnsNode)(name=%s)(!(dNSTombstoned=TRUE)))",
 						encoded_name);
-				talloc_free(name);
+				TALLOC_FREE(name);
 				if (ret != LDB_SUCCESS) {
 					continue;
 				}
 				if (res->count == 1) {
+					msg = res->msgs[0];
 					break;
 				} else {
-					talloc_free(res);
+					TALLOC_FREE(res);
 					continue;
 				}
 			}
@@ -1890,10 +1886,10 @@ static WERROR dnsserver_enumerate_records(struct dnsserver_state *dsstate,
 			}
 			status = dns_fill_records_array(tmp_ctx, NULL, DNS_TYPE_A,
 							select_flag, rname,
-							res->msgs[0], 0, recs,
+							msg, 0, recs,
 							NULL, NULL);
-			talloc_free(rname);
-			talloc_free(res);
+			TALLOC_FREE(rname);
+			TALLOC_FREE(res);
 			if (!W_ERROR_IS_OK(status)) {
 				talloc_free(tmp_ctx);
 				return status;

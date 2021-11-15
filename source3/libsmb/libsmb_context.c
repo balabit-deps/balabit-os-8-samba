@@ -209,6 +209,7 @@ smbc_new_context(void)
         smbc_setFunctionClosedir(context, SMBC_closedir_ctx);
         smbc_setFunctionReaddir(context, SMBC_readdir_ctx);
         smbc_setFunctionReaddirPlus(context, SMBC_readdirplus_ctx);
+	smbc_setFunctionReaddirPlus2(context, SMBC_readdirplus2_ctx);
         smbc_setFunctionGetdents(context, SMBC_getdents_ctx);
         smbc_setFunctionMkdir(context, SMBC_mkdir_ctx);
         smbc_setFunctionRmdir(context, SMBC_rmdir_ctx);
@@ -702,7 +703,7 @@ smbc_init_context(SMBCCTX *context)
 }
 
 
-/* Return the verion of samba, and thus libsmbclient */
+/* Return the version of samba, and thus libsmbclient */
 const char *
 smbc_version(void)
 {

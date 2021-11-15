@@ -111,7 +111,6 @@ static bool dnsp_dnsProperty_addr_array_check(struct torture_context *tctx,
 	const struct dnsp_dns_addr *a1 = NULL;
 	const struct dnsp_dns_addr *a2 = NULL;
 
-	 NDR_PRINT_DEBUG(dnsp_DnsProperty, r);
 	/*
 	 * NDR_PRINT_DEBUG(dnsp_DnsProperty, r); gave:
 	 *
@@ -333,10 +332,27 @@ static bool dnsp_dnsProperty_deleted_by_check(struct torture_context *tctx,
 	torture_assert_int_equal(tctx, r->version, 1, "version");
 	torture_assert_int_equal(tctx, r->id, DSPROPERTY_ZONE_DELETED_FROM_HOSTNAME, "id");
 	torture_assert_str_equal(tctx, r->data.deleted_by_hostname, "w2k3-191.w2k3.base", "hostname");
-	torture_assert_int_equal(tctx, r->name, 4092359108, "name (random)");
+	torture_assert_int_equal(tctx, r->name, 0xf3ec71c4, "name (random)");
 
 	return true;
 }
+
+/*
+ * Copy of dnsp_dnsProperty_deleted_by_b64 with wDataLength set to 0
+ * and no data in the data element.
+ * This is a reproducer for https://bugzilla.samba.org/show_bug.cgi?id=14206
+ * The dns_property_id was retained so once parsed this structure referenced
+ * memory past it's end.
+ *
+ * [0000] 00 00 00 00 01 EE C4 71   00 00 00 00 01 00 00 00   &......q ........
+ * [0010] 80 00 00 00 77 00 32 00   6B 00 33 00 2D 00 31 00   ....w.2. k.3.-.1.
+ * [0020] 39 00 31 00 2E 00 77 00   32 00 6B 00 33 00 2E 00   9.1...w. 2.k.3...
+ * [0030] 62 00 61 00 73 00 65 00   00 00 C4 71 EC F3         b.a.s.e. ...q..
+ */
+static const uint8_t dnsp_dnsProperty_deleted_by_zero_wDataLength[] = {
+	0x00, 0x00, 0x00, 0x00, 0x01, 0xEE, 0xC4, 0x71, 0x00, 0x00, 0x00,
+	0x00, 0x01, 0x00, 0x00, 0x00, 0x80, 0x00, 0x00, 0x00,
+	0xC4, 0x71, 0xEC, 0xF3 };
 
 struct torture_suite *ndr_dnsp_suite(TALLOC_CTX *ctx)
 {
@@ -362,6 +378,12 @@ struct torture_suite *ndr_dnsp_suite(TALLOC_CTX *ctx)
 		"DELETED_FROM_HOSTNAME",
 		dnsp_dnsProperty_deleted_by_b64,
 		dnsp_dnsProperty_deleted_by_check);
+
+	torture_suite_add_ndr_pull_invalid_data_test(
+		suite,
+		dnsp_DnsProperty,
+		dnsp_dnsProperty_deleted_by_zero_wDataLength,
+		NDR_ERR_BUFSIZE);
 
 	return suite;
 }

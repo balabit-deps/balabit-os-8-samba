@@ -15,6 +15,9 @@ uninstall:
 test:
 	$(WAF) test $(TEST_OPTIONS)
 
+testonly:
+	$(WAF) testonly $(TEST_OPTIONS)
+
 perftest:
 	$(WAF) test --perf-test $(TEST_OPTIONS)
 
@@ -100,7 +103,7 @@ pydoctor:
 pep8:
 	$(WAF) pep8
 
-# Adding force on the depencies will force the target to be always rebuild form the Make
+# Adding force on the dependencies will force the target to be always rebuild form the Make
 # point of view forcing make to invoke waf
 
 bin/smbd: FORCE

@@ -81,7 +81,6 @@ static bool set_my_netbios_names(const char *name, int i)
 void gfree_names(void)
 {
 	free_netbios_names_array();
-	free_local_machine_name();
 }
 
 const char *my_netbios_names(int i)
@@ -147,8 +146,6 @@ bool init_names(void)
 		return False;
 	}
 
-	set_local_machine_name(lp_netbios_name(),false);
-
 	DEBUG( 5, ("Netbios name list:-\n") );
 	for( n=0; my_netbios_names(n); n++ ) {
 		DEBUGADD( 5, ("my_netbios_names[%d]=\"%s\"\n",
@@ -184,4 +181,37 @@ const char *my_sam_name(void)
 	}
 
 	return lp_workgroup();
+}
+
+bool is_allowed_domain(const char *domain_name)
+{
+	const char **ignored_domains = NULL;
+	const char **dom = NULL;
+
+	ignored_domains = lp_parm_string_list(-1,
+					      "winbind",
+					      "ignore domains",
+					      NULL);
+
+	for (dom = ignored_domains; dom != NULL && *dom != NULL; dom++) {
+		if (gen_fnmatch(*dom, domain_name) == 0) {
+			DBG_NOTICE("Ignoring domain '%s'\n", domain_name);
+			return false;
+		}
+	}
+
+	if (lp_allow_trusted_domains()) {
+		return true;
+	}
+
+	if (strequal(lp_workgroup(), domain_name)) {
+		return true;
+	}
+
+	if (is_myname(domain_name)) {
+		return true;
+	}
+
+	DBG_NOTICE("Not trusted domain '%s'\n", domain_name);
+	return false;
 }

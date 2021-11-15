@@ -69,7 +69,7 @@ static uint32_t build_ep_list(TALLOC_CTX *mem_ctx,
 			if (!*eps) {
 				return 0;
 			}
-			(*eps)[total].name = iface->iface.name;
+			(*eps)[total].name = iface->iface->name;
 
 			description = dcerpc_binding_dup(*eps, d->ep_description);
 			if (description == NULL) {
@@ -77,7 +77,7 @@ static uint32_t build_ep_list(TALLOC_CTX *mem_ctx,
 			}
 
 			status = dcerpc_binding_set_abstract_syntax(description,
-							&iface->iface.syntax_id);
+						&iface->iface->syntax_id);
 			if (!NT_STATUS_IS_OK(status)) {
 				return 0;
 			}
@@ -85,8 +85,9 @@ static uint32_t build_ep_list(TALLOC_CTX *mem_ctx,
 			status = dcerpc_binding_build_tower(*eps, description, &(*eps)[total].ep);
 			TALLOC_FREE(description);
 			if (!NT_STATUS_IS_OK(status)) {
-				DEBUG(1, ("Unable to build tower for %s - %s\n",
-					  iface->iface.name, nt_errstr(status)));
+				DBG_ERR("Unable to build tower for %s - %s\n",
+					iface->iface->name,
+					nt_errstr(status));
 				continue;
 			}
 			total++;
@@ -260,7 +261,16 @@ failed:
 static error_status_t dcesrv_epm_LookupHandleFree(struct dcesrv_call_state *dce_call, TALLOC_CTX *mem_ctx, 
 					   struct epm_LookupHandleFree *r)
 {
-	DCESRV_FAULT(DCERPC_FAULT_OP_RNG_ERROR);
+	struct dcesrv_handle *h = NULL;
+
+	r->out.entry_handle = r->in.entry_handle;
+
+	DCESRV_PULL_HANDLE_FAULT(h, r->in.entry_handle, HTYPE_LOOKUP);
+	TALLOC_FREE(h);
+
+	ZERO_STRUCTP(r->out.entry_handle);
+
+	return EPMAPPER_STATUS_OK;
 }
 
 static error_status_t dcesrv_epm_InqObject(struct dcesrv_call_state *dce_call, TALLOC_CTX *mem_ctx, 

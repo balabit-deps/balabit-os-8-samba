@@ -27,7 +27,6 @@
 
 #include <talloc.h>
 #include "../lib/util/discard.h" /* for discard_const */
-#include "../lib/util/byteorder.h"
 #include "../lib/util/data_blob.h"
 #include "../lib/util/time.h"
 #include "../lib/util/charset/charset.h"
@@ -80,6 +79,14 @@ struct ndr_pull {
 	/* this is used to ensure we generate unique reference IDs
 	   between request and reply */
 	uint32_t ptr_count;
+	uint32_t recursion_depth;
+	/*
+	 * The global maximum depth for recursion. When set it overrides the
+	 * value supplied by the max_recursion idl attribute.  This is needed
+	 * for fuzzing as ASAN uses a low threshold for stack depth to check
+	 * for stack overflow.
+	 */
+	uint32_t global_max_recursion;
 };
 
 /* structure passed to functions that generate NDR formatted data */
@@ -250,7 +257,9 @@ enum ndr_err_code {
 	NDR_ERR_UNREAD_BYTES,
 	NDR_ERR_NDR64,
 	NDR_ERR_FLAGS,
-	NDR_ERR_INCOMPLETE_BUFFER
+	NDR_ERR_INCOMPLETE_BUFFER,
+	NDR_ERR_MAX_RECURSION_EXCEEDED,
+	NDR_ERR_UNDERFLOW
 };
 
 #define NDR_ERR_CODE_IS_SUCCESS(x) (x == NDR_ERR_SUCCESS)
@@ -309,7 +318,10 @@ enum ndr_compression_alg {
 } while (0)
 
 #define NDR_PULL_NEED_BYTES(ndr, n) do { \
-	if (unlikely((n) > ndr->data_size || ndr->offset + (n) > ndr->data_size)) { \
+	if (unlikely(\
+		(n) > ndr->data_size || \
+		ndr->offset + (n) > ndr->data_size || \
+		ndr->offset + (n) < ndr->offset)) { \
 		if (ndr->flags & LIBNDR_FLAG_INCOMPLETE_BUFFER) { \
 			uint32_t _available = ndr->data_size - ndr->offset; \
 			uint32_t _missing = n - _available; \
@@ -327,6 +339,13 @@ enum ndr_compression_alg {
 	if (unlikely(!(ndr->flags & LIBNDR_FLAG_NOALIGN))) {	\
 		if (unlikely(ndr->flags & LIBNDR_FLAG_PAD_CHECK)) {	\
 			ndr_check_padding(ndr, n); \
+		} \
+		if(unlikely( \
+			((ndr->offset + (n-1)) & (~(n-1))) < ndr->offset)) {\
+			return ndr_pull_error( \
+				ndr, \
+				NDR_ERR_BUFSIZE, \
+				"Pull align (overflow) %u", (unsigned)n); \
 		} \
 		ndr->offset = (ndr->offset + (n-1)) & ~(n-1); \
 	} \
@@ -347,6 +366,31 @@ enum ndr_compression_alg {
 		while (_pad--) NDR_CHECK(ndr_push_uint8(ndr, NDR_SCALARS, 0)); \
 	} \
 } while(0)
+
+#define NDR_RECURSION_CHECK(ndr, d) do { \
+	uint32_t _ndr_min_ = (d); \
+	if (ndr->global_max_recursion &&  ndr->global_max_recursion < (d)) { \
+		_ndr_min_ = ndr->global_max_recursion; \
+	} \
+	ndr->recursion_depth++; \
+	if (unlikely(ndr->recursion_depth > _ndr_min_)) { \
+		return ndr_pull_error( \
+			ndr, \
+			NDR_ERR_MAX_RECURSION_EXCEEDED, \
+			"Depth of recursion exceeds (%u)", \
+			(unsigned) d); \
+	} \
+} while (0)
+
+#define NDR_RECURSION_UNWIND(ndr) do { \
+	if (unlikely(ndr->recursion_depth == 0)) { \
+		return ndr_pull_error( \
+			ndr, \
+			NDR_ERR_UNDERFLOW, \
+			"ndr_pull.recursion_depth is 0"); \
+	} \
+	ndr->recursion_depth--; \
+} while (0)
 
 /* these are used to make the error checking on each element in libndr
    less tedious, hopefully making the code more readable */
@@ -559,12 +603,28 @@ char *ndr_print_function_string(TALLOC_CTX *mem_ctx,
 				ndr_print_function_t fn, const char *name,
 				int flags, void *ptr);
 void ndr_set_flags(uint32_t *pflags, uint32_t new_flags);
-enum ndr_err_code ndr_pull_error(struct ndr_pull *ndr,
-				 enum ndr_err_code ndr_err,
-				 const char *format, ...) PRINTF_ATTRIBUTE(3,4);
-enum ndr_err_code ndr_push_error(struct ndr_push *ndr,
-				 enum ndr_err_code ndr_err,
-				 const char *format, ...)  PRINTF_ATTRIBUTE(3,4);
+enum ndr_err_code _ndr_pull_error(struct ndr_pull *ndr,
+				  enum ndr_err_code ndr_err,
+				  const char *function,
+				  const char *location,
+				  const char *format, ...) PRINTF_ATTRIBUTE(5,6);
+#define ndr_pull_error(ndr, ndr_err, ...) \
+	_ndr_pull_error(ndr, \
+		        ndr_err,      \
+		        __FUNCTION__, \
+		        __location__, \
+			__VA_ARGS__)
+enum ndr_err_code _ndr_push_error(struct ndr_push *ndr,
+				  enum ndr_err_code ndr_err,
+				  const char *function,
+				  const char *location,
+				  const char *format, ...)  PRINTF_ATTRIBUTE(5,6);
+#define ndr_push_error(ndr, ndr_err, ...) \
+	_ndr_push_error(ndr, \
+		        ndr_err, \
+		        __FUNCTION__, \
+		        __location__, \
+			__VA_ARGS__)
 enum ndr_err_code ndr_pull_subcontext_start(struct ndr_pull *ndr,
 				   struct ndr_pull **_subndr,
 				   size_t header_size,
@@ -600,10 +660,16 @@ enum ndr_err_code ndr_check_pipe_chunk_trailer(struct ndr_pull *ndr, int ndr_fla
 enum ndr_err_code ndr_push_set_switch_value(struct ndr_push *ndr, const void *p, uint32_t val);
 enum ndr_err_code ndr_pull_set_switch_value(struct ndr_pull *ndr, const void *p, uint32_t val);
 enum ndr_err_code ndr_print_set_switch_value(struct ndr_print *ndr, const void *p, uint32_t val);
-uint32_t ndr_push_get_switch_value(struct ndr_push *ndr, const void *p);
-uint32_t ndr_pull_get_switch_value(struct ndr_pull *ndr, const void *p);
-uint32_t ndr_print_get_switch_value(struct ndr_print *ndr, const void *p);
-uint32_t ndr_pull_steal_switch_value(struct ndr_pull *ndr, const void *p);
+/* retrieve a switch value (for push) and remove it from the list */
+enum ndr_err_code ndr_push_steal_switch_value(struct ndr_push *ndr,
+					      const void *p,
+					      uint32_t *v);
+/* retrieve a switch value and remove it from the list */
+uint32_t ndr_print_steal_switch_value(struct ndr_print *ndr, const void *p);
+/* retrieve a switch value and remove it from the list */
+enum ndr_err_code ndr_pull_steal_switch_value(struct ndr_pull *ndr,
+					      const void *p,
+					      uint32_t *v);
 enum ndr_err_code ndr_pull_struct_blob(const DATA_BLOB *blob, TALLOC_CTX *mem_ctx, void *p, ndr_pull_flags_fn_t fn);
 enum ndr_err_code ndr_pull_struct_blob_all(const DATA_BLOB *blob, TALLOC_CTX *mem_ctx, void *p, ndr_pull_flags_fn_t fn);
 enum ndr_err_code ndr_pull_struct_blob_all_noalloc(const DATA_BLOB *blob,

@@ -1105,6 +1105,8 @@ static NTSTATUS dcesrv_lsa_CreateTrustedDomain_base(struct dcesrv_call_state *dc
 	char *dns_encoded = NULL;
 	char *netbios_encoded = NULL;
 	char *sid_encoded = NULL;
+	struct imessaging_context *imsg_ctx =
+		dcesrv_imessaging_context(dce_call->conn);
 
 	DCESRV_PULL_HANDLE(policy_handle, r->in.policy_handle, LSA_HANDLE_POLICY);
 	ZERO_STRUCTP(r->out.trustdom_handle);
@@ -1364,13 +1366,16 @@ static NTSTATUS dcesrv_lsa_CreateTrustedDomain_base(struct dcesrv_call_state *dc
 	/*
 	 * Notify winbindd that we have a new trust
 	 */
-	status = irpc_servers_byname(dce_call->msg_ctx,
+	status = irpc_servers_byname(imsg_ctx,
 				     mem_ctx,
 				     "winbind_server",
-				     &num_server_ids, &server_ids);
+				     &num_server_ids,
+				     &server_ids);
 	if (NT_STATUS_IS_OK(status) && num_server_ids >= 1) {
-		imessaging_send(dce_call->msg_ctx, server_ids[0],
-				MSG_WINBIND_RELOAD_TRUSTED_DOMAINS, NULL);
+		imessaging_send(imsg_ctx,
+				server_ids[0],
+				MSG_WINBIND_RELOAD_TRUSTED_DOMAINS,
+				NULL);
 	}
 	TALLOC_FREE(server_ids);
 
@@ -3225,7 +3230,6 @@ static NTSTATUS dcesrv_lsa_CreateSecret(struct dcesrv_call_state *dce_call, TALL
 	struct lsa_secret_state *secret_state;
 	struct dcesrv_handle *handle;
 	struct ldb_message **msgs, *msg;
-	struct ldb_context *samdb = NULL;
 	const char *attrs[] = {
 		NULL
 	};
@@ -3286,8 +3290,8 @@ static NTSTATUS dcesrv_lsa_CreateSecret(struct dcesrv_call_state *dce_call, TALL
 		 * logging to report the remote users details, rather than the
 		 * system users details.
 		 */
-		samdb = dcesrv_samdb_connect_as_system(mem_ctx, dce_call);
-		secret_state->sam_ldb = talloc_reference(secret_state, samdb);
+		secret_state->sam_ldb =
+			dcesrv_samdb_connect_as_system(secret_state, dce_call);
 		NT_STATUS_HAVE_NO_MEMORY(secret_state->sam_ldb);
 
 		/* search for the secret record */
@@ -3321,8 +3325,8 @@ static NTSTATUS dcesrv_lsa_CreateSecret(struct dcesrv_call_state *dce_call, TALL
 			return NT_STATUS_INVALID_PARAMETER;
 		}
 
-		secret_state->sam_ldb = talloc_reference(secret_state,
-							 secrets_db_connect(mem_ctx, dce_call->conn->dce_ctx->lp_ctx));
+		secret_state->sam_ldb = secrets_db_connect(secret_state,
+					dce_call->conn->dce_ctx->lp_ctx);
 		NT_STATUS_HAVE_NO_MEMORY(secret_state->sam_ldb);
 
 		/* search for the secret record */
@@ -3391,7 +3395,6 @@ static NTSTATUS dcesrv_lsa_OpenSecret(struct dcesrv_call_state *dce_call, TALLOC
 	struct lsa_secret_state *secret_state;
 	struct dcesrv_handle *handle;
 	struct ldb_message **msgs;
-	struct ldb_context *samdb = NULL;
 	const char *attrs[] = {
 		NULL
 	};
@@ -3434,8 +3437,9 @@ static NTSTATUS dcesrv_lsa_OpenSecret(struct dcesrv_call_state *dce_call, TALLOC
 		 * logging to report the remote users details, rather than the
 		 * system users details.
 		 */
-		samdb = dcesrv_samdb_connect_as_system(mem_ctx, dce_call);
-		secret_state->sam_ldb = talloc_reference(secret_state, samdb);
+		secret_state->sam_ldb =
+			dcesrv_samdb_connect_as_system(secret_state, dce_call);
+		NT_STATUS_HAVE_NO_MEMORY(secret_state->sam_ldb);
 		secret_state->global = true;
 
 		if (strlen(name) < 1) {
@@ -3458,8 +3462,9 @@ static NTSTATUS dcesrv_lsa_OpenSecret(struct dcesrv_call_state *dce_call, TALLOC
 		}
 	} else {
 		secret_state->global = false;
-		secret_state->sam_ldb = talloc_reference(secret_state,
-							 secrets_db_connect(mem_ctx, dce_call->conn->dce_ctx->lp_ctx));
+		secret_state->sam_ldb = secrets_db_connect(secret_state,
+					dce_call->conn->dce_ctx->lp_ctx);
+		NT_STATUS_HAVE_NO_MEMORY(secret_state->sam_ldb);
 
 		name = r->in.name.string;
 		if (strlen(name) < 1) {
@@ -4403,6 +4408,8 @@ static NTSTATUS dcesrv_lsa_lsaRSetForestTrustInformation(struct dcesrv_call_stat
 	enum ndr_err_code ndr_err;
 	int ret;
 	bool in_transaction = false;
+	struct imessaging_context *imsg_ctx =
+		dcesrv_imessaging_context(dce_call->conn);
 
 	DCESRV_PULL_HANDLE(h, r->in.handle, LSA_HANDLE_POLICY);
 
@@ -4641,17 +4648,20 @@ static NTSTATUS dcesrv_lsa_lsaRSetForestTrustInformation(struct dcesrv_call_stat
 	/*
 	 * Notify winbindd that we have a acquired forest trust info
 	 */
-	status = irpc_servers_byname(dce_call->msg_ctx,
+	status = irpc_servers_byname(imsg_ctx,
 				     mem_ctx,
 				     "winbind_server",
-				     &num_server_ids, &server_ids);
+				     &num_server_ids,
+				     &server_ids);
 	if (!NT_STATUS_IS_OK(status)) {
 		DBG_ERR("irpc_servers_byname failed\n");
 		goto done;
 	}
 
-	imessaging_send(dce_call->msg_ctx, server_ids[0],
-			MSG_WINBIND_RELOAD_TRUSTED_DOMAINS, NULL);
+	imessaging_send(imsg_ctx,
+			server_ids[0],
+			MSG_WINBIND_RELOAD_TRUSTED_DOMAINS,
+			NULL);
 
 	status = NT_STATUS_OK;
 

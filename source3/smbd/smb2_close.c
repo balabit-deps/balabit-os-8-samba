@@ -23,7 +23,6 @@
 #include "smbd/globals.h"
 #include "../libcli/smb/smb_common.h"
 #include "../lib/util/tevent_ntstatus.h"
-#include "lib/tevent_wait.h"
 
 #undef DBGC_CLASS
 #define DBGC_CLASS DBGC_SMB2
@@ -132,14 +131,14 @@ static void smbd_smb2_request_close_done(struct tevent_req *subreq)
 	SSVAL(outbody.data, 0x00, 0x3C);	/* struct size */
 	SSVAL(outbody.data, 0x02, out_flags);
 	SIVAL(outbody.data, 0x04, 0);		/* reserved */
-	put_long_date_timespec(conn->ts_res,
-		(char *)outbody.data + 0x08, out_creation_ts);
-	put_long_date_timespec(conn->ts_res,
-		(char *)outbody.data + 0x10, out_last_access_ts);
-	put_long_date_timespec(conn->ts_res,
-		(char *)outbody.data + 0x18, out_last_write_ts);
-	put_long_date_timespec(conn->ts_res,
-		(char *)outbody.data + 0x20, out_change_ts);
+	put_long_date_full_timespec(conn->ts_res,
+		(char *)outbody.data + 0x08, &out_creation_ts);
+	put_long_date_full_timespec(conn->ts_res,
+		(char *)outbody.data + 0x10, &out_last_access_ts);
+	put_long_date_full_timespec(conn->ts_res,
+		(char *)outbody.data + 0x18, &out_last_write_ts);
+	put_long_date_full_timespec(conn->ts_res,
+		(char *)outbody.data + 0x20, &out_change_ts);
 	SBVAL(outbody.data, 0x28, out_allocation_size);
 	SBVAL(outbody.data, 0x30, out_end_of_file);
 	SIVAL(outbody.data, 0x38, out_file_attributes);
@@ -216,10 +215,10 @@ static NTSTATUS smbd_smb2_close(struct smbd_smb2_request *req,
 	uint16_t flags = 0;
 	bool posix_open = false;
 
-	ZERO_STRUCTP(out_creation_ts);
-	ZERO_STRUCTP(out_last_access_ts);
-	ZERO_STRUCTP(out_last_write_ts);
-	ZERO_STRUCTP(out_change_ts);
+	*out_creation_ts = (struct timespec){0, SAMBA_UTIME_OMIT};
+	*out_last_access_ts = (struct timespec){0, SAMBA_UTIME_OMIT};
+	*out_last_write_ts = (struct timespec){0, SAMBA_UTIME_OMIT};
+	*out_change_ts = (struct timespec){0, SAMBA_UTIME_OMIT};
 
 	*out_flags = 0;
 	*out_allocation_size = 0;
@@ -241,7 +240,9 @@ static NTSTATUS smbd_smb2_close(struct smbd_smb2_request *req,
 	}
 
 	if ((in_flags & SMB2_CLOSE_FLAGS_FULL_INFORMATION) &&
-	    (fsp->initial_delete_on_close || fsp->delete_on_close)) {
+	    (fsp->fsp_flags.initial_delete_on_close ||
+	     fsp->fsp_flags.delete_on_close))
+	{
 		/*
 		 * We might be deleting the file. Ensure we
 		 * return valid data from before the file got
@@ -301,9 +302,10 @@ struct smbd_smb2_close_state {
 	uint64_t out_allocation_size;
 	uint64_t out_end_of_file;
 	uint32_t out_file_attributes;
+	struct tevent_queue *wait_queue;
 };
 
-static void smbd_smb2_close_do(struct tevent_req *subreq);
+static void smbd_smb2_close_wait_done(struct tevent_req *subreq);
 
 static struct tevent_req *smbd_smb2_close_send(TALLOC_CTX *mem_ctx,
 					       struct tevent_context *ev,
@@ -325,7 +327,7 @@ static struct tevent_req *smbd_smb2_close_send(TALLOC_CTX *mem_ctx,
 	state->in_fsp = in_fsp;
 	state->in_flags = in_flags;
 
-	in_fsp->closing = true;
+	in_fsp->fsp_flags.closing = true;
 
 	i = 0;
 	while (i < in_fsp->num_aio_requests) {
@@ -337,12 +339,41 @@ static struct tevent_req *smbd_smb2_close_send(TALLOC_CTX *mem_ctx,
 	}
 
 	if (in_fsp->num_aio_requests != 0) {
-		in_fsp->deferred_close = tevent_wait_send(in_fsp, ev);
-		if (tevent_req_nomem(in_fsp->deferred_close, req)) {
+		struct tevent_req *subreq;
+
+		state->wait_queue = tevent_queue_create(state,
+					"smbd_smb2_close_send_wait_queue");
+		if (tevent_req_nomem(state->wait_queue, req)) {
 			return tevent_req_post(req, ev);
 		}
-		tevent_req_set_callback(in_fsp->deferred_close,
-					smbd_smb2_close_do, req);
+		/*
+		 * Now wait until all aio requests on this fsp are
+		 * finished.
+		 *
+		 * We don't set a callback, as we just want to block the
+		 * wait queue and the talloc_free() of fsp->aio_request
+		 * will remove the item from the wait queue.
+		 */
+		subreq = tevent_queue_wait_send(in_fsp->aio_requests,
+					smb2req->sconn->ev_ctx,
+					state->wait_queue);
+		if (tevent_req_nomem(subreq, req)) {
+			return tevent_req_post(req, ev);
+		}
+
+		/*
+		 * Now we add our own waiter to the end of the queue,
+		 * this way we get notified when all pending requests are
+		 * finished.
+		 */
+		subreq = tevent_queue_wait_send(state,
+					smb2req->sconn->ev_ctx,
+					state->wait_queue);
+		if (tevent_req_nomem(subreq, req)) {
+			return tevent_req_post(req, ev);
+		}
+
+		tevent_req_set_callback(subreq, smbd_smb2_close_wait_done, req);
 		return req;
 	}
 
@@ -365,24 +396,16 @@ static struct tevent_req *smbd_smb2_close_send(TALLOC_CTX *mem_ctx,
 	return tevent_req_post(req, ev);
 }
 
-static void smbd_smb2_close_do(struct tevent_req *subreq)
+static void smbd_smb2_close_wait_done(struct tevent_req *subreq)
 {
 	struct tevent_req *req = tevent_req_callback_data(
 		subreq, struct tevent_req);
 	struct smbd_smb2_close_state *state = tevent_req_data(
 		req, struct smbd_smb2_close_state);
 	NTSTATUS status;
-	int ret;
 
-	ret = tevent_wait_recv(subreq);
+	tevent_queue_wait_recv(subreq);
 	TALLOC_FREE(subreq);
-	if (ret != 0) {
-		DEBUG(10, ("tevent_wait_recv returned %s\n",
-			   strerror(ret)));
-		/*
-		 * Continue anyway, this should never happen
-		 */
-	}
 
 	status = smbd_smb2_close(state->smb2req,
 				 state->in_fsp,

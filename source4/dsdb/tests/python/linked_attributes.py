@@ -166,27 +166,6 @@ class LATests(samba.tests.TestCase):
                                 attrs=['objectGUID'])
         return str(misc.GUID(res[0]['objectGUID'][0]))
 
-    def assertRaisesLdbError(self, errcode, msg, f, *args, **kwargs):
-        """Assert a function raises a particular LdbError."""
-        try:
-            f(*args, **kwargs)
-        except ldb.LdbError as e:
-            (num, msg) = e.args
-            if num != errcode:
-                lut = {v: k for k, v in vars(ldb).items()
-                       if k.startswith('ERR_') and isinstance(v, int)}
-                self.fail("%s, expected "
-                          "LdbError %s, (%d) "
-                          "got %s (%d)" % (msg,
-                                           lut.get(errcode), errcode,
-                                           lut.get(num), num))
-        else:
-            lut = {v: k for k, v in vars(ldb).items()
-                   if k.startswith('ERR_') and isinstance(v, int)}
-            self.fail("%s, expected "
-                      "LdbError %s, (%d) "
-                      "but we got success" % (msg, lut.get(errcode), errcode))
-
     def _test_la_backlinks(self, reveal=False):
         tag = 'backlinks'
         kwargs = {}
@@ -720,6 +699,31 @@ class LATests(samba.tests.TestCase):
         self.assert_forward_links(e1, [], attr='addressBookRoots2',
                                   show_deactivated_link=0)
 
+
+    def test_self_link(self):
+        e1, = self.add_objects(1, 'group',
+                              'e_self_link')
+
+        guid = self.get_object_guid(e1)
+        self.add_linked_attribute(e1, e1, attr="member")
+        self.assert_forward_links(e1, [e1], attr='member')
+        self.assert_back_links(e1, [e1], attr='memberOf')
+
+        try:
+            self.samdb.delete(e1)
+        except ldb.LdbError:
+            # Cope with the current bug to make this a failure
+            self.remove_linked_attribute(e1, e1, attr="member")
+            self.samdb.delete(e1)
+            self.fail("could not delete object with link to itself")
+
+        self.assert_forward_links('<GUID=%s>' % guid, [], attr='member',
+                                  show_deleted=1)
+        self.assert_forward_links('<GUID=%s>' % guid, [], attr='member',
+                                  show_deactivated_link=0,
+                                  show_deleted=1)
+        self.assert_back_links('<GUID=%s>' % guid, [], attr='memberOf',
+                               show_deleted=1)
 
 if "://" not in host:
     if os.path.isfile(host):

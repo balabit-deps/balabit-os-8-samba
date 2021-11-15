@@ -770,6 +770,11 @@ static int ctdb_local_attach(struct ctdb_context *ctdb, const char *db_name,
 			CTDB_NO_MEMORY(ctdb, ctdb_db->delete_queue);
 		}
 
+		ctdb_db->fetch_queue = trbt_create(ctdb_db, 0);
+		if (ctdb_db->fetch_queue == NULL) {
+			CTDB_NO_MEMORY(ctdb, ctdb_db->fetch_queue);
+		}
+
 		ctdb_db->ctdb_ltdb_store_fn = ctdb_ltdb_store_server;
 	}
 
@@ -1130,9 +1135,16 @@ int32_t ctdb_control_db_attach(struct ctdb_context *ctdb,
 			return -1;
 		}
 
-		if (ctdb->recovery_mode == CTDB_RECOVERY_ACTIVE &&
-		    client->pid != ctdb->recoverd_pid &&
-		    ctdb->runstate < CTDB_RUNSTATE_RUNNING) {
+		if ((c->flags & CTDB_CTRL_FLAG_ATTACH_RECOVERY) &&
+		    ctdb->recovery_mode != CTDB_RECOVERY_ACTIVE) {
+			DBG_ERR("Attach from recovery refused because "
+				"recovery is not active\n");
+			return -1;
+		}
+
+		if (!(c->flags & CTDB_CTRL_FLAG_ATTACH_RECOVERY) &&
+		    (ctdb->recovery_mode == CTDB_RECOVERY_ACTIVE ||
+		     ctdb->runstate < CTDB_RUNSTATE_STARTUP)) {
 			struct ctdb_deferred_attach_context *da_ctx = talloc(client, struct ctdb_deferred_attach_context);
 
 			if (da_ctx == NULL) {
@@ -1261,17 +1273,10 @@ int32_t ctdb_control_db_detach(struct ctdb_context *ctdb, TDB_DATA indata,
 		return -1;
 	}
 
-	/* Detach database from recoverd */
-	if (ctdb_daemon_send_message(ctdb, ctdb->pnn,
-				     CTDB_SRVID_DETACH_DATABASE,
-				     indata) != 0) {
-		DEBUG(DEBUG_ERR, ("Unable to detach DB from recoverd\n"));
-		return -1;
-	}
-
 	/* Disable vacuuming and drop all vacuuming data */
 	talloc_free(ctdb_db->vacuum_handle);
 	talloc_free(ctdb_db->delete_queue);
+	talloc_free(ctdb_db->fetch_queue);
 
 	/* Terminate any deferred fetch */
 	talloc_free(ctdb_db->deferred_fetch);
@@ -1592,13 +1597,15 @@ int ctdb_set_db_sticky(struct ctdb_context *ctdb, struct ctdb_db_context *ctdb_d
 
 void ctdb_db_statistics_reset(struct ctdb_db_context *ctdb_db)
 {
-	struct ctdb_db_statistics_old *s = &ctdb_db->statistics;
-	int i;
+	unsigned int i;
 
 	for (i=0; i<MAX_HOT_KEYS; i++) {
-		if (s->hot_keys[i].key.dsize > 0) {
-			talloc_free(s->hot_keys[i].key.dptr);
+		if (ctdb_db->hot_keys[i].key.dsize > 0) {
+			TALLOC_FREE(ctdb_db->hot_keys[i].key.dptr);
+			ctdb_db->hot_keys[i].key.dsize = 0;
 		}
+		ctdb_db->hot_keys[i].count = 0;
+		ctdb_db->hot_keys[i].last_logged_count = 0;
 	}
 
 	ZERO_STRUCT(ctdb_db->statistics);
@@ -1610,8 +1617,8 @@ int32_t ctdb_control_get_db_statistics(struct ctdb_context *ctdb,
 {
 	struct ctdb_db_context *ctdb_db;
 	struct ctdb_db_statistics_old *stats;
-	int i;
-	int len;
+	unsigned int i;
+	size_t len;
 	char *ptr;
 
 	ctdb_db = find_ctdb_db(ctdb, db_id);
@@ -1622,7 +1629,13 @@ int32_t ctdb_control_get_db_statistics(struct ctdb_context *ctdb,
 
 	len = offsetof(struct ctdb_db_statistics_old, hot_keys_wire);
 	for (i = 0; i < MAX_HOT_KEYS; i++) {
-		len += ctdb_db->statistics.hot_keys[i].key.dsize;
+		struct ctdb_db_statistics_old *s = &ctdb_db->statistics;
+
+		s->hot_keys[i].key.dsize = ctdb_db->hot_keys[i].key.dsize;
+		s->hot_keys[i].key.dptr = ctdb_db->hot_keys[i].key.dptr;
+		s->hot_keys[i].count = ctdb_db->hot_keys[i].count;
+
+		len += s->hot_keys[i].key.dsize;
 	}
 
 	stats = talloc_size(outdata, len);

@@ -122,7 +122,7 @@ class PreforkProcessRestartTests(TestCase):
 
     def rpc_echo(self):
         conn = echo.rpcecho("ncalrpc:", self.get_loadparm())
-        self.assertEquals([1, 2, 3], conn.EchoData([1, 2, 3]))
+        self.assertEqual([1, 2, 3], conn.EchoData([1, 2, 3]))
 
     def netlogon(self):
         server = os.environ["SERVER"]
@@ -227,15 +227,15 @@ class PreforkProcessRestartTests(TestCase):
         self.assertIsNotNone(new_pid)
 
         # check that the pid has not changed
-        self.assertEquals(pid, new_pid)
+        self.assertEqual(pid, new_pid)
 
         # check that the worker processes have restarted
         new_workers = self.get_worker_pids("ldap", NUM_WORKERS)
         # process 0 should have a new pid the others should be unchanged
         self.assertNotEquals(workers[0], new_workers[0])
-        self.assertEquals(workers[1], new_workers[1])
-        self.assertEquals(workers[2], new_workers[2])
-        self.assertEquals(workers[3], new_workers[3])
+        self.assertEqual(workers[1], new_workers[1])
+        self.assertEqual(workers[2], new_workers[2])
+        self.assertEqual(workers[3], new_workers[3])
 
         # check that the previous server entries have been removed.
         self.check_for_duplicate_processes()
@@ -270,7 +270,7 @@ class PreforkProcessRestartTests(TestCase):
         self.assertIsNotNone(new_pid)
 
         # check that the pid has not changed
-        self.assertEquals(pid, new_pid)
+        self.assertEqual(pid, new_pid)
 
         # check that the worker processes have restarted
         new_workers = self.get_worker_pids("ldap", NUM_WORKERS)
@@ -344,15 +344,15 @@ class PreforkProcessRestartTests(TestCase):
         self.assertIsNotNone(new_pid)
 
         # check that the pid has not changed
-        self.assertEquals(pid, new_pid)
+        self.assertEqual(pid, new_pid)
 
         # check that the worker processes have restarted
         new_workers = self.get_worker_pids("rpc", NUM_WORKERS)
         # process 0 should have a new pid the others should be unchanged
         self.assertNotEquals(workers[0], new_workers[0])
-        self.assertEquals(workers[1], new_workers[1])
-        self.assertEquals(workers[2], new_workers[2])
-        self.assertEquals(workers[3], new_workers[3])
+        self.assertEqual(workers[1], new_workers[1])
+        self.assertEqual(workers[2], new_workers[2])
+        self.assertEqual(workers[3], new_workers[3])
 
         # check that the previous server entries have been removed.
         self.check_for_duplicate_processes()
@@ -387,7 +387,7 @@ class PreforkProcessRestartTests(TestCase):
         self.assertIsNotNone(new_pid)
 
         # check that the pid has not changed
-        self.assertEquals(pid, new_pid)
+        self.assertEqual(pid, new_pid)
 
         # check that the worker processes have restarted
         new_workers = self.get_worker_pids("rpc", NUM_WORKERS)
@@ -404,7 +404,7 @@ class PreforkProcessRestartTests(TestCase):
     def test_master_restart_backoff(self):
 
         # get kdc master process
-        pid = self.get_process("prefork-master-kdc")
+        pid = self.get_process("prefork-master-echo")
         self.assertIsNotNone(pid)
 
         #
@@ -417,13 +417,13 @@ class PreforkProcessRestartTests(TestCase):
             # Get the worker processes
             workers = self.get_worker_pids("kdc", NUM_WORKERS)
 
-            process = self.get_process("prefork-master-kdc")
+            process = self.get_process("prefork-master-echo")
             os.kill(process, signal.SIGTERM)
             # wait for the process to restart
             start = time.time()
-            self.wait_for_process("prefork-master-kdc", process, 0, 1, 30)
+            self.wait_for_process("prefork-master-echo", process, 0, 1, 30)
             # wait for the workers to restart as well
-            self.wait_for_workers("kdc", workers)
+            self.wait_for_workers("echo", workers)
             end = time.time()
             duration = end - start
 
@@ -434,7 +434,7 @@ class PreforkProcessRestartTests(TestCase):
             self.assertGreaterEqual(duration, expected)
 
         # check that the worker processes have restarted
-        new_workers = self.get_worker_pids("kdc", NUM_WORKERS)
+        new_workers = self.get_worker_pids("echo", NUM_WORKERS)
         for x in range(NUM_WORKERS):
             self.assertNotEquals(workers[x], new_workers[x])
 
@@ -449,12 +449,12 @@ class PreforkProcessRestartTests(TestCase):
         #      prefork maximum backoff   = 10
         backoff_increment = 5
         for expected in [0, 5, 10, 10]:
-            process = self.get_process("prefork-worker-kdc-2")
+            process = self.get_process("prefork-worker-echo-2")
             self.assertIsNotNone(process)
             os.kill(process, signal.SIGTERM)
             # wait for the process to restart
             start = time.time()
-            self.wait_for_process("prefork-worker-kdc-2", process, 0, 1, 30)
+            self.wait_for_process("prefork-worker-echo-2", process, 0, 1, 30)
             end = time.time()
             duration = end - start
 

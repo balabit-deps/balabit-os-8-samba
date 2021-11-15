@@ -152,7 +152,7 @@ class TestsWithUserOU(samba.tests.TestCase):
         super(TestsWithUserOU, self).setUp()
         self.ldb = SamDB(host, credentials=creds,
                          session_info=system_session(lp), lp=lp)
-
+        self.ldb_ro = self.ldb
         self.base_dn = self.ldb.domain_dn()
         self.tree_dn = "ou=vlvtesttree,%s" % self.base_dn
         self.ou = "ou=vlvou,%s" % self.tree_dn
@@ -199,8 +199,60 @@ class TestsWithUserOU(samba.tests.TestCase):
             self.ldb.delete(self.tree_dn, ['tree_delete:1'])
 
 
-class VLVTests(TestsWithUserOU):
+class VLVTestsBase(TestsWithUserOU):
 
+    # Run a vlv search and return important fields of the response control
+    def vlv_search(self, attr, expr, cookie="", after_count=0, offset=1):
+        sort_ctrl = "server_sort:1:0:%s" % attr
+        ctrl = "vlv:1:0:%d:%d:0" % (after_count, offset)
+        if cookie:
+            ctrl += ":" + cookie
+
+        res = self.ldb_ro.search(self.ou,
+                              expression=expr,
+                              scope=ldb.SCOPE_ONELEVEL,
+                              attrs=[attr],
+                              controls=[ctrl, sort_ctrl])
+        results = [str(x[attr][0]) for x in res]
+
+        ctrls = [str(c) for c in res.controls if
+                 str(c).startswith('vlv')]
+        self.assertEqual(len(ctrls), 1)
+
+        spl = ctrls[0].rsplit(':')
+        cookie = ""
+        if len(spl) == 6:
+            cookie = spl[-1]
+
+        return results, cookie
+
+
+class VLVTestsRO(VLVTestsBase):
+    def test_vlv_simple_double_run(self):
+        """Do the simplest possible VLV query to confirm if VLV
+           works at all.  Useful for showing VLV as a whole works
+           on Global Catalog (for example)"""
+        attr = 'roomNumber'
+        expr = "(objectclass=user)"
+
+        # Start new search
+        full_results, cookie = self.vlv_search(attr, expr,
+                                               after_count=len(self.users))
+
+        results, cookie = self.vlv_search(attr, expr, cookie=cookie,
+                                          after_count=len(self.users))
+        expected_results = full_results
+        self.assertEqual(results, expected_results)
+
+
+class VLVTestsGC(VLVTestsRO):
+    def setUp(self):
+        super(VLVTestsRO, self).setUp()
+        self.ldb_ro = SamDB(host + ":3268", credentials=creds,
+                            session_info=system_session(lp), lp=lp)
+
+
+class VLVTests(VLVTestsBase):
     def get_full_list(self, attr, include_cn=False):
         """Fetch the whole list sorted on the attribute, using the VLV.
         This way you get a VLV cookie."""
@@ -359,7 +411,7 @@ class VLVTests(TestsWithUserOU):
         print("start %d end %d" % (start, end))
         print("expected: %s" % expected_results)
         print("got     : %s" % results)
-        self.assertEquals(expected_results, results)
+        self.assertEqual(expected_results, results)
 
     def test_server_vlv_with_cookie(self):
         attrs = [x for x in self.users[0].keys() if x not in
@@ -490,7 +542,7 @@ class VLVTests(TestsWithUserOU):
 
                         expected_results = expected_order[start: end]
 
-                        self.assertEquals(expected_results, results)
+                        self.assertEqual(expected_results, results)
 
     def test_vlv_gte_with_expression(self):
         """What happens when we run the VLV with an expression?"""
@@ -570,7 +622,7 @@ class VLVTests(TestsWithUserOU):
                         if expected_results != results:
                             print("attr %s before %d after %d offset %d" %
                                   (attr, before, after, offset))
-                        self.assertEquals(expected_results, results)
+                        self.assertEqual(expected_results, results)
 
                         n = len(self.users)
                         if random.random() < 0.1 + (n < 5) * 0.05:
@@ -619,7 +671,7 @@ class VLVTests(TestsWithUserOU):
                                   controls=[sort_control, vlv_search])
 
             results = [x[attr][0].upper() for x in res]
-            #self.assertEquals(expected_order, results)
+            #self.assertEqual(expected_order, results)
 
             dn_order = [str(x['dn']) for x in res]
             values = results[:]
@@ -642,7 +694,7 @@ class VLVTests(TestsWithUserOU):
                         dn_expected = dn_order[offset - before - 1:
                                                offset + after]
 
-                        self.assertEquals(dn_expected, dn_results)
+                        self.assertEqual(dn_expected, dn_results)
 
                         results = [x[attr][0].upper() for x in res]
 
@@ -976,7 +1028,7 @@ class VLVTests(TestsWithUserOU):
 
                         expected_results = expected_order[start: end]
 
-                        self.assertEquals(expected_results, results)
+                        self.assertEqual(expected_results, results)
 
     def test_server_vlv_gte_no_cookie(self):
         attrs = [x for x in self.users[0].keys() if x not in
@@ -1020,7 +1072,7 @@ class VLVTests(TestsWithUserOU):
                             print("\nattr %s offset %d before %d "
                                   "after %d gte %s" %
                                   (attr, offset, before, after, gte))
-                        self.assertEquals(expected_results, results)
+                        self.assertEqual(expected_results, results)
 
     def test_multiple_searches(self):
         """The maximum number of concurrent vlv searches per connection is
@@ -1080,31 +1132,6 @@ class VLVTests(TestsWithUserOU):
                        attrs=[attr],
                        controls=[sort_control,
                                  "vlv:0:1:1:1:0:%s" % vlv_cookies[-1]])
-
-    # Run a vlv search and return important fields of the response control
-    def vlv_search(self, attr, expr, cookie="", after_count=0, offset=1):
-        sort_ctrl = "server_sort:1:0:%s" % attr
-        ctrl = "vlv:1:0:%d:%d:0" % (after_count, offset)
-        if cookie:
-            ctrl += ":" + cookie
-
-        res = self.ldb.search(self.ou,
-                              expression=expr,
-                              scope=ldb.SCOPE_ONELEVEL,
-                              attrs=[attr],
-                              controls=[ctrl, sort_ctrl])
-        results = [str(x[attr][0]) for x in res]
-
-        ctrls = [str(c) for c in res.controls if
-                 str(c).startswith('vlv')]
-        self.assertEqual(len(ctrls), 1)
-
-        spl = ctrls[0].rsplit(':')
-        cookie = ""
-        if len(spl) == 6:
-            cookie = spl[-1]
-
-        return results, cookie
 
     def test_vlv_modify_during_view(self):
         attr = 'roomNumber'
@@ -1192,10 +1219,11 @@ class VLVTests(TestsWithUserOU):
         self.assertEqual(results, expected_results)
 
 
+
 class PagedResultsTests(TestsWithUserOU):
 
     def paged_search(self, expr, cookie="", page_size=0, extra_ctrls=None,
-                     attrs=None, ou=None, subtree=False):
+                     attrs=None, ou=None, subtree=False, sort=True):
         ou = ou or self.ou
         if cookie:
             cookie = ":" + cookie
@@ -1206,7 +1234,7 @@ class PagedResultsTests(TestsWithUserOU):
         # sort control on 'cn' attribute
         if extra_ctrls is not None:
             controls += extra_ctrls
-        else:
+        elif sort:
             sort_ctrl = "server_sort:1:0:cn"
             controls.append(sort_ctrl)
 
@@ -1218,11 +1246,11 @@ class PagedResultsTests(TestsWithUserOU):
         if subtree:
             scope = ldb.SCOPE_SUBTREE
 
-        res = self.ldb.search(ou,
-                              expression=expr,
-                              scope=scope,
-                              controls=controls,
-                              **kwargs)
+        res = self.ldb_ro.search(ou,
+                                 expression=expr,
+                                 scope=scope,
+                                 controls=controls,
+                                 **kwargs)
         results = [str(r['cn'][0]) for r in res]
 
         ctrls = [str(c) for c in res.controls if
@@ -1235,15 +1263,63 @@ class PagedResultsTests(TestsWithUserOU):
             cookie = spl[-1]
         return results, cookie
 
-    def test_paged_delete_during_search(self):
+
+class PagedResultsTestsRO(PagedResultsTests):
+
+    def test_paged_search_lockstep(self):
+        expr = "(objectClass=*)"
+        ps = 3
+
+        all_results, _ = self.paged_search(expr, page_size=len(self.users)+1)
+
+        # Run two different but overlapping paged searches simultaneously.
+        set_1_index = int((len(all_results))//3)
+        set_2_index = int((2*len(all_results))//3)
+        set_1 = all_results[set_1_index:]
+        set_2 = all_results[:set_2_index+1]
+        set_1_expr = "(cn>=%s)" % (all_results[set_1_index])
+        set_2_expr = "(cn<=%s)" % (all_results[set_2_index])
+
+        results, cookie1 = self.paged_search(set_1_expr, page_size=ps)
+        self.assertEqual(results, set_1[:ps])
+        results, cookie2 = self.paged_search(set_2_expr, page_size=ps)
+        self.assertEqual(results, set_2[:ps])
+
+        results, cookie1 = self.paged_search(set_1_expr, cookie=cookie1,
+                                             page_size=ps)
+        self.assertEqual(results, set_1[ps:ps*2])
+        results, cookie2 = self.paged_search(set_2_expr, cookie=cookie2,
+                                             page_size=ps)
+        self.assertEqual(results, set_2[ps:ps*2])
+
+        results, _ = self.paged_search(set_1_expr, cookie=cookie1,
+                                       page_size=len(self.users))
+        self.assertEqual(results, set_1[ps*2:])
+        results, _ = self.paged_search(set_2_expr, cookie=cookie2,
+                                       page_size=len(self.users))
+        self.assertEqual(results, set_2[ps*2:])
+
+
+class PagedResultsTestsGC(PagedResultsTestsRO):
+
+    def setUp(self):
+        super(PagedResultsTestsRO, self).setUp()
+        self.ldb_ro = SamDB(host + ":3268", credentials=creds,
+                            session_info=system_session(lp), lp=lp)
+
+
+class PagedResultsTestsRW(PagedResultsTests):
+
+    def test_paged_delete_during_search(self, sort=True):
         expr = "(objectClass=*)"
 
         # Start new search
         first_page_size = 3
-        results, cookie = self.paged_search(expr, page_size=first_page_size)
+        results, cookie = self.paged_search(expr, sort=sort,
+                                            page_size=first_page_size)
 
         # Run normal search to get expected results
-        unedited_results, _ = self.paged_search(expr,
+        unedited_results, _ = self.paged_search(expr, sort=sort,
                                                 page_size=len(self.users))
 
         # Get remaining users not returned by the search above
@@ -1255,11 +1331,14 @@ class PagedResultsTests(TestsWithUserOU):
         self.ldb.delete(del_user['dn'])
 
         # Run test
-        results, _ = self.paged_search(expr, cookie=cookie,
+        results, _ = self.paged_search(expr, cookie=cookie, sort=sort,
                                        page_size=len(self.users))
         expected_results = [r for r in unedited_results[first_page_size:]
                             if r != del_user['cn']]
         self.assertEqual(results, expected_results)
+
+    def test_paged_delete_during_search_unsorted(self):
+        self.test_paged_delete_during_search(sort=False)
 
     def test_paged_show_deleted(self):
         unique = time.strftime("%s", time.gmtime())[-5:]
@@ -1309,14 +1388,15 @@ class PagedResultsTests(TestsWithUserOU):
                            if "DEL:" in r}
         self.assertEqual(deleted_results, deleted_cns)
 
-    def test_paged_add_during_search(self):
+    def test_paged_add_during_search(self, sort=True):
         expr = "(objectClass=*)"
 
         # Start new search
         first_page_size = 3
-        results, cookie = self.paged_search(expr, page_size=first_page_size)
+        results, cookie = self.paged_search(expr, sort=sort,
+                                            page_size=first_page_size)
 
-        unedited_results, _ = self.paged_search(expr,
+        unedited_results, _ = self.paged_search(expr, sort=sort,
                                                 page_size=len(self.users)+1)
 
         # Get remaining users not returned by the search above
@@ -1330,7 +1410,7 @@ class PagedResultsTests(TestsWithUserOU):
         user['dn'] = "cn=%s,%s" % (user['cn'], self.ou)
         self.ldb.add(user)
 
-        results, _ = self.paged_search(expr, cookie=cookie,
+        results, _ = self.paged_search(expr, sort=sort, cookie=cookie,
                                        page_size=len(self.users)+1)
         expected_results = unwalked_users[:]
 
@@ -1339,14 +1419,24 @@ class PagedResultsTests(TestsWithUserOU):
 
         self.assertEqual(results, expected_results)
 
-    def test_paged_rename_during_search(self):
+    # On Windows, when server_sort ctrl is NOT provided in the initial search,
+    # adding a record during the search will cause the modified record to
+    # be returned in a future page if it belongs there in the ordering.
+    # When server_sort IS provided, the added record will not be returned.
+    # Samba implements the latter behaviour. This test confirms Samba's
+    # implementation and will fail on Windows.
+    def test_paged_add_during_search_unsorted(self):
+        self.test_paged_add_during_search(sort=False)
+
+    def test_paged_modify_during_search(self, sort=True):
         expr = "(objectClass=*)"
 
         # Start new search
         first_page_size = 3
-        results, cookie = self.paged_search(expr, page_size=first_page_size)
+        results, cookie = self.paged_search(expr, sort=sort,
+                                            page_size=first_page_size)
 
-        unedited_results, _ = self.paged_search(expr,
+        unedited_results, _ = self.paged_search(expr, sort=sort,
                                                 page_size=len(self.users)+1)
 
         # Modify user in the middle of the remaining sort order
@@ -1364,11 +1454,21 @@ class PagedResultsTests(TestsWithUserOU):
         new_dn = middle_user['dn'].replace(middle_cn, edit_cn)
         self.ldb.rename(middle_user['dn'], new_dn)
 
-        results, _ = self.paged_search(expr, cookie=cookie,
+        results, _ = self.paged_search(expr, cookie=cookie, sort=sort,
                                        page_size=len(self.users)+1)
         expected_results = unwalked_users[:]
         expected_results[middle_index] = edit_cn
         self.assertEqual(results, expected_results)
+
+    # On Windows, when server_sort ctrl is NOT provided in the initial search,
+    # modifying a record during the search will cause the modified record to
+    # be returned in its new place in a CN ordering.
+    # When server_sort IS provided, the record will be returned its old place
+    # in the control-specified ordering.
+    # Samba implements the latter behaviour. This test confirms Samba's
+    # implementation and will fail on Windows.
+    def test_paged_modify_during_search_unsorted(self):
+        self.test_paged_modify_during_search(sort=False)
 
     def test_paged_modify_object_scope(self):
         expr = "(objectClass=*)"
@@ -1611,38 +1711,28 @@ class PagedResultsTests(TestsWithUserOU):
                                      cookie, attrs=changed_attrs,
                                      extra_ctrls=[])
 
-    def test_paged_search_lockstep(self):
-        expr = "(objectClass=*)"
-        ps = 3
+    def test_vlv_paged(self):
+        """Testing behaviour with VLV and paged_results set.
 
-        all_results, _ = self.paged_search(expr, page_size=len(self.users)+1)
+        A strange combination, certainly
 
-        # Run two different but overlapping paged searches simultaneously.
-        set_1_index = int((len(all_results))//3)
-        set_2_index = int((2*len(all_results))//3)
-        set_1 = all_results[set_1_index:]
-        set_2 = all_results[:set_2_index+1]
-        set_1_expr = "(cn>=%s)" % (all_results[set_1_index])
-        set_2_expr = "(cn<=%s)" % (all_results[set_2_index])
+        Thankfully combining both of these gives
+        unavailable-critical-extension against Windows 1709
 
-        results, cookie1 = self.paged_search(set_1_expr, page_size=ps)
-        self.assertEqual(results, set_1[:ps])
-        results, cookie2 = self.paged_search(set_2_expr, page_size=ps)
-        self.assertEqual(results, set_2[:ps])
+        """
+        sort_control = "server_sort:1:0:cn"
 
-        results, cookie1 = self.paged_search(set_1_expr, cookie=cookie1,
-                                             page_size=ps)
-        self.assertEqual(results, set_1[ps:ps*2])
-        results, cookie2 = self.paged_search(set_2_expr, cookie=cookie2,
-                                             page_size=ps)
-        self.assertEqual(results, set_2[ps:ps*2])
-
-        results, _ = self.paged_search(set_1_expr, cookie=cookie1,
-                                       page_size=len(self.users))
-        self.assertEqual(results, set_1[ps*2:])
-        results, _ = self.paged_search(set_2_expr, cookie=cookie2,
-                                       page_size=len(self.users))
-        self.assertEqual(results, set_2[ps*2:])
+        try:
+            msgs = self.ldb.search(base=self.base_dn,
+                                   scope=ldb.SCOPE_SUBTREE,
+                                   attrs=["objectGUID", "cn", "member"],
+                                   controls=["vlv:1:20:20:11:0",
+                                             sort_control,
+                                             "paged_results:1:1024"])
+            self.fail("should have failed with LDAP_UNAVAILABLE_CRITICAL_EXTENSION")
+        except ldb.LdbError as e:
+            (enum, estr) = e.args
+            self.assertEqual(enum, ldb.ERR_UNSUPPORTED_CRITICAL_EXTENSION)
 
 
 if "://" not in host:

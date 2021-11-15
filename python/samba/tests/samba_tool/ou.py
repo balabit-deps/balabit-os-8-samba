@@ -44,7 +44,7 @@ class OUCmdTestCase(SambaToolCmdTest):
             (result, out, err) = self._create_ou(ou)
 
             self.assertCmdSuccess(result, out, err)
-            self.assertEquals(err, "", "There shouldn't be any error message")
+            self.assertEqual(err, "", "There shouldn't be any error message")
             full_ou_dn = self.samdb.normalize_dn_in_domain("OU=%s" % ou["name"])
             self.assertIn('Created ou "%s"' % full_ou_dn, out)
 
@@ -52,8 +52,8 @@ class OUCmdTestCase(SambaToolCmdTest):
 
             self.assertIsNotNone(found)
 
-            self.assertEquals("%s" % found.get("name"), ou["name"])
-            self.assertEquals("%s" % found.get("description"),
+            self.assertEqual("%s" % found.get("name"), ou["name"])
+            self.assertEqual("%s" % found.get("description"),
                               ou["description"])
 
     def tearDown(self):
@@ -91,13 +91,13 @@ class OUCmdTestCase(SambaToolCmdTest):
                 "--description=%s" % ou["description"])
 
             self.assertCmdSuccess(result, out, err)
-            self.assertEquals(err, "", "There shouldn't be any error message")
+            self.assertEqual(err, "", "There shouldn't be any error message")
             full_ou_dn = self.samdb.normalize_dn_in_domain("OU=%s" % ou["name"])
             self.assertIn('Created ou "%s"' % full_ou_dn, out)
 
             found = self._find_ou(ou["name"])
 
-            self.assertEquals("%s" % found.get("ou"),
+            self.assertEqual("%s" % found.get("ou"),
                               "%s" % ou["name"])
 
         # try to delete all the ous we just created (with full dn)
@@ -118,13 +118,13 @@ class OUCmdTestCase(SambaToolCmdTest):
                 "--description=%s" % ou["description"])
 
             self.assertCmdSuccess(result, out, err)
-            self.assertEquals(err, "", "There shouldn't be any error message")
+            self.assertEqual(err, "", "There shouldn't be any error message")
             full_ou_dn = self.samdb.normalize_dn_in_domain("OU=%s" % ou["name"])
             self.assertIn('Created ou "%s"' % full_ou_dn, out)
 
             found = self._find_ou(ou["name"])
 
-            self.assertEquals("%s" % found.get("ou"),
+            self.assertEqual("%s" % found.get("ou"),
                               "%s" % ou["name"])
 
     def test_list(self):
@@ -134,6 +134,25 @@ class OUCmdTestCase(SambaToolCmdTest):
         search_filter = "(objectClass=organizationalUnit)"
 
         oulist = self.samdb.search(base=self.samdb.domain_dn(),
+                                   scope=ldb.SCOPE_SUBTREE,
+                                   expression=search_filter,
+                                   attrs=["name"])
+
+        self.assertTrue(len(oulist) > 0, "no ous found in samdb")
+
+        for ouobj in oulist:
+            name = ouobj.get("name", idx=0)
+            found = self.assertMatch(out, str(name),
+                                     "ou '%s' not found" % name)
+
+    def test_list_base_dn(self):
+        base_dn = str(self.samdb.domain_dn())
+        (result, out, err) = self.runsubcmd("ou", "list", "-b", base_dn)
+        self.assertCmdSuccess(result, out, err, "Error running list")
+
+        search_filter = "(objectClass=organizationalUnit)"
+
+        oulist = self.samdb.search(base=base_dn,
                                    scope=ldb.SCOPE_SUBTREE,
                                    expression=search_filter,
                                    attrs=["name"])
@@ -180,7 +199,7 @@ class OUCmdTestCase(SambaToolCmdTest):
                                                 "OU=%s" % parentou["name"])
             self.assertCmdSuccess(result, out, err,
                                   "Failed to move ou '%s'" % ou["name"])
-            self.assertEquals(err, "", "There shouldn't be any error message")
+            self.assertEqual(err, "", "There shouldn't be any error message")
             full_ou_dn = self.samdb.normalize_dn_in_domain("OU=%s" % ou["name"])
             self.assertIn('Moved ou "%s"' % full_ou_dn, out)
 
@@ -192,7 +211,7 @@ class OUCmdTestCase(SambaToolCmdTest):
                                    "OU=%s,OU=%s,%s" %
                                    (ou["name"], parentou["name"],
                                     self.samdb.domain_dn()))
-            self.assertEquals(found.get("dn"), newexpecteddn,
+            self.assertEqual(found.get("dn"), newexpecteddn,
                               "Moved ou '%s' does not exist" %
                               ou["name"])
 
@@ -213,7 +232,7 @@ class OUCmdTestCase(SambaToolCmdTest):
                                             "--full-dn")
         self.assertCmdSuccess(result, out, err,
                               "Failed to list ou's objects")
-        self.assertEquals(err, "", "There shouldn't be any error message")
+        self.assertEqual(err, "", "There shouldn't be any error message")
 
         objlist = self.samdb.search(base=self.samdb.domain_dn(),
                                     scope=ldb.SCOPE_ONELEVEL,
@@ -229,7 +248,7 @@ class OUCmdTestCase(SambaToolCmdTest):
                                             "--full-dn")
         self.assertCmdSuccess(result, out, err,
                               "Failed to list ous")
-        self.assertEquals(err, "", "There shouldn't be any error message")
+        self.assertEqual(err, "", "There shouldn't be any error message")
 
         filter = "(objectClass=organizationalUnit)"
         objlist = self.samdb.search(base=self.samdb.domain_dn(),

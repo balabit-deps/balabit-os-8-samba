@@ -26,7 +26,7 @@
 
 __docformat__ = "restructuredText"
 
-from samba.compat import urllib_quote
+from urllib.parse import quote as urllib_quote
 from samba.compat import string_types
 from samba.compat import binary_type
 from base64 import b64encode
@@ -46,6 +46,7 @@ import samba.dsdb
 import ldb
 
 from samba.auth import system_session, admin_session
+from samba.auth_util import system_session_unix
 import samba
 from samba import auth
 from samba.samba3 import smbd, passdb
@@ -77,9 +78,7 @@ from samba.ms_display_specifiers import read_ms_ldif
 from samba.ntacls import setntacl, getntacl, dsacl2fsacl
 from samba.ndr import ndr_pack, ndr_unpack
 from samba.provision.backend import (
-    FDSBackend,
     LDBBackend,
-    OpenLDAPBackend,
 )
 from samba.descriptor import (
     get_empty_descriptor,
@@ -1006,7 +1005,7 @@ def secretsdb_self_join(secretsdb, domain,
         secretsdb.add(msg)
 
 
-def setup_secretsdb(paths, session_info, backend_credentials, lp):
+def setup_secretsdb(paths, session_info, lp):
     """Setup the secrets database.
 
     :note: This function does not handle exceptions and transaction on purpose,
@@ -1042,22 +1041,6 @@ def setup_secretsdb(paths, session_info, backend_credentials, lp):
     secrets_ldb.transaction_start()
     try:
         secrets_ldb.load_ldif_file_add(setup_path("secrets.ldif"))
-
-        if (backend_credentials is not None and
-            backend_credentials.authentication_requested()):
-            if backend_credentials.get_bind_dn() is not None:
-                setup_add_ldif(secrets_ldb,
-                               setup_path("secrets_simple_ldap.ldif"), {
-                                   "LDAPMANAGERDN": backend_credentials.get_bind_dn(),
-                                   "LDAPMANAGERPASS_B64": b64encode(backend_credentials.get_password()).decode('utf8')
-                               })
-            else:
-                setup_add_ldif(secrets_ldb,
-                               setup_path("secrets_sasl_ldap.ldif"), {
-                                   "LDAPADMINUSER": backend_credentials.get_username(),
-                                   "LDAPADMINREALM": backend_credentials.get_realm(),
-                                   "LDAPADMINPASS_B64": b64encode(backend_credentials.get_password()).decode('utf8')
-                               })
     except:
         secrets_ldb.transaction_cancel()
         raise
@@ -1333,7 +1316,7 @@ def setup_samdb(path, session_info, provision_backend, lp, names,
     # Load the database, but don's load the global schema and don't connect
     # quite yet
     samdb = SamDB(session_info=session_info, url=None, auto_connect=False,
-                  credentials=provision_backend.credentials, lp=lp,
+                  lp=lp,
                   global_schema=False, am_rodc=am_rodc, options=options)
 
     logger.info("Pre-loading the Samba 4 and AD schema")
@@ -1634,13 +1617,14 @@ SYSVOL_SERVICE = "sysvol"
 
 
 def set_dir_acl(path, acl, lp, domsid, use_ntvfs, passdb, service=SYSVOL_SERVICE):
-    setntacl(lp, path, acl, domsid, use_ntvfs=use_ntvfs, skip_invalid_chown=True, passdb=passdb, service=service)
+    session_info = system_session_unix()
+    setntacl(lp, path, acl, domsid, session_info, use_ntvfs=use_ntvfs, skip_invalid_chown=True, passdb=passdb, service=service)
     for root, dirs, files in os.walk(path, topdown=False):
         for name in files:
-            setntacl(lp, os.path.join(root, name), acl, domsid,
+            setntacl(lp, os.path.join(root, name), acl, domsid, session_info,
                      use_ntvfs=use_ntvfs, skip_invalid_chown=True, passdb=passdb, service=service)
         for name in dirs:
-            setntacl(lp, os.path.join(root, name), acl, domsid,
+            setntacl(lp, os.path.join(root, name), acl, domsid, session_info,
                      use_ntvfs=use_ntvfs, skip_invalid_chown=True, passdb=passdb, service=service)
 
 
@@ -1658,7 +1642,9 @@ def set_gpos_acl(sysvol, dnsdomain, domainsid, domaindn, samdb, lp, use_ntvfs, p
 
     # Set ACL for GPO root folder
     root_policy_path = os.path.join(sysvol, dnsdomain, "Policies")
-    setntacl(lp, root_policy_path, POLICIES_ACL, str(domainsid),
+    session_info = system_session_unix()
+
+    setntacl(lp, root_policy_path, POLICIES_ACL, str(domainsid), session_info,
              use_ntvfs=use_ntvfs, skip_invalid_chown=True, passdb=passdb, service=SYSVOL_SERVICE)
 
     res = samdb.search(base="CN=Policies,CN=System,%s" %(domaindn),
@@ -1696,7 +1682,7 @@ def setsysvolacl(samdb, netlogon, sysvol, uid, gid, domainsid, dnsdomain,
         file = tempfile.NamedTemporaryFile(dir=os.path.abspath(sysvol))
         try:
             try:
-                smbd.set_simple_acl(file.name, 0o755, gid)
+                smbd.set_simple_acl(file.name, 0o755, system_session_unix(), gid)
             except OSError:
                 if not smbd.have_posix_acls():
                     # This clue is only strictly correct for RPM and
@@ -1708,7 +1694,7 @@ def setsysvolacl(samdb, netlogon, sysvol, uid, gid, domainsid, dnsdomain,
                 raise ProvisioningError("Your filesystem or build does not support posix ACLs, which s3fs requires.  "
                                         "Try the mounting the filesystem with the 'acl' option.")
             try:
-                smbd.chown(file.name, uid, gid)
+                smbd.chown(file.name, uid, gid, system_session_unix())
             except OSError:
                 raise ProvisioningError("Unable to chown a file on your filesystem.  "
                                         "You may not be running provision as root.")
@@ -1756,13 +1742,18 @@ def setsysvolacl(samdb, netlogon, sysvol, uid, gid, domainsid, dnsdomain,
 
     session_info = auth.user_session(samdb, lp_ctx=lp, dn=userdn,
                                      session_info_flags=flags)
+    auth.session_info_set_unix(session_info,
+                               lp_ctx=lp,
+                               user_name="Administrator",
+                               uid=uid,
+                               gid=gid)
 
     def _setntacl(path):
         """A helper to reuse args"""
         return setntacl(
-            lp, path, SYSVOL_ACL, str(domainsid),
+            lp, path, SYSVOL_ACL, str(domainsid), session_info,
             use_ntvfs=use_ntvfs, skip_invalid_chown=True, passdb=s4_passdb,
-            service=SYSVOL_SERVICE, session_info=session_info)
+            service=SYSVOL_SERVICE)
 
     # Set the SYSVOL_ACL on the sysvol folder and subfolder (first level)
     _setntacl(sysvol)
@@ -1788,14 +1779,15 @@ def acl_type(direct_db_access):
 
 
 def check_dir_acl(path, acl, lp, domainsid, direct_db_access):
-    fsacl = getntacl(lp, path, direct_db_access=direct_db_access, service=SYSVOL_SERVICE)
+    session_info = system_session_unix()
+    fsacl = getntacl(lp, path, session_info, direct_db_access=direct_db_access, service=SYSVOL_SERVICE)
     fsacl_sddl = fsacl.as_sddl(domainsid)
     if fsacl_sddl != acl:
         raise ProvisioningError('%s ACL on GPO directory %s %s does not match expected value %s from GPO object' % (acl_type(direct_db_access), path, fsacl_sddl, acl))
 
     for root, dirs, files in os.walk(path, topdown=False):
         for name in files:
-            fsacl = getntacl(lp, os.path.join(root, name),
+            fsacl = getntacl(lp, os.path.join(root, name), session_info,
                              direct_db_access=direct_db_access, service=SYSVOL_SERVICE)
             if fsacl is None:
                 raise ProvisioningError('%s ACL on GPO file %s not found!' %
@@ -1806,7 +1798,7 @@ def check_dir_acl(path, acl, lp, domainsid, direct_db_access):
                 raise ProvisioningError('%s ACL on GPO file %s %s does not match expected value %s from GPO object' % (acl_type(direct_db_access), os.path.join(root, name), fsacl_sddl, acl))
 
         for name in dirs:
-            fsacl = getntacl(lp, os.path.join(root, name),
+            fsacl = getntacl(lp, os.path.join(root, name), session_info,
                              direct_db_access=direct_db_access, service=SYSVOL_SERVICE)
             if fsacl is None:
                 raise ProvisioningError('%s ACL on GPO directory %s not found!'
@@ -1832,7 +1824,8 @@ def check_gpos_acl(sysvol, dnsdomain, domainsid, domaindn, samdb, lp,
 
     # Set ACL for GPO root folder
     root_policy_path = os.path.join(sysvol, dnsdomain, "Policies")
-    fsacl = getntacl(lp, root_policy_path,
+    session_info = system_session_unix()
+    fsacl = getntacl(lp, root_policy_path, session_info,
                      direct_db_access=direct_db_access, service=SYSVOL_SERVICE)
     if fsacl is None:
         raise ProvisioningError('DB ACL on policy root %s %s not found!' % (acl_type(direct_db_access), root_policy_path))
@@ -1885,10 +1878,11 @@ def checksysvolacl(samdb, netlogon, sysvol, domainsid, dnsdomain, domaindn,
         raise ProvisioningError('Realm as seen by pdb_samba_dsdb [%s] does not match Realm as seen by the provision script [%s]!' % (domain_info["dns_domain"].upper(), dnsdomain.upper()))
 
     # Ensure we can read this directly, and via the smbd VFS
+    session_info = system_session_unix()
     for direct_db_access in [True, False]:
         # Check the SYSVOL_ACL on the sysvol folder and subfolder (first level)
         for dir_path in [os.path.join(sysvol, dnsdomain), netlogon]:
-            fsacl = getntacl(lp, dir_path, direct_db_access=direct_db_access, service=SYSVOL_SERVICE)
+            fsacl = getntacl(lp, dir_path, session_info, direct_db_access=direct_db_access, service=SYSVOL_SERVICE)
             if fsacl is None:
                 raise ProvisioningError('%s ACL on sysvol directory %s not found!' % (acl_type(direct_db_access), dir_path))
             fsacl_sddl = fsacl.as_sddl(domainsid)
@@ -2162,13 +2156,11 @@ def provision(logger, session_info, smbconf=None,
               krbtgtpass=None, domainguid=None, policyguid=None, policyguid_dc=None,
               dns_backend=None, dns_forwarder=None, dnspass=None,
               invocationid=None, machinepass=None, ntdsguid=None,
-              root=None, nobody=None, users=None, backup=None, aci=None,
-              serverrole=None, dom_for_fun_level=None, backend_type=None,
-              sitename=None, ol_mmr_urls=None, ol_olc=None, slapd_path=None,
+              root=None, nobody=None, users=None, backup=None,
+              sitename=None, serverrole=None, dom_for_fun_level=None,
               useeadb=False, am_rodc=False, lp=None, use_ntvfs=False,
               use_rfc2307=False, maxuid=None, maxgid=None, skip_sysvolacl=True,
-              ldap_backend_forced_uri=None, nosync=False, ldap_dryrun_mode=False,
-              ldap_backend_extra_port=None, base_schema="2012_R2",
+              base_schema="2012_R2",
               plaintext_secrets=False, backend_store=None,
               backend_store_size=None, batch_mode=False):
     """Provision samba4
@@ -2185,8 +2177,6 @@ def provision(logger, session_info, smbconf=None,
         # Make a new, random password between Samba and it's LDAP server
         ldapadminpass = samba.generate_random_password(128, 255)
 
-    if backend_type is None:
-        backend_type = "ldb"
     if backend_store is None:
         backend_store = get_default_backend_store()
 
@@ -2288,28 +2278,9 @@ def provision(logger, session_info, smbconf=None,
     schema = Schema(domainsid, invocationid=invocationid,
                     schemadn=names.schemadn, base_schema=base_schema)
 
-    if backend_type == "ldb":
-        provision_backend = LDBBackend(backend_type, paths=paths,
-                                       lp=lp,
-                                       names=names, logger=logger)
-    elif backend_type == "fedora-ds":
-        provision_backend = FDSBackend(backend_type, paths=paths,
-                                       lp=lp,
-                                       names=names, logger=logger, domainsid=domainsid,
-                                       schema=schema, hostname=hostname, ldapadminpass=ldapadminpass,
-                                       slapd_path=slapd_path,
-                                       root=root)
-    elif backend_type == "openldap":
-        provision_backend = OpenLDAPBackend(backend_type, paths=paths,
-                                            lp=lp,
-                                            names=names, logger=logger, domainsid=domainsid,
-                                            schema=schema, hostname=hostname, ldapadminpass=ldapadminpass,
-                                            slapd_path=slapd_path, ol_mmr_urls=ol_mmr_urls,
-                                            ldap_backend_extra_port=ldap_backend_extra_port,
-                                            ldap_dryrun_mode=ldap_dryrun_mode, nosync=nosync,
-                                            ldap_backend_forced_uri=ldap_backend_forced_uri)
-    else:
-        raise ValueError("Unknown LDAP backend type selected")
+    provision_backend = LDBBackend(paths=paths,
+                                   lp=lp,
+                                   names=names, logger=logger)
 
     provision_backend.init()
     provision_backend.start()
@@ -2322,8 +2293,7 @@ def provision(logger, session_info, smbconf=None,
 
     logger.info("Setting up secrets.ldb")
     secrets_ldb = setup_secretsdb(paths,
-                                  session_info=session_info,
-                                  backend_credentials=provision_backend.credentials, lp=lp)
+                                  session_info=session_info, lp=lp)
 
     try:
         logger.info("Setting up the registry")
@@ -2480,8 +2450,7 @@ def provision_become_dc(smbconf=None, targetdir=None,
                         adminpass=None, krbtgtpass=None, domainguid=None, policyguid=None,
                         policyguid_dc=None, invocationid=None, machinepass=None, dnspass=None,
                         dns_backend=None, root=None, nobody=None, users=None,
-                        backup=None, serverrole=None, ldap_backend=None,
-                        ldap_backend_type=None, sitename=None, debuglevel=1, use_ntvfs=False):
+                        backup=None, serverrole=None, sitename=None, debuglevel=1, use_ntvfs=False):
 
     logger = logging.getLogger("provision")
     samba.set_debug_level(debuglevel)

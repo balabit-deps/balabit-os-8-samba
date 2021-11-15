@@ -150,7 +150,7 @@ static PyMethodDef py_dom_sid_extra_methods[] = {
 	{ "split", (PyCFunction)py_dom_sid_split, METH_NOARGS,
 		"S.split() -> (domain_sid, rid)\n"
 		"Split a domain sid" },
-	{ NULL }
+	{0}
 };
 
 
@@ -306,12 +306,49 @@ static PyMethodDef py_descriptor_extra_methods[] = {
 		NULL },
 	{ "as_sddl", (PyCFunction)py_descriptor_as_sddl, METH_VARARGS,
 		NULL },
-	{ NULL }
+	{0}
 };
+
+static PyObject *py_descriptor_richcmp(
+	PyObject *py_self, PyObject *py_other, int op)
+{
+	struct security_descriptor *self = pytalloc_get_ptr(py_self);
+	struct security_descriptor *other = pytalloc_get_ptr(py_other);
+	bool eq;
+
+	if (other == NULL) {
+		Py_INCREF(Py_NotImplemented);
+		return Py_NotImplemented;
+	}
+
+	eq = security_descriptor_equal(self, other);
+
+	switch(op) {
+	case Py_EQ:
+		if (eq) {
+			Py_RETURN_TRUE;
+		} else {
+			Py_RETURN_FALSE;
+		}
+		break;
+	case Py_NE:
+		if (eq) {
+			Py_RETURN_FALSE;
+		} else {
+			Py_RETURN_TRUE;
+		}
+		break;
+	default:
+		break;
+	}
+
+	Py_RETURN_NOTIMPLEMENTED;
+}
 
 static void py_descriptor_patch(PyTypeObject *type)
 {
 	type->tp_new = py_descriptor_new;
+	type->tp_richcompare = py_descriptor_richcmp;
 	PyType_AddMethods(type, py_descriptor_extra_methods);
 }
 
@@ -410,7 +447,7 @@ static PyMethodDef py_token_extra_methods[] = {
 	{ "has_sid", (PyCFunction)py_token_has_sid, METH_VARARGS,
 		NULL },
 	{ "is_anonymous", (PyCFunction)py_token_is_anonymous, METH_NOARGS,
-		"S.is_anonymus() -> bool\n"
+		"S.is_anonymous() -> bool\n"
 		"Check whether this is an anonymous token." },
 	{ "is_system", (PyCFunction)py_token_is_system, METH_NOARGS,
 		NULL },
@@ -422,7 +459,7 @@ static PyMethodDef py_token_extra_methods[] = {
 		NULL },
 	{ "set_privilege", (PyCFunction)py_token_set_privilege, METH_VARARGS,
 		NULL },
-	{ NULL }
+	{0}
 };
 
 #define PY_TOKEN_PATCH py_token_patch
@@ -435,10 +472,18 @@ static void py_token_patch(PyTypeObject *type)
 static PyObject *py_privilege_name(PyObject *self, PyObject *args)
 {
 	int priv;
-	if (!PyArg_ParseTuple(args, "i", &priv))
+	const char *name = NULL;
+	if (!PyArg_ParseTuple(args, "i", &priv)) {
 		return NULL;
+	}
+	name = sec_privilege_name(priv);
+	if (name == NULL) {
+		PyErr_Format(PyExc_ValueError,
+			     "Invalid privilege LUID: %d", priv);
+		return NULL;
+	}
 
-	return PyUnicode_FromString(sec_privilege_name(priv));
+	return PyUnicode_FromString(name);
 }
 
 static PyObject *py_privilege_id(PyObject *self, PyObject *args)
@@ -448,7 +493,7 @@ static PyObject *py_privilege_id(PyObject *self, PyObject *args)
 	if (!PyArg_ParseTuple(args, "s", &name))
 		return NULL;
 
-	return PyInt_FromLong(sec_privilege_id(name));
+	return PyLong_FromLong(sec_privilege_id(name));
 }
 
 static PyObject *py_random_sid(PyObject *self,
@@ -471,7 +516,7 @@ static PyMethodDef py_mod_security_extra_methods[] = {
 	{ "random_sid", (PyCFunction)py_random_sid, METH_NOARGS, NULL },
 	{ "privilege_id", (PyCFunction)py_privilege_id, METH_VARARGS, NULL },
 	{ "privilege_name", (PyCFunction)py_privilege_name, METH_VARARGS, NULL },
-	{ NULL }
+	{0}
 };
 
 static void py_mod_security_patch(PyObject *m)

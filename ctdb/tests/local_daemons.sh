@@ -5,19 +5,13 @@ set -u
 export CTDB_TEST_MODE="yes"
 
 # Following 2 lines may be modified by installation script
-export CTDB_TESTS_ARE_INSTALLED=false
-export CTDB_TEST_DIR=$(dirname "$0")
+CTDB_TESTS_ARE_INSTALLED=false
+CTDB_TEST_DIR=$(dirname "$0")
+export CTDB_TESTS_ARE_INSTALLED CTDB_TEST_DIR
 
 export TEST_SCRIPTS_DIR="${CTDB_TEST_DIR}/scripts"
 
 . "${TEST_SCRIPTS_DIR}/common.sh"
-
-# common.sh will set TEST_SUBDIR to a stupid value when installed
-# because common.sh is usually sourced by a test.  TEST_SUBDIR needs
-# to be correctly set so setup_ctdb_base() finds the etc-ctdb/
-# subdirectory and the test event script is correctly installed, so
-# fix it.
-TEST_SUBDIR="$CTDB_TEST_DIR"
 
 if ! $CTDB_TESTS_ARE_INSTALLED ; then
 	hdir="$CTDB_SCRIPTS_HELPER_BINDIR"
@@ -109,7 +103,7 @@ setup_socket_wrapper ()
 		die "$0 setup: Unable to find ${_socket_wrapper_so}"
 	fi
 
-	# Find absoluate path if only relative is given
+	# Find absolute path if only relative is given
 	case "$_socket_wrapper_so" in
 	/*) : ;;
 	*) _socket_wrapper_so="${PWD}/${_socket_wrapper_so}" ;;
@@ -134,6 +128,7 @@ Options:
   -n <num>      Number of nodes (default: 3)
   -P <file>     Public addresses file (default: automatically generated)
   -R            Use a command for the recovery lock (default: use a file)
+  -r <time>     Like -R and set recheck interval to <time> (default: use a file)
   -S <library>  Socket wrapper shared library to preload (default: none)
   -6            Generate IPv6 IPs for nodes, public addresses (default: IPv4)
 EOF
@@ -148,18 +143,22 @@ local_daemons_setup ()
 	_num_nodes=3
 	_public_addresses_file=""
 	_recovery_lock_use_command=false
+	_recovery_lock_recheck_interval=""
 	_socket_wrapper=""
 	_use_ipv6=false
 
 	set -e
 
-	while getopts "FN:n:P:RS:6h?" _opt ; do
+	while getopts "FN:n:P:Rr:S:6h?" _opt ; do
 		case "$_opt" in
 		F) _disable_failover=true ;;
 		N) _nodes_file="$OPTARG" ;;
 		n) _num_nodes="$OPTARG" ;;
 		P) _public_addresses_file="$OPTARG" ;;
 		R) _recovery_lock_use_command=true ;;
+		r) _recovery_lock_use_command=true
+		   _recovery_lock_recheck_interval="$OPTARG"
+		   ;;
 		S) _socket_wrapper="$OPTARG" ;;
 		6) _use_ipv6=true ;;
 		\?|h) local_daemons_setup_usage ;;
@@ -192,10 +191,16 @@ local_daemons_setup ()
 				       $_use_ipv6 >"$_public_addresses_all"
 	fi
 
-	_recovery_lock="${directory}/rec.lock"
+	_recovery_lock_dir="${directory}/shared/.ctdb"
+	mkdir -p "$_recovery_lock_dir"
+	_recovery_lock="${_recovery_lock_dir}/rec.lock"
 	if $_recovery_lock_use_command ; then
 		_helper="${CTDB_SCRIPTS_HELPER_BINDIR}/ctdb_mutex_fcntl_helper"
-		_recovery_lock="! ${_helper} ${_recovery_lock}"
+		_t="! ${_helper} ${_recovery_lock}"
+		if [ -n "$_recovery_lock_recheck_interval" ] ; then
+			_t="${_t} ${_recovery_lock_recheck_interval}"
+		fi
+		_recovery_lock="$_t"
 	fi
 
 	if [ -n "$_socket_wrapper" ] ; then
@@ -203,7 +208,12 @@ local_daemons_setup ()
 	fi
 
 	for _n in $(seq 0 $((_num_nodes - 1))) ; do
-		setup_ctdb_base "$directory" "node.${_n}" \
+		# CTDB_TEST_SUITE_DIR needs to be correctly set so
+		# setup_ctdb_base() finds the etc-ctdb/ subdirectory
+		# and the test event script is correctly installed
+		# shellcheck disable=SC2034
+		CTDB_TEST_SUITE_DIR="$CTDB_TEST_DIR" \
+			   setup_ctdb_base "$directory" "node.${_n}" \
 				functions notify.sh debug-hung-script.sh
 
 		cp "$_nodes_all" "${CTDB_BASE}/nodes"
@@ -295,7 +305,7 @@ local_daemons_ssh ()
 	fi
 
 	if $_close_stdin ; then
-		exec sh -c "$*" <&-
+		exec sh -c "$*" </dev/null
 	else
 		exec sh -c "$*"
 	fi
@@ -344,7 +354,7 @@ local_daemons_start ()
 
 	onnode_common
 
-	onnode "$_nodes" "${VALGRIND:-} ctdbd &"
+	onnode -i "$_nodes" "${VALGRIND:-} ctdbd"
 }
 
 local_daemons_stop ()
@@ -357,7 +367,10 @@ local_daemons_stop ()
 
 	onnode_common
 
-	onnode -p "$_nodes" "${VALGRIND:-} ${CTDB:-ctdb} shutdown"
+	onnode -p "$_nodes" \
+		"if [ -e \"\${CTDB_BASE}/run/ctdbd.pid\" ] ; then \
+			${CTDB:-${VALGRIND:-} ctdb} shutdown ; \
+		 fi"
 }
 
 local_daemons_onnode_usage ()
@@ -425,6 +438,23 @@ local_daemons_print_log ()
 
 }
 
+local_daemons_tail_log ()
+{
+	if [ $# -ne 1 ] || [ "$1" = "-h" ] ; then
+		local_daemons_generic_usage "tail-log"
+	fi
+
+	_nodes="$1"
+	shift
+
+	onnode_common
+
+	# shellcheck disable=SC2016,SC2046
+	# $CTDB_BASE must only be expanded under onnode, not in top-level shell
+	# Intentional word splitting to separate log filenames
+	tail -f $(onnode -q "$_nodes" 'echo ${CTDB_BASE}/log.ctdb')
+}
+
 usage ()
 {
 	cat <<EOF
@@ -437,6 +467,7 @@ Commands:
   onnode         Run a command in the environment of specified daemon(s)
   print-socket   Print the Unix domain socket used by specified daemon(s)
   print-log      Print logs for specified daemon(s) to stdout
+  tail-log       Follow logs for specified daemon(s) to stdout
 
 All commands use <directory> for daemon configuration
 
@@ -462,5 +493,6 @@ stop) local_daemons_stop "$@" ;;
 onnode) local_daemons_onnode "$@" ;;
 print-socket) local_daemons_print_socket "$@" ;;
 print-log) local_daemons_print_log "$@" ;;
+tail-log) local_daemons_tail_log "$@" ;;
 *) usage ;;
 esac

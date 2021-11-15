@@ -51,7 +51,7 @@ static struct db_context *posix_pending_close_db;
 
 static int map_posix_lock_type( files_struct *fsp, enum brl_type lock_type)
 {
-	if((lock_type == WRITE_LOCK) && !fsp->can_write) {
+	if ((lock_type == WRITE_LOCK) && !fsp->fsp_flags.can_write) {
 		/*
 		 * Many UNIX's cannot get a write lock on a file opened read-only.
 		 * Win32 locking semantics allow this.
@@ -83,6 +83,8 @@ static const char *posix_lock_type_name(int lock_type)
  range. Modifies the given args to be in range if possible, just returns
  False if not.
 ****************************************************************************/
+
+#define SMB_OFF_T_BITS (sizeof(off_t)*8)
 
 static bool posix_lock_in_range(off_t *offset_out, off_t *count_out,
 				uint64_t u_offset, uint64_t u_count)
@@ -508,93 +510,67 @@ static void delete_lock_ref_count(const files_struct *fsp)
  ref count is non zero.
 ****************************************************************************/
 
+struct add_fd_to_close_entry_state {
+	const struct files_struct *fsp;
+};
+
+static void add_fd_to_close_entry_fn(
+	struct db_record *rec,
+	TDB_DATA value,
+	void *private_data)
+{
+	struct add_fd_to_close_entry_state *state = private_data;
+	TDB_DATA values[] = {
+		value,
+		{ .dptr = (uint8_t *)&(state->fsp->fh->fd),
+		  .dsize = sizeof(state->fsp->fh->fd) },
+	};
+	NTSTATUS status;
+
+	SMB_ASSERT((values[0].dsize % sizeof(int)) == 0);
+
+	status = dbwrap_record_storev(rec, values, ARRAY_SIZE(values), 0);
+	SMB_ASSERT(NT_STATUS_IS_OK(status));
+}
+
 /****************************************************************************
  Add an fd to the pending close db.
 ****************************************************************************/
 
 static void add_fd_to_close_entry(const files_struct *fsp)
 {
-	struct db_record *rec;
-	int *fds;
-	size_t num_fds;
+	struct add_fd_to_close_entry_state state = { .fsp = fsp };
 	NTSTATUS status;
-	TDB_DATA value;
 
-	rec = dbwrap_fetch_locked(
-		posix_pending_close_db, talloc_tos(),
-		fd_array_key_fsp(fsp));
-
-	SMB_ASSERT(rec != NULL);
-
-	value = dbwrap_record_get_value(rec);
-	SMB_ASSERT((value.dsize % sizeof(int)) == 0);
-
-	num_fds = value.dsize / sizeof(int);
-	fds = talloc_array(rec, int, num_fds+1);
-
-	SMB_ASSERT(fds != NULL);
-
-	memcpy(fds, value.dptr, value.dsize);
-	fds[num_fds] = fsp->fh->fd;
-
-	status = dbwrap_record_store(
-		rec, make_tdb_data((uint8_t *)fds, talloc_get_size(fds)), 0);
-
+	status = dbwrap_do_locked(
+		posix_pending_close_db,
+		fd_array_key_fsp(fsp),
+		add_fd_to_close_entry_fn,
+		&state);
 	SMB_ASSERT(NT_STATUS_IS_OK(status));
 
-	TALLOC_FREE(rec);
-
-	DEBUG(10,("add_fd_to_close_entry: added fd %d file %s\n",
-		  fsp->fh->fd, fsp_str_dbg(fsp)));
+	DBG_DEBUG("added fd %d file %s\n",
+		  fsp->fh->fd,
+		  fsp_str_dbg(fsp));
 }
 
-/****************************************************************************
- Remove all fd entries for a specific dev/inode pair from the tdb.
-****************************************************************************/
-
-static void delete_close_entries(const files_struct *fsp)
+static void fd_close_posix_fn(
+	struct db_record *rec,
+	TDB_DATA data,
+	void *private_data)
 {
-	struct db_record *rec;
+	size_t num_fds, i;
 
-	rec = dbwrap_fetch_locked(
-		posix_pending_close_db, talloc_tos(),
-		fd_array_key_fsp(fsp));
+	SMB_ASSERT((data.dsize % sizeof(int)) == 0);
+	num_fds = data.dsize / sizeof(int);
 
-	SMB_ASSERT(rec != NULL);
+	for (i=0; i<num_fds; i++) {
+		int fd;
+		memcpy(&fd, data.dptr, sizeof(int));
+		close(fd);
+		data.dptr += sizeof(int);
+	}
 	dbwrap_record_delete(rec);
-	TALLOC_FREE(rec);
-}
-
-/****************************************************************************
- Get the array of POSIX pending close records for an open fsp. Returns number
- of entries.
-****************************************************************************/
-
-static size_t get_posix_pending_close_entries(TALLOC_CTX *mem_ctx,
-					const files_struct *fsp,
-					int **entries)
-{
-	TDB_DATA dbuf;
-	NTSTATUS status;
-
-	status = dbwrap_fetch(
-		posix_pending_close_db, mem_ctx, fd_array_key_fsp(fsp),
-		&dbuf);
-
-	if (NT_STATUS_EQUAL(status, NT_STATUS_NOT_FOUND)) {
-		*entries = NULL;
-		return 0;
-	}
-
-	SMB_ASSERT(NT_STATUS_IS_OK(status));
-
-	if (dbuf.dsize == 0) {
-		*entries = NULL;
-		return 0;
-	}
-
-	*entries = (int *)dbuf.dptr;
-	return (size_t)(dbuf.dsize / sizeof(int));
 }
 
 /****************************************************************************
@@ -605,14 +581,11 @@ static size_t get_posix_pending_close_entries(TALLOC_CTX *mem_ctx,
 
 int fd_close_posix(const struct files_struct *fsp)
 {
-	int saved_errno = 0;
-	int ret;
-	int *fd_array = NULL;
-	size_t count, i;
+	NTSTATUS status;
 
 	if (!lp_locking(fsp->conn->params) ||
 	    !lp_posix_locking(fsp->conn->params) ||
-	    fsp->use_ofd_locks)
+	    fsp->fsp_flags.use_ofd_locks)
 	{
 		/*
 		 * No locking or POSIX to worry about or we are using POSIX
@@ -635,32 +608,15 @@ int fd_close_posix(const struct files_struct *fsp)
 		return 0;
 	}
 
-	/*
-	 * No outstanding locks. Get the pending close fd's
-	 * from the db and close them all.
-	 */
-
-	count = get_posix_pending_close_entries(talloc_tos(), fsp, &fd_array);
-
-	if (count) {
-		DEBUG(10,("fd_close_posix: doing close on %u fd's.\n",
-			  (unsigned int)count));
-
-		for(i = 0; i < count; i++) {
-			if (close(fd_array[i]) == -1) {
-				saved_errno = errno;
-			}
-		}
-
-		/*
-		 * Delete all fd's stored in the db
-		 * for this dev/inode pair.
-		 */
-
-		delete_close_entries(fsp);
+	status = dbwrap_do_locked(
+		posix_pending_close_db,
+		fd_array_key_fsp(fsp),
+		fd_close_posix_fn,
+		NULL);
+	if (!NT_STATUS_IS_OK(status)) {
+		DBG_WARNING("dbwrap_do_locked failed: %s\n",
+			    nt_errstr(status));
 	}
-
-	TALLOC_FREE(fd_array);
 
 	/* Don't need a lock ref count on this dev/ino anymore. */
 	delete_lock_ref_count(fsp);
@@ -669,14 +625,7 @@ int fd_close_posix(const struct files_struct *fsp)
 	 * Finally close the fd associated with this fsp.
 	 */
 
-	ret = close(fsp->fh->fd);
-
-	if (ret == 0 && saved_errno != 0) {
-		errno = saved_errno;
-		ret = -1;
-	}
-
-	return ret;
+	return close(fsp->fh->fd);
 }
 
 /****************************************************************************
@@ -728,7 +677,7 @@ static struct lock_list *posix_lock_list(TALLOC_CTX *ctx,
 		}
 
 		/* Ignore locks not owned by this process. */
-		if (!serverid_equal(&lock->context.pid, &lock_ctx->pid)) {
+		if (!server_id_equal(&lock->context.pid, &lock_ctx->pid)) {
 			continue;
 		}
 
@@ -1270,7 +1219,7 @@ static bool locks_exist_on_context(const struct lock_struct *plocks,
 		}
 
 		/* Ignore locks not owned by this process. */
-		if (!serverid_equal(&lock->context.pid, &lock_ctx->pid)) {
+		if (!server_id_equal(&lock->context.pid, &lock_ctx->pid)) {
 			continue;
 		}
 

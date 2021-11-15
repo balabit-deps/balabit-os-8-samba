@@ -31,12 +31,12 @@
 #include "librpc/gen_ndr/ndr_spoolss_c.h"
 #include "librpc/gen_ndr/ndr_winreg_c.h"
 #include "librpc/gen_ndr/ndr_wkssvc_c.h"
+#include "librpc/gen_ndr/ndr_svcctl_c.h"
 #include "lib/cmdline/popt_common.h"
 #include "torture/rpc/torture_rpc.h"
 #include "libcli/libcli.h"
 #include "libcli/smb_composite/smb_composite.h"
 #include "libcli/auth/libcli_auth.h"
-#include "../lib/crypto/crypto.h"
 #include "libcli/security/security.h"
 #include "param/param.h"
 #include "lib/registry/registry.h"
@@ -47,9 +47,7 @@
 #include "librpc/rpc/dcerpc.h"
 #include "librpc/rpc/dcerpc_proto.h"
 #include "libcli/smb/smbXcli_base.h"
-
-#include <gnutls/gnutls.h>
-#include <gnutls/crypto.h>
+#include "source3/rpc_client/init_samr.h"
 
 /*
  * open pipe and bind, given an IPC$ context
@@ -666,7 +664,6 @@ static bool create_user(struct torture_context *tctx,
 		union samr_UserInfo *info;
 		DATA_BLOB session_key;
 
-
 		ZERO_STRUCT(u_info);
 		encode_pw_buffer(u_info.info23.password.data, password,
 				 STR_UNICODE);
@@ -676,8 +673,15 @@ static bool create_user(struct torture_context *tctx,
 			torture_comment(tctx, "dcerpc_fetch_session_key failed\n");
 			goto done;
 		}
-		arcfour_crypt_blob(u_info.info23.password.data, 516,
-				   &session_key);
+
+		status = init_samr_CryptPassword(password,
+						 &session_key,
+						 &u_info.info23.password);
+		if (!NT_STATUS_IS_OK(status)) {
+			torture_comment(tctx, "init_samr_CryptPassword failed\n");
+			goto done;
+		}
+
 		u_info.info23.info.password_expired = 0;
 		u_info.info23.info.fields_present = SAMR_FIELD_NT_PASSWORD_PRESENT |
 						    SAMR_FIELD_LM_PASSWORD_PRESENT |
@@ -872,10 +876,6 @@ static bool join3(struct torture_context *tctx,
 		union samr_UserInfo u_info;
 		struct samr_UserInfo21 *i21 = &u_info.info25.info;
 		DATA_BLOB session_key;
-		DATA_BLOB confounded_session_key = data_blob_talloc(
-			mem_ctx, NULL, 16);
-		gnutls_hash_hd_t hash_hnd;
-		uint8_t confounder[16];
 
 		ZERO_STRUCT(u_info);
 
@@ -890,25 +890,16 @@ static bool join3(struct torture_context *tctx,
 		i21->password_expired = 1;
 		*/
 
-		encode_pw_buffer(u_info.info25.password.data,
-				 cli_credentials_get_password(wks_creds),
-				 STR_UNICODE);
 		status = dcerpc_fetch_session_key(samr_pipe, &session_key);
 		if (!NT_STATUS_IS_OK(status)) {
 			torture_comment(tctx, "dcerpc_fetch_session_key failed: %s\n",
 				 nt_errstr(status));
 			goto done;
 		}
-		generate_random_buffer((uint8_t *)confounder, 16);
 
-		gnutls_hash_init(&hash_hnd, GNUTLS_DIG_MD5);
-		gnutls_hash(hash_hnd, confounder, 16);
-		gnutls_hash(hash_hnd, session_key.data, session_key.length);
-		gnutls_hash_deinit(hash_hnd, confounded_session_key.data);
-
-		arcfour_crypt_blob(u_info.info25.password.data, 516,
-				   &confounded_session_key);
-		memcpy(&u_info.info25.password.data[516], confounder, 16);
+		status = init_samr_CryptPasswordEx(cli_credentials_get_password(wks_creds),
+						   &session_key,
+						   &u_info.info25.password);
 
 		sui2.in.user_handle = wks_handle;
 		sui2.in.level = 25;
@@ -942,8 +933,11 @@ static bool join3(struct torture_context *tctx,
 			torture_comment(tctx, "dcerpc_fetch_session_key failed\n");
 			goto done;
 		}
-		arcfour_crypt_blob(u_info.info24.password.data, 516,
-				   &session_key);
+
+		status = init_samr_CryptPassword(cli_credentials_get_password(wks_creds),
+						 &session_key,
+						 &u_info.info24.password);
+
 		sui2.in.user_handle = wks_handle;
 		sui2.in.info = &u_info;
 		sui2.in.level = 24;
@@ -2524,7 +2518,7 @@ static bool torture_samba3_rpc_sharesec(struct torture_context *torture)
 			torture, torture, sd, cli->session,
 			torture_setting_string(torture, "share", NULL),
 			user_sid, SEC_FILE_ALL, NT_STATUS_OK, NT_STATUS_OK),
-			"failed to test tcon with SEC_FILE_ALL access_mask")
+			"failed to test tcon with SEC_FILE_ALL access_mask");
 
 	return true;
 }
@@ -4547,6 +4541,145 @@ done:
 	return ret;
 }
 
+static bool torture_rpc_lsa_over_netlogon(struct torture_context *torture)
+{
+	TALLOC_CTX *mem_ctx;
+	NTSTATUS status;
+	bool ret = false;
+	struct smbcli_options options;
+	struct smb2_tree *tree;
+	struct dcerpc_pipe *netlogon_pipe;
+	struct dcerpc_binding_handle *lsa_handle;
+	struct lsa_ObjectAttribute attr;
+	struct lsa_QosInfo qos;
+	struct lsa_OpenPolicy2 o;
+	struct policy_handle handle;
+
+	torture_comment(torture, "Testing if we can access LSA server over "
+			"\\\\pipe\\netlogon rather than \\\\pipe\\lsarpc\n");
+
+	mem_ctx = talloc_init("torture_samba3_rpc_lsa_over_netlogon");
+	torture_assert(torture, (mem_ctx != NULL), "talloc_init failed");
+
+	lpcfg_smbcli_options(torture->lp_ctx, &options);
+
+	status = smb2_connect(mem_ctx,
+			      torture_setting_string(torture, "host", NULL),
+			      lpcfg_smb_ports(torture->lp_ctx),
+			      "IPC$",
+			      lpcfg_resolve_context(torture->lp_ctx),
+			      popt_get_cmdline_credentials(),
+			      &tree,
+			      torture->ev,
+			      &options,
+			      lpcfg_socket_options(torture->lp_ctx),
+			      lpcfg_gensec_settings(torture, torture->lp_ctx)
+			      );
+	torture_assert_ntstatus_ok_goto(torture, status, ret, done,
+					"smb2_connect failed");
+
+	status = pipe_bind_smb2(torture, mem_ctx, tree, "netlogon",
+			        &ndr_table_lsarpc, &netlogon_pipe);
+	torture_assert_ntstatus_ok_goto(torture, status, ret, done,
+					"pipe_bind_smb2 failed");
+	lsa_handle = netlogon_pipe->binding_handle;
+
+	qos.len = 0;
+	qos.impersonation_level = 2;
+	qos.context_mode = 1;
+	qos.effective_only = 0;
+
+	attr.len = 0;
+	attr.root_dir = NULL;
+	attr.object_name = NULL;
+	attr.attributes = 0;
+	attr.sec_desc = NULL;
+	attr.sec_qos = &qos;
+
+	o.in.system_name = "\\";
+	o.in.attr = &attr;
+	o.in.access_mask = SEC_FLAG_MAXIMUM_ALLOWED;
+	o.out.handle = &handle;
+
+	torture_assert_ntstatus_ok(torture,
+			dcerpc_lsa_OpenPolicy2_r(lsa_handle, torture, &o),
+			"OpenPolicy2 failed");
+	torture_assert_ntstatus_ok(torture,
+				   o.out.result,
+				   "OpenPolicy2 failed");
+
+	ret = true;
+ done:
+	talloc_free(mem_ctx);
+	return ret;
+}
+
+static bool torture_rpc_pipes_supported_interfaces(
+					struct torture_context *torture)
+{
+	TALLOC_CTX *mem_ctx;
+	NTSTATUS status;
+	bool ret = false;
+	struct smbcli_options options;
+	struct smb2_tree *tree;
+	struct dcerpc_pipe *pipe1;
+	struct dcerpc_pipe *pipe2;
+	struct dcerpc_pipe *pipe3;
+
+	torture_comment(torture, "Testing only appropiate interfaces are "
+			"available in smb pipes\n");
+
+	mem_ctx = talloc_init("torture_samba3_rpc_pipes_supported_interfaces");
+	torture_assert(torture, (mem_ctx != NULL), "talloc_init failed");
+
+	lpcfg_smbcli_options(torture->lp_ctx, &options);
+
+	status = smb2_connect(mem_ctx,
+			      torture_setting_string(torture, "host", NULL),
+			      lpcfg_smb_ports(torture->lp_ctx),
+			      "IPC$",
+			      lpcfg_resolve_context(torture->lp_ctx),
+			      popt_get_cmdline_credentials(),
+			      &tree,
+			      torture->ev,
+			      &options,
+			      lpcfg_socket_options(torture->lp_ctx),
+			      lpcfg_gensec_settings(torture, torture->lp_ctx)
+			      );
+	torture_assert_ntstatus_ok_goto(torture, status, ret, done,
+					"smb2_connect failed");
+
+	/* Test embedded services pipes. The svcctl interface is
+	 * not available if we open the winreg pipe. */
+	status = pipe_bind_smb2(torture, mem_ctx, tree, "winreg",
+			        &ndr_table_svcctl, &pipe1);
+	torture_assert_ntstatus_equal(torture,
+			status,
+			NT_STATUS_RPC_UNSUPPORTED_NAME_SYNTAX,
+			"svcctl interface not supported in winreg pipe");
+
+	/* Test it is not possible to bind to S4 server provided services */
+	status = pipe_bind_smb2(torture, mem_ctx, tree, "srvsvc",
+			        &ndr_table_samr, &pipe2);
+	torture_assert_ntstatus_equal(torture,
+			status,
+			NT_STATUS_RPC_UNSUPPORTED_NAME_SYNTAX,
+			"samr interface not supported in srvsvc pipe");
+
+	/* Test pipes in forked daemons like lsassd. The lsarpc interface is
+	 * not available if we open the SAMR pipe. */
+	status = pipe_bind_smb2(torture, mem_ctx, tree, "samr",
+			        &ndr_table_lsarpc, &pipe3);
+	torture_assert_ntstatus_equal(torture,
+			status,
+			NT_STATUS_RPC_UNSUPPORTED_NAME_SYNTAX,
+			"lsarpc interface not supported in samr pipe");
+
+	ret = true;
+ done:
+	talloc_free(mem_ctx);
+	return ret;
+}
 
 struct torture_suite *torture_rpc_samba3(TALLOC_CTX *mem_ctx)
 {
@@ -4574,6 +4707,12 @@ struct torture_suite *torture_rpc_samba3(TALLOC_CTX *mem_ctx)
 	torture_suite_add_simple_test(suite, "smb2-pipe-read-close", torture_rpc_smb2_pipe_read_close);
 	torture_suite_add_simple_test(suite, "smb2-pipe-read-tdis", torture_rpc_smb2_pipe_read_tdis);
 	torture_suite_add_simple_test(suite, "smb2-pipe-read-logoff", torture_rpc_smb2_pipe_read_logoff);
+	torture_suite_add_simple_test(suite,
+				      "lsa_over_netlogon",
+				      torture_rpc_lsa_over_netlogon);
+	torture_suite_add_simple_test(suite,
+				      "pipes_supported_interfaces",
+				      torture_rpc_pipes_supported_interfaces);
 
 	suite->description = talloc_strdup(suite, "samba3 DCERPC interface tests");
 

@@ -17,6 +17,7 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use strict;
+use warnings;
 
 use FindBin qw($RealBin $Script);
 use File::Spec;
@@ -53,7 +54,6 @@ my @opt_include_env = ();
 my $opt_testenv = 0;
 my $opt_list = 0;
 my $opt_mitkrb5 = 0;
-my $ldap = undef;
 my $opt_resetup_env = undef;
 my $opt_load_list = undef;
 my $opt_libnss_wrapper_so_path = "";
@@ -105,35 +105,6 @@ sub skip
 
 sub getlog_env($);
 
-sub setup_pcap($)
-{
-	my ($name) = @_;
-
-	return unless ($opt_socket_wrapper_pcap);
-	return unless defined($ENV{SOCKET_WRAPPER_PCAP_DIR});
-
-	my $fname = $name;
-	$fname =~ s%[^abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789\-]%_%g;
-
-	my $pcap_file = "$ENV{SOCKET_WRAPPER_PCAP_DIR}/$fname.pcap";
-
-	SocketWrapper::setup_pcap($pcap_file);
-
-	return $pcap_file;
-}
-
-sub cleanup_pcap($$)
-{
-	my ($pcap_file, $exitcode) = @_;
-
-	return unless ($opt_socket_wrapper_pcap);
-	return if ($opt_socket_wrapper_keep_pcap);
-	return unless ($exitcode == 0);
-	return unless defined($pcap_file);
-
-	unlink($pcap_file);
-}
-
 # expand strings from %ENV
 sub expand_environment_strings($)
 {
@@ -145,10 +116,12 @@ sub expand_environment_strings($)
 	return $s;
 }
 
+my $target;
+
 sub run_testsuite($$$$$)
 {
 	my ($envname, $name, $cmd, $i, $totalsuites) = @_;
-	my $pcap_file = setup_pcap($name);
+	my $pcap_file = $target->setup_pcap($name);
 
 	Subunit::start_testsuite($name);
 	Subunit::progress_push();
@@ -186,7 +159,7 @@ sub run_testsuite($$$$$)
 		Subunit::end_testsuite($name, "failure", "Exit code was $exitcode");
 	}
 
-	cleanup_pcap($pcap_file, $exitcode);
+	$target->cleanup_pcap($pcap_file, $exitcode);
 
 	if (not $opt_socket_wrapper_keep_pcap and defined($pcap_file)) {
 		print "PCAP FILE: $pcap_file\n";
@@ -238,9 +211,6 @@ Target Specific:
                             failed
  --socket-wrapper           enable socket wrapper
 
-Samba4 Specific:
- --ldap=openldap|fedora-ds  back samba onto specified ldap server
-
 Behaviour:
  --quick                    run quick overall test
  --one                      abort when the first test fails
@@ -268,7 +238,6 @@ my $result = GetOptions (
 		'testenv' => \$opt_testenv,
 		'list' => \$opt_list,
 		'mitkrb5' => \$opt_mitkrb5,
-		'ldap:s' => \$ldap,
 		'resetup-environment' => \$opt_resetup_env,
 		'testlist=s' => \@testlists,
 		'random-order' => \$opt_random_order,
@@ -302,27 +271,16 @@ unless (defined($ENV{VALGRIND})) {
 $ENV{PYTHONUNBUFFERED} = 1;
 
 # do not depend on the users setup
+# see also bootstrap/config.py
 $ENV{TZ} = "UTC";
+$ENV{LC_ALL} = $ENV{LANG} = "en_US.utf8";
 
 my $bindir_abs = abs_path($bindir);
 
-# Backwards compatibility:
-if (defined($ENV{TEST_LDAP}) and $ENV{TEST_LDAP} eq "yes") {
-	if (defined($ENV{FEDORA_DS_ROOT})) {
-		$ldap = "fedora-ds";
-	} else {
-		$ldap = "openldap";
-	}
-}
-
 my $torture_maxtime = ($ENV{TORTURE_MAXTIME} or 1200);
-if ($ldap) {
-	# LDAP is slow
-	$torture_maxtime *= 2;
-}
 
 $prefix =~ s+//+/+;
-$prefix =~ s+/./+/+;
+$prefix =~ s+/\./+/+;
 $prefix =~ s+/$++;
 
 die("using an empty prefix isn't allowed") unless $prefix ne "";
@@ -354,7 +312,6 @@ $ENV{PREFIX} = $prefix;
 $ENV{PREFIX_ABS} = $prefix_abs;
 $ENV{SRCDIR} = $srcdir;
 $ENV{SRCDIR_ABS} = $srcdir_abs;
-$ENV{GNUPGHOME} = "$srcdir_abs/selftest/gnupg";
 $ENV{BINDIR} = $bindir_abs;
 
 my $tls_enabled = not $opt_quick;
@@ -464,11 +421,11 @@ if ($opt_use_dns_faking) {
 	$ENV{SAMBA_DNS_FAKING} = 1;
 }
 
-my $target;
 my $testenv_default = "none";
 
 if ($opt_mitkrb5 == 1) {
 	$ENV{MITKRB5} = $opt_mitkrb5;
+	$ENV{KRB5RCACHETYPE} = "none";
 }
 
 # After this many seconds, the server will self-terminate.  All tests
@@ -488,7 +445,9 @@ if (defined($ENV{SMBD_MAXTIME}) and $ENV{SMBD_MAXTIME} ne "") {
     $server_maxtime = $ENV{SMBD_MAXTIME};
 }
 
-$target = new Samba($bindir, $ldap, $srcdir, $server_maxtime);
+$target = new Samba($bindir, $srcdir, $server_maxtime,
+		    $opt_socket_wrapper_pcap,
+		    $opt_socket_wrapper_keep_pcap);
 unless ($opt_list) {
 	if ($opt_target eq "samba") {
 		$testenv_default = "ad_dc";
@@ -527,6 +486,7 @@ foreach (@opt_include) {
 # We give the selftest client 6 different IPv4 addresses to use. Most tests
 # only use the first (.11) IP. Note that winsreplication.c is one test that
 # uses the other IPs (search for iface_list_count()).
+$ENV{SOCKET_WRAPPER_IPV4_NETWORK} = "10.53.57.0";
 my $interfaces = Samba::get_interfaces_config("client", 6);
 
 my $clientdir = "$prefix_abs/client";
@@ -600,7 +560,7 @@ sub write_clientconf($$$)
 	# USER-${USER_PRINCIPAL_NAME}-private-key.pem symlink
 	# We make a copy here and make the certificated easily
 	# accessable in the client environment.
-	my $mask = umask;
+	$mask = umask;
 	umask 0077;
 	opendir USERS, "${ca_users_dir}" or die "Could not open dir '${ca_users_dir}': $!";
 	for my $d (readdir USERS) {
@@ -649,8 +609,6 @@ sub write_clientconf($$$)
 	client min protocol = CORE
 	log level = 1
 	torture:basedir = $clientdir
-#We don't want to pass our self-tests if the PAC code is wrong
-	gensec:require_pac = true
 #We don't want to run 'speed' tests for very long
         torture:timelimit = 1
         winbind separator = /
@@ -658,6 +616,7 @@ sub write_clientconf($$$)
 	tls crlfile = ${cacrl_pem}
 	tls verify peer = no_check
 	include system krb5 conf = no
+	elasticsearch:mappings = $srcdir_abs/source3/rpc_server/mdssvc/elasticsearch_mappings.json
 ";
 	close(CF);
 }
@@ -725,8 +684,14 @@ if ($opt_quick) {
 }
 $ENV{SELFTEST_MAXTIME} = $torture_maxtime;
 
+my $selftest_resolv_conf_path = "$tmpdir_abs/selftest.resolv.conf";
+$ENV{RESOLV_CONF} = "${selftest_resolv_conf_path}.global";
+
 my $selftest_krbt_ccache_path = "$tmpdir_abs/selftest.krb5_ccache";
 $ENV{KRB5CCNAME} = "FILE:${selftest_krbt_ccache_path}.global";
+
+my $selftest_gnupghome_path = "$tmpdir_abs/selftest.no.gnupg";
+$ENV{GNUPGHOME} = "${selftest_gnupghome_path}.global";
 
 my @available = ();
 foreach my $fn (@testlists) {
@@ -862,7 +827,9 @@ sub setup_env($$)
 	delete $ENV{SOCKET_WRAPPER_DEFAULT_IFACE};
 	delete $ENV{SMB_CONF_PATH};
 
+	$ENV{RESOLV_CONF} = "${selftest_resolv_conf_path}.${envname}/ignore";
 	$ENV{KRB5CCNAME} = "FILE:${selftest_krbt_ccache_path}.${envname}/ignore";
+	$ENV{GNUPGHOME} = "${selftest_gnupghome_path}.${envname}/ignore";
 
 	if (defined(get_running_env($envname))) {
 		$testenv_vars = get_running_env($envname);
@@ -872,17 +839,19 @@ sub setup_env($$)
 		}
 	} else {
 		$testenv_vars = $target->setup_env($envname, $prefix);
-		if (defined($testenv_vars) and $testenv_vars eq "UNKNOWN") {
-		    return $testenv_vars;
-		} elsif (defined($testenv_vars) && not defined($testenv_vars->{target})) {
-		        $testenv_vars->{target} = $target;
-		}
 		if (not defined($testenv_vars)) {
+			my $msg = "$opt_target can't start up known environment '$envname'";
 			if ($opt_one) {
-				die("$opt_target can't start up known environment '$envname'");
-			} else {
-				warn("$opt_target can't start up known environment '$envname'");
+				die($msg);
 			}
+			warn $msg;
+			return;
+		}
+		if (ref $testenv_vars ne "HASH") {
+			return $testenv_vars;
+		}
+		if (defined($testenv_vars->{target})) {
+			$testenv_vars->{target} = $target;
 		}
 	}
 

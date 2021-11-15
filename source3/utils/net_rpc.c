@@ -43,7 +43,7 @@
 #include "rpc_client/init_lsa.h"
 #include "../libcli/security/security.h"
 #include "libsmb/libsmb.h"
-#include "libsmb/clirap.h"
+#include "clirap2.h"
 #include "nsswitch/libwbclient/wbclient.h"
 #include "passdb.h"
 #include "../libcli/smb/smbXcli_base.h"
@@ -206,16 +206,23 @@ int run_rpc_command(struct net_context *c,
 			}
 		} else {
 			if (conn_flags & NET_FLAGS_SEAL) {
-				nt_status = cli_rpc_pipe_open_generic_auth(
+				struct cli_credentials *creds = NULL;
+
+				creds = net_context_creds(c, mem_ctx);
+				if (creds == NULL) {
+					DBG_ERR("net_rpc_ntlm_creds() failed\n");
+					nt_status = NT_STATUS_INTERNAL_ERROR;
+					goto fail;
+				}
+
+				nt_status = cli_rpc_pipe_open_with_creds(
 					cli, table,
 					(conn_flags & NET_FLAGS_TCP) ?
 					NCACN_IP_TCP : NCACN_NP,
-					CRED_DONT_USE_KERBEROS,
 					DCERPC_AUTH_TYPE_NTLMSSP,
 					DCERPC_AUTH_LEVEL_PRIVACY,
 					smbXcli_conn_remote_name(cli->conn),
-					lp_workgroup(), c->opt_user_name,
-					c->opt_password, &pipe_hnd);
+					creds, &pipe_hnd);
 			} else {
 				nt_status = cli_rpc_pipe_open_noauth(
 					cli, table,
@@ -236,7 +243,7 @@ int run_rpc_command(struct net_context *c,
 		DEBUG(1, ("rpc command function failed! (%s)\n", nt_errstr(nt_status)));
 	} else {
 		ret = 0;
-		DEBUG(5, ("rpc command function succedded\n"));
+		DEBUG(5, ("rpc command function succeeded\n"));
 	}
 
 	if (!(conn_flags & NET_FLAGS_NO_PIPE)) {
@@ -3986,7 +3993,7 @@ static NTSTATUS copy_fn(const char *mnt, struct file_info *f,
 	DEBUG(3,("got mask: %s, name: %s\n", mask, f->name));
 
 	/* DIRECTORY */
-	if (f->mode & FILE_ATTRIBUTE_DIRECTORY) {
+	if (f->attr & FILE_ATTRIBUTE_DIRECTORY) {
 
 		DEBUG(3,("got dir: %s\n", f->name));
 
@@ -4070,7 +4077,7 @@ static NTSTATUS copy_fn(const char *mnt, struct file_info *f,
 }
 
 /**
- * sync files, can be called recursivly to list files
+ * sync files, can be called recursively to list files
  * and then call copy_fn for each file
  *
  * @param cp_clistate	pointer to the copy_clistate we work with
@@ -6095,6 +6102,7 @@ static NTSTATUS rpc_trustdom_add_internals(struct net_context *c,
 	unsigned int orig_timeout;
 	struct dcerpc_binding_handle *b = pipe_hnd->binding_handle;
 	DATA_BLOB session_key = data_blob_null;
+	TALLOC_CTX *frame = NULL;
 
 	if (argc != 2) {
 		d_printf("%s\n%s",
@@ -6104,22 +6112,24 @@ static NTSTATUS rpc_trustdom_add_internals(struct net_context *c,
 		return NT_STATUS_INVALID_PARAMETER;
 	}
 
+	frame = talloc_stackframe();
+
 	/*
 	 * Make valid trusting domain account (ie. uppercased and with '$' appended)
 	 */
 
 	if (asprintf(&acct_name, "%s$", argv[0]) < 0) {
-		return NT_STATUS_NO_MEMORY;
+		status = NT_STATUS_NO_MEMORY;
 	}
 
 	if (!strupper_m(acct_name)) {
-		SAFE_FREE(acct_name);
-		return NT_STATUS_INVALID_PARAMETER;
+		status = NT_STATUS_INVALID_PARAMETER;
+		goto done;
 	}
 
 	init_lsa_String(&lsa_acct_name, acct_name);
 
-	status = cli_get_session_key(mem_ctx, pipe_hnd, &session_key);
+	status = cli_get_session_key(frame, pipe_hnd, &session_key);
 	if (!NT_STATUS_IS_OK(status)) {
 		DEBUG(0,("Error getting session_key of SAM pipe. Error was %s\n",
 			nt_errstr(status)));
@@ -6127,7 +6137,7 @@ static NTSTATUS rpc_trustdom_add_internals(struct net_context *c,
 	}
 
 	/* Get samr policy handle */
-	status = dcerpc_samr_Connect2(b, mem_ctx,
+	status = dcerpc_samr_Connect2(b, frame,
 				      pipe_hnd->desthost,
 				      MAXIMUM_ALLOWED_ACCESS,
 				      &connect_pol,
@@ -6141,7 +6151,7 @@ static NTSTATUS rpc_trustdom_add_internals(struct net_context *c,
 	}
 
 	/* Get domain policy handle */
-	status = dcerpc_samr_OpenDomain(b, mem_ctx,
+	status = dcerpc_samr_OpenDomain(b, frame,
 					&connect_pol,
 					MAXIMUM_ALLOWED_ACCESS,
 					discard_const_p(struct dom_sid2, domain_sid),
@@ -6168,7 +6178,7 @@ static NTSTATUS rpc_trustdom_add_internals(struct net_context *c,
 		     SAMR_USER_ACCESS_GET_ATTRIBUTES |
 		     SAMR_USER_ACCESS_SET_ATTRIBUTES;
 
-	status = dcerpc_samr_CreateUser2(b, mem_ctx,
+	status = dcerpc_samr_CreateUser2(b, frame,
 					 &domain_pol,
 					 &lsa_acct_name,
 					 acb_info,
@@ -6195,16 +6205,19 @@ static NTSTATUS rpc_trustdom_add_internals(struct net_context *c,
 
 		ZERO_STRUCT(info.info23);
 
-		init_samr_CryptPassword(argv[1],
-					&session_key,
-					&crypt_pwd);
+		status = init_samr_CryptPassword(argv[1],
+						 &session_key,
+						 &crypt_pwd);
+		if (!NT_STATUS_IS_OK(status)) {
+			goto done;
+		}
 
 		info.info23.info.fields_present = SAMR_FIELD_ACCT_FLAGS |
 						  SAMR_FIELD_NT_PASSWORD_PRESENT;
 		info.info23.info.acct_flags = ACB_DOMTRUST;
 		info.info23.password = crypt_pwd;
 
-		status = dcerpc_samr_SetUserInfo2(b, mem_ctx,
+		status = dcerpc_samr_SetUserInfo2(b, frame,
 						  &user_pol,
 						  23,
 						  &info,
@@ -6221,9 +6234,11 @@ static NTSTATUS rpc_trustdom_add_internals(struct net_context *c,
 		}
 	}
 
+	status = NT_STATUS_OK;
  done:
 	SAFE_FREE(acct_name);
 	data_blob_clear_free(&session_key);
+	TALLOC_FREE(frame);
 	return status;
 }
 
@@ -6580,6 +6595,7 @@ static int rpc_trustdom_establish(struct net_context *c, int argc,
 	};
 
 	c->opt_user_name = acct_name;
+	c->opt_user_specified = true;
 
 	/* find the domain controller */
 	if (!net_find_pdc(&server_ss, pdc_name, domain_name)) {
@@ -7464,8 +7480,9 @@ bool net_rpc_check(struct net_context *c, unsigned flags)
 		}
 		return false;
 	}
-	status = smbXcli_negprot(cli->conn, cli->timeout, PROTOCOL_CORE,
-				 PROTOCOL_NT1);
+	status = smbXcli_negprot(cli->conn, cli->timeout,
+				 lp_client_min_protocol(),
+				 lp_client_max_protocol());
 	if (!NT_STATUS_IS_OK(status))
 		goto done;
 	if (smbXcli_conn_protocol(cli->conn) < PROTOCOL_NT1)
@@ -7795,9 +7812,9 @@ int rpc_printer_migrate(struct net_context *c, int argc, const char **argv)
 			"security",
 			rpc_printer_migrate_security,
 			NET_TRANSPORT_RPC,
-			N_("Mirgate printer ACLs to local server"),
+			N_("Migrate printer ACLs to local server"),
 			N_("net rpc printer migrate security\n"
-			   "    Mirgate printer ACLs to local server")
+			   "    Migrate printer ACLs to local server")
 		},
 		{
 			"settings",

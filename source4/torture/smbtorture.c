@@ -38,6 +38,8 @@
 #include <readline/history.h>
 #endif
 
+static int use_fullname;
+
 static char *prefix_name(TALLOC_CTX *mem_ctx, const char *prefix, const char *name)
 {
 	if (prefix == NULL)
@@ -87,27 +89,54 @@ static bool run_matching(struct torture_context *torture,
 		if (gen_fnmatch(expr, name) == 0) {
 			*matched = true;
 			reload_charcnv(torture->lp_ctx);
-			if (restricted != NULL)
-				ret &= torture_run_suite_restricted(torture, o, restricted);
-			else
-				ret &= torture_run_suite(torture, o);
+			if (use_fullname == 1) {
+				torture_subunit_prefix_reset(torture, prefix);
+			}
+			ret &= torture_run_suite_restricted(torture, o, restricted);
+			if (use_fullname == 1) {
+				torture_subunit_prefix_reset(torture, NULL);
+			}
+			/*
+			 * torture_run_suite_restricted() already implements
+			 * recursion, so we're done with this child suite.
+			 */
+			continue;
 		}
 		ret &= run_matching(torture, name, expr, restricted, o, matched);
 	}
 
 	for (t = suite->testcases; t; t = t->next) {
-		char *name = talloc_asprintf(torture, "%s.%s", prefix, t->name);
-		if (gen_fnmatch(expr, name) == 0) {
+		char *tname = prefix_name(torture, prefix, t->name);
+		if (gen_fnmatch(expr, tname) == 0) {
 			*matched = true;
 			reload_charcnv(torture->lp_ctx);
+			if (use_fullname == 1) {
+				torture_subunit_prefix_reset(torture, prefix);
+			}
 			ret &= torture_run_tcase_restricted(torture, t, restricted);
+			if (use_fullname == 1) {
+				torture_subunit_prefix_reset(torture, NULL);
+			}
+			/*
+			 * torture_run_tcase_restricted() already implements
+			 * recursion, so we're done for this tcase.
+			 */
+			continue;
 		}
 		for (p = t->tests; p; p = p->next) {
-			name = talloc_asprintf(torture, "%s.%s.%s", prefix, t->name, p->name);
-			if (gen_fnmatch(expr, name) == 0) {
+			char *pname = prefix_name(torture, tname, p->name);
+			if (gen_fnmatch(expr, pname) == 0) {
 				*matched = true;
 				reload_charcnv(torture->lp_ctx);
+				if (use_fullname == 1) {
+					torture_subunit_prefix_reset(torture,
+								     tname);
+				}
 				ret &= torture_run_test_restricted(torture, t, p, restricted);
+				if (use_fullname == 1) {
+					torture_subunit_prefix_reset(torture,
+								     NULL);
+				}
 			}
 		}
 	}
@@ -393,6 +422,8 @@ int main(int argc, const char *argv[])
 
 	struct poptOption long_options[] = {
 		POPT_AUTOHELP
+		{"fullname",	0, POPT_ARG_NONE, &use_fullname, 0,
+		 "use full name for the test", NULL },
 		{"format", 0, POPT_ARG_STRING, &ui_ops_name, 0, "Output format (one of: simple, subunit)", NULL },
 		{"smb-ports",	'p', POPT_ARG_STRING, NULL,     OPT_SMB_PORTS,	"SMB ports", 	NULL},
 		{"basedir",	  0, POPT_ARG_STRING, &basedir, 0, "base directory", "BASEDIR" },
@@ -426,7 +457,7 @@ int main(int argc, const char *argv[])
 		POPT_COMMON_CONNECTION
 		POPT_COMMON_CREDENTIALS
 		POPT_COMMON_VERSION
-		{ NULL }
+		{0}
 	};
 
 	setlinebuf(stdout);
@@ -587,6 +618,7 @@ int main(int argc, const char *argv[])
 
 	if (list_testsuites) {
 		print_testsuite_list();
+		poptFreeContext(pc);
 		talloc_free(mem_ctx);
 		popt_free_cmdline_credentials();
 		return 0;
@@ -610,6 +642,7 @@ int main(int argc, const char *argv[])
 				print_test_list(torture_root, NULL, argv_new[i]);
 			}
 		}
+		poptFreeContext(pc);
 		talloc_free(mem_ctx);
 		popt_free_cmdline_credentials();
 		return 0;
@@ -638,6 +671,7 @@ int main(int argc, const char *argv[])
 	if (basedir != NULL) {
 		if (basedir[0] != '/') {
 			fprintf(stderr, "Please specify an absolute path to --basedir\n");
+			poptFreeContext(pc);
 			talloc_free(mem_ctx);
 			return 1;
 		}
@@ -646,6 +680,7 @@ int main(int argc, const char *argv[])
 		char *pwd = talloc_size(torture, PATH_MAX);
 		if (!getcwd(pwd, PATH_MAX)) {
 			fprintf(stderr, "Unable to determine current working directory\n");
+			poptFreeContext(pc);
 			talloc_free(mem_ctx);
 			return 1;
 		}
@@ -653,12 +688,14 @@ int main(int argc, const char *argv[])
 	}
 	if (!outputdir) {
 		fprintf(stderr, "Could not allocate per-run output dir\n");
+		poptFreeContext(pc);
 		talloc_free(mem_ctx);
 		return 1;
 	}
 	torture->outputdir = mkdtemp(outputdir);
 	if (!torture->outputdir) {
 		perror("Failed to make temp output dir");
+		poptFreeContext(pc);
 		talloc_free(mem_ctx);
 		return 1;
 	}
@@ -700,10 +737,12 @@ int main(int argc, const char *argv[])
 	torture_deltree_outputdir(torture);
 
 	if (torture->results->returncode && correct) {
+		poptFreeContext(pc);
 		talloc_free(mem_ctx);
 		popt_free_cmdline_credentials();
 		return(0);
 	} else {
+		poptFreeContext(pc);
 		talloc_free(mem_ctx);
 		return(1);
 	}

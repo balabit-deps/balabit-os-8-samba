@@ -32,7 +32,7 @@
 static PyObject *py_is_xattr_supported(PyObject *self,
 			PyObject *Py_UNUSED(ignored))
 {
-	return Py_True;
+	Py_RETURN_TRUE;
 }
 
 static PyObject *py_wrap_setxattr(PyObject *self, PyObject *args)
@@ -116,7 +116,7 @@ static PyMethodDef py_posix_eadb_methods[] = {
 		"Set the given attribute to the given value on the given file." },
 	{ "is_xattr_supported", (PyCFunction)py_is_xattr_supported, METH_NOARGS,
 		"Return true if xattr are supported on this system\n"},
-	{ NULL }
+	{0}
 };
 
 static struct PyModuleDef moduledef = {

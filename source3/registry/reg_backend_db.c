@@ -733,6 +733,15 @@ WERROR regdb_init(void)
 		return WERR_OK;
 	}
 
+        /*
+         * Clustered Samba can only work as root because we need messaging to
+         * talk to ctdb which only works as root.
+         */
+        if (lp_clustering() && geteuid() != 0) {
+                DBG_ERR("Cluster mode requires running as root.\n");
+		return WERR_ACCESS_DENIED;
+        }
+
 	db_path = state_path(talloc_tos(), "registry.tdb");
 	if (db_path == NULL) {
 		return WERR_NOT_ENOUGH_MEMORY;
@@ -850,20 +859,22 @@ WERROR regdb_init(void)
 
 WERROR regdb_open( void )
 {
-	WERROR result = WERR_OK;
-	char *db_path;
+	WERROR result;
+	char *db_path = NULL;
 	int saved_errno;
 
 	if ( regdb ) {
 		DEBUG(10, ("regdb_open: incrementing refcount (%d->%d)\n",
 			   regdb_refcount, regdb_refcount+1));
 		regdb_refcount++;
-		return WERR_OK;
+		result = WERR_OK;
+		goto done;
 	}
 
 	db_path = state_path(talloc_tos(), "registry.tdb");
 	if (db_path == NULL) {
-		return WERR_NOT_ENOUGH_MEMORY;
+		result = WERR_NOT_ENOUGH_MEMORY;
+		goto done;
 	}
 
 	become_root();
@@ -877,16 +888,17 @@ WERROR regdb_open( void )
 		result = ntstatus_to_werror(map_nt_error_from_unix(saved_errno));
 		DEBUG(0,("regdb_open: Failed to open %s! (%s)\n",
 			 db_path, strerror(saved_errno)));
-		TALLOC_FREE(db_path);
-		return result;
+		goto done;
 	}
-	TALLOC_FREE(db_path);
 
 	regdb_refcount = 1;
 	DEBUG(10, ("regdb_open: registry db opened. refcount reset (%d)\n",
 		   regdb_refcount));
 
-	return WERR_OK;
+	result = WERR_OK;
+done:
+	TALLOC_FREE(db_path);
+	return result;
 }
 
 /***********************************************************************
@@ -1673,8 +1685,6 @@ static bool regdb_key_exists(struct db_context *db, const char *key)
 	 */
 	buflen = value.dsize - len;
 	buf = (const char *)value.dptr + len;
-
-	len = 0;
 
 	for (i = 0; i < num_items; i++) {
 		if (buflen == 0) {

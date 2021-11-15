@@ -123,7 +123,7 @@
 	if (!NT_STATUS_IS_OK(status)) { \
 		torture_comment(tctx, \
 		    "(%s) Failed to set attrib 0x%x on %s\n", \
-		       __location__, sattrib, fname); \
+		       __location__, (unsigned int)(sattrib), fname); \
 	}} while (0)
 
 /*
@@ -1135,10 +1135,18 @@ static bool test_smb2_open_for_delete(struct torture_context *tctx,
 	io.smb2.in.create_disposition = NTCREATEX_DISP_OPEN;
 	status = smb2_create(tree, tctx, &(io.smb2));
 	CHECK_STATUS(status, NT_STATUS_OK);
+	smb2_util_close(tree, io.smb2.out.file.handle);
 
-	smb2_util_unlink(tree, fname);
-
+	/* Clear readonly flag to allow file deletion */
+	io.smb2.in.desired_access = SEC_FILE_READ_ATTRIBUTE |
+				SEC_FILE_WRITE_ATTRIBUTE;
+	status = smb2_create(tree, tctx, &(io.smb2));
+	CHECK_STATUS(status, NT_STATUS_OK);
+	h1 = io.smb2.out.file.handle;
+	SET_ATTRIB(FILE_ATTRIBUTE_ARCHIVE);
 	smb2_util_close(tree, h1);
+
+	smb2_util_close(tree, h);
 	smb2_util_unlink(tree, fname);
 	smb2_deltree(tree, DNAME);
 
@@ -1703,7 +1711,7 @@ static bool test_dir_alloc_size(struct torture_context *tctx,
 	 * smb_roundup(..., stat.st_size) which would be 1 MB by
 	 * default.
 	 *
-	 * Windows returns 0 for emtpy directories, once directories
+	 * Windows returns 0 for empty directories, once directories
 	 * have a few entries it starts replying with values > 0.
 	 */
 	c.in.alloc_size = 1024*1024*1024;
@@ -1900,6 +1908,58 @@ static bool test_twrp_stream(struct torture_context *tctx,
 					"smb2_create\n");
 
 	smb2_util_close(tree, h1);
+
+done:
+	return ret;
+}
+
+static bool test_twrp_openroot(struct torture_context *tctx, struct smb2_tree *tree)
+{
+	struct smb2_create io;
+	NTSTATUS status;
+	bool ret = true;
+	char *p = NULL;
+	struct tm tm;
+	time_t t;
+	uint64_t nttime;
+	const char *snapshot = NULL;
+
+	snapshot = torture_setting_string(tctx, "twrp_snapshot", NULL);
+	if (snapshot == NULL) {
+		torture_skip(tctx, "missing 'twrp_snapshot' option\n");
+	}
+
+	torture_comment(tctx, "Testing open of root of "
+		"share with timewarp (%s)\n",
+		snapshot);
+
+	setenv("TZ", "GMT", 1);
+
+	/* strptime does not set tm.tm_isdst but mktime assumes DST is in
+	 * effect if it is greather than 1. */
+	ZERO_STRUCT(tm);
+
+	p = strptime(snapshot, "@GMT-%Y.%m.%d-%H.%M.%S", &tm);
+	torture_assert_goto(tctx, p != NULL, ret, done, "strptime\n");
+	torture_assert_goto(tctx, *p == '\0', ret, done, "strptime\n");
+
+	t = mktime(&tm);
+	unix_to_nt_time(&nttime, t);
+
+	io = (struct smb2_create) {
+		.in.desired_access = SEC_FILE_READ_DATA,
+		.in.file_attributes = FILE_ATTRIBUTE_DIRECTORY,
+		.in.create_disposition = NTCREATEX_DISP_OPEN,
+		.in.share_access = NTCREATEX_SHARE_ACCESS_MASK,
+		.in.fname = "",
+		.in.create_options = NTCREATEX_OPTIONS_DIRECTORY,
+		.in.timewarp = nttime,
+	};
+
+	status = smb2_create(tree, tctx, &io);
+	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+					"smb2_create\n");
+	smb2_util_close(tree, io.out.file.handle);
 
 done:
 	return ret;
@@ -2648,6 +2708,68 @@ done:
 }
 
 /*
+  test opening quota fakefile handle and returned attributes
+*/
+static bool test_smb2_open_quota_fake_file(struct torture_context *tctx,
+					   struct smb2_tree *tree)
+{
+	const char *fname = "$Extend\\$Quota:$Q:$INDEX_ALLOCATION";
+	struct smb2_create create;
+	struct smb2_handle h = {{0}};
+	NTSTATUS status;
+	bool ret = true;
+
+	create = (struct smb2_create) {
+		.in.desired_access = SEC_RIGHTS_FILE_READ,
+		.in.file_attributes = FILE_ATTRIBUTE_NORMAL,
+		.in.share_access = NTCREATEX_SHARE_ACCESS_MASK,
+		.in.create_disposition = NTCREATEX_DISP_OPEN,
+		.in.impersonation_level = SMB2_IMPERSONATION_ANONYMOUS,
+		.in.fname = fname,
+	};
+
+	status = smb2_create(tree, tree, &create);
+	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+					"smb2_create failed\n");
+	h = create.out.file.handle;
+
+	torture_assert_u64_equal_goto(tctx,
+				      create.out.file_attr,
+				      FILE_ATTRIBUTE_HIDDEN
+				      | FILE_ATTRIBUTE_SYSTEM
+				      | FILE_ATTRIBUTE_DIRECTORY
+				      | FILE_ATTRIBUTE_ARCHIVE,
+				      ret,
+				      done,
+				      "Wrong attributes\n");
+
+	torture_assert_u64_equal_goto(tctx,
+				      create.out.create_time, 0,
+				      ret,
+				      done,
+				      "create_time is not 0\n");
+	torture_assert_u64_equal_goto(tctx,
+				      create.out.access_time, 0,
+				      ret,
+				      done,
+				      "access_time is not 0\n");
+	torture_assert_u64_equal_goto(tctx,
+				      create.out.write_time, 0,
+				      ret,
+				      done,
+				      "write_time is not 0\n");
+	torture_assert_u64_equal_goto(tctx,
+				      create.out.change_time, 0,
+				      ret,
+				      done,
+				      "change_time is not 0\n");
+
+done:
+	smb2_util_close(tree, h);
+	return ret;
+}
+
+/*
    basic testing of SMB2 read
 */
 struct torture_suite *torture_smb2_create_init(TALLOC_CTX *ctx)
@@ -2667,6 +2789,7 @@ struct torture_suite *torture_smb2_create_init(TALLOC_CTX *ctx)
 	torture_suite_add_1smb2_test(suite, "nulldacl", test_create_null_dacl);
 	torture_suite_add_1smb2_test(suite, "mkdir-dup", test_mkdir_dup);
 	torture_suite_add_1smb2_test(suite, "dir-alloc-size", test_dir_alloc_size);
+	torture_suite_add_1smb2_test(suite, "quota-fake-file", test_smb2_open_quota_fake_file);
 
 	suite->description = talloc_strdup(suite, "SMB2-CREATE tests");
 
@@ -2679,6 +2802,7 @@ struct torture_suite *torture_smb2_twrp_init(TALLOC_CTX *ctx)
 
 	torture_suite_add_1smb2_test(suite, "write", test_twrp_write);
 	torture_suite_add_1smb2_test(suite, "stream", test_twrp_stream);
+	torture_suite_add_1smb2_test(suite, "openroot", test_twrp_openroot);
 
 	suite->description = talloc_strdup(suite, "SMB2-TWRP tests");
 

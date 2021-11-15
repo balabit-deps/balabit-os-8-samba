@@ -99,6 +99,52 @@ NTSTATUS smb2_util_setatr(struct smb2_tree *tree, const char *name, uint32_t att
 }
 
 
+/*
+  get file attribute with SMB2
+*/
+NTSTATUS smb2_util_getatr(struct smb2_tree *tree, const char *fname,
+			  uint16_t *attr, size_t *size, time_t *t)
+{
+	union smb_fileinfo parms;
+	NTSTATUS status;
+	struct smb2_create create_io = {0};
+
+	create_io.in.desired_access = SEC_FILE_READ_ATTRIBUTE;
+	create_io.in.share_access = NTCREATEX_SHARE_ACCESS_NONE;
+	create_io.in.create_disposition = FILE_OPEN;
+	create_io.in.fname = fname;
+	status = smb2_create(tree, tree, &create_io);
+	if (!NT_STATUS_IS_OK(status)) {
+		return status;
+	}
+
+	ZERO_STRUCT(parms);
+	parms.all_info2.level = RAW_FILEINFO_SMB2_ALL_INFORMATION;
+	parms.all_info2.in.file.handle = create_io.out.file.handle;
+	status = smb2_getinfo_file(tree, tree, &parms);
+	if (!NT_STATUS_IS_OK(status)) {
+		return status;
+	}
+
+	status = smb2_util_close(tree, create_io.out.file.handle);
+	if (!NT_STATUS_IS_OK(status)) {
+		return status;
+	}
+
+	if (size) {
+		*size = parms.all_info2.out.size;
+	}
+
+	if (t) {
+		*t = parms.all_info2.out.write_time;
+	}
+
+	if (attr) {
+		*attr = parms.all_info2.out.attrib;
+	}
+
+	return status;
+}
 
 
 /* 
@@ -131,7 +177,7 @@ int smb2_deltree(struct smb2_tree *tree, const char *dname)
 
 	if (NT_STATUS_EQUAL(status, NT_STATUS_CANNOT_DELETE)) {
 		/* it could be read-only */
-		status = smb2_util_setatr(tree, dname, FILE_ATTRIBUTE_NORMAL);
+		smb2_util_setatr(tree, dname, FILE_ATTRIBUTE_NORMAL);
 		status = smb2_util_unlink(tree, dname);
 	}
 	if (NT_STATUS_IS_OK(status)) {
@@ -184,7 +230,7 @@ int smb2_deltree(struct smb2_tree *tree, const char *dname)
 			status = smb2_util_unlink(tree, name);
 			if (NT_STATUS_EQUAL(status, NT_STATUS_CANNOT_DELETE)) {
 				/* it could be read-only */
-				status = smb2_util_setatr(tree, name, FILE_ATTRIBUTE_NORMAL);
+				smb2_util_setatr(tree, name, FILE_ATTRIBUTE_NORMAL);
 				status = smb2_util_unlink(tree, name);
 			}
 			
@@ -206,7 +252,7 @@ int smb2_deltree(struct smb2_tree *tree, const char *dname)
 	status = smb2_util_rmdir(tree, dname);
 	if (NT_STATUS_EQUAL(status, NT_STATUS_CANNOT_DELETE)) {
 		/* it could be read-only */
-		status = smb2_util_setatr(tree, dname, FILE_ATTRIBUTE_NORMAL);
+		smb2_util_setatr(tree, dname, FILE_ATTRIBUTE_NORMAL);
 		status = smb2_util_rmdir(tree, dname);
 	}
 
@@ -238,4 +284,57 @@ bool smb2_util_handle_empty(const struct smb2_handle h)
 	ZERO_STRUCT(empty);
 
 	return smb2_util_handle_equal(h, empty);
+}
+
+/****************************************************************************
+send a qpathinfo SMB_QUERY_FILE_ALT_NAME_INFO call
+****************************************************************************/
+NTSTATUS smb2_qpathinfo_alt_name(TALLOC_CTX *ctx, struct smb2_tree *tree,
+				 const char *fname, const char **alt_name)
+{
+	union smb_fileinfo parms;
+	TALLOC_CTX *mem_ctx;
+	NTSTATUS status;
+	struct smb2_create create_io = {0};
+
+	mem_ctx = talloc_new(ctx);
+	if (!mem_ctx) {
+		return NT_STATUS_NO_MEMORY;
+	}
+
+	create_io.in.desired_access = SEC_FILE_READ_ATTRIBUTE;
+	create_io.in.share_access = NTCREATEX_SHARE_ACCESS_NONE;
+	create_io.in.create_disposition = FILE_OPEN;
+	create_io.in.fname = fname;
+	status = smb2_create(tree, mem_ctx, &create_io);
+	if (!NT_STATUS_IS_OK(status)) {
+		talloc_free(mem_ctx);
+		return status;
+	}
+
+	parms.alt_name_info.level = RAW_FILEINFO_SMB2_ALT_NAME_INFORMATION;
+	parms.alt_name_info.in.file.handle = create_io.out.file.handle;
+
+	status = smb2_getinfo_file(tree, mem_ctx, &parms);
+	if (!NT_STATUS_IS_OK(status)) {
+		talloc_free(mem_ctx);
+		return status;
+	}
+
+	status = smb2_util_close(tree, create_io.out.file.handle);
+	if (!NT_STATUS_IS_OK(status)) {
+		talloc_free(mem_ctx);
+		return status;
+	}
+
+	if (!parms.alt_name_info.out.fname.s) {
+		*alt_name = talloc_strdup(ctx, "");
+	} else {
+		*alt_name = talloc_strdup(ctx,
+					  parms.alt_name_info.out.fname.s);
+	}
+
+	talloc_free(mem_ctx);
+
+	return NT_STATUS_OK;
 }

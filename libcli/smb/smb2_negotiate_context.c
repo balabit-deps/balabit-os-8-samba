@@ -114,7 +114,6 @@ static NTSTATUS smb2_negotiate_context_push_one(TALLOC_CTX *mem_ctx, DATA_BLOB *
 	memcpy(buffer->data+ofs+0x08, context->data.data, context->data.length);
 	if (next_pad > 0) {
 		memset(buffer->data+ofs+next_offset, 0, next_pad);
-		next_offset += next_pad;
 	}
 
 	return NT_STATUS_OK;
@@ -126,7 +125,7 @@ static NTSTATUS smb2_negotiate_context_push_one(TALLOC_CTX *mem_ctx, DATA_BLOB *
 NTSTATUS smb2_negotiate_context_push(TALLOC_CTX *mem_ctx, DATA_BLOB *buffer,
 				     const struct smb2_negotiate_contexts contexts)
 {
-	int i;
+	uint32_t i;
 	NTSTATUS status;
 
 	*buffer = data_blob(NULL, 0);

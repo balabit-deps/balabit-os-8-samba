@@ -2032,7 +2032,7 @@ static bool test_EnumAccountsWithUserRight(struct dcerpc_binding_handle *b,
 	torture_assert_ntstatus_ok(tctx, dcerpc_lsa_EnumAccountsWithUserRight_r(b, tctx, &r),
 		"EnumAccountsWithUserRight failed");
 
-	/* NT_STATUS_NO_MORE_ENTRIES means noone has this privilege */
+	/* NT_STATUS_NO_MORE_ENTRIES means no one has this privilege */
 	if (NT_STATUS_EQUAL(r.out.result, NT_STATUS_NO_MORE_ENTRIES)) {
 		return true;
 	}
@@ -2872,7 +2872,7 @@ static bool check_pw_with_ServerAuthenticate3(struct dcerpc_pipe *p,
 	r.in.credentials = &credentials1;
 	r.out.return_credentials = &credentials2;
 
-	generate_random_buffer(credentials1.data, sizeof(credentials1.data));
+	netlogon_creds_random_challenge(&credentials1);
 
 	torture_assert_ntstatus_ok(tctx, dcerpc_netr_ServerReqChallenge_r(b, tctx, &r),
 		"ServerReqChallenge failed");
@@ -4914,6 +4914,11 @@ static bool test_GetUserName(struct dcerpc_binding_handle *b,
 	torture_assert_not_null(tctx, r.out.authority_name, "r.out.authority_name");
 	torture_assert_not_null(tctx, *r.out.authority_name, "*r.out.authority_name");
 
+	torture_comment(tctx,
+			"Account Name: %s, Authority Name: %s\n",
+			(*r.out.account_name)->string,
+			(*r.out.authority_name)->string);
+
 	return true;
 }
 
@@ -5006,9 +5011,8 @@ bool torture_rpc_lsa(struct torture_context *tctx)
 	enum dcerpc_transport_t transport;
 
 	status = torture_rpc_connection(tctx, &p, &ndr_table_lsarpc);
-	if (!NT_STATUS_IS_OK(status)) {
-		return false;
-	}
+	torture_assert_ntstatus_ok(tctx, status, "Error connecting to server");
+
 	b = p->binding_handle;
 	transport = dcerpc_binding_get_transport(p->binding);
 
@@ -5099,9 +5103,8 @@ bool torture_rpc_lsa_get_user(struct torture_context *tctx)
 	enum dcerpc_transport_t transport;
 
 	status = torture_rpc_connection(tctx, &p, &ndr_table_lsarpc);
-	if (!NT_STATUS_IS_OK(status)) {
-		return false;
-	}
+	torture_assert_ntstatus_ok(tctx, status, "Error connecting to server");
+
 	b = p->binding_handle;
 	transport = dcerpc_binding_get_transport(p->binding);
 

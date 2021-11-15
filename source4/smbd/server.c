@@ -46,6 +46,7 @@
 #include "lib/util/tfork.h"
 #include "dsdb/samdb/ldb_modules/util.h"
 #include "lib/util/server_id.h"
+#include "server_util.h"
 
 #ifdef HAVE_PTHREAD
 #include <pthread.h>
@@ -152,6 +153,19 @@ static void sigterm_signal_handler(struct tevent_context *ev,
 	DBG_DEBUG("Process %s got SIGTERM\n", state->binary_name);
 	TALLOC_FREE(state);
 	sig_term(SIGTERM);
+}
+
+static void sighup_signal_handler(struct tevent_context *ev,
+				  struct tevent_signal *se,
+				  int signum, int count, void *siginfo,
+				  void *private_data)
+{
+	struct server_state *state = talloc_get_type_abort(
+                private_data, struct server_state);
+
+	DBG_DEBUG("Process %s got SIGHUP\n", state->binary_name);
+
+	reopen_logs_internal();
 }
 
 /*
@@ -341,6 +355,8 @@ static void samba_parent_shutdown(struct imessaging_context *msg,
 				  void *private_data,
 				  uint32_t msg_type,
 				  struct server_id src,
+				  size_t num_fds,
+				  int *fds,
 				  DATA_BLOB *data)
 {
 	struct server_state *state =
@@ -349,6 +365,11 @@ static void samba_parent_shutdown(struct imessaging_context *msg,
 	struct server_id_buf src_buf;
 	struct server_id dst = imessaging_get_server_id(msg);
 	struct server_id_buf dst_buf;
+
+	if (num_fds != 0) {
+		DBG_WARNING("Received %zu fds, ignoring message\n", num_fds);
+		return;
+	}
 
 	DBG_ERR("samba_shutdown of %s %s: from %s\n",
 		state->binary_name,
@@ -565,6 +586,7 @@ static int binary_smbd_main(const char *binary_name,
 	};
 	struct server_state *state = NULL;
 	struct tevent_signal *se = NULL;
+	struct samba_tevent_trace_state *samba_tevent_trace_state = NULL;
 
 	setproctitle("root process");
 
@@ -623,7 +645,7 @@ static int binary_smbd_main(const char *binary_name,
 		binary_name,
 		SAMBA_VERSION_STRING));
 	DEBUGADD(0,("Copyright Andrew Tridgell and the Samba Team"
-		" 1992-2019\n"));
+		" 1992-2020\n"));
 
 	if (sizeof(uint16_t) < 2 ||
 			sizeof(uint32_t) < 4 ||
@@ -641,6 +663,8 @@ static int binary_smbd_main(const char *binary_name,
 	if (opt_daemon) {
 		DBG_NOTICE("Becoming a daemon.\n");
 		become_daemon(opt_fork, opt_no_process_group, false);
+	} else if (!opt_interactive) {
+		daemon_status("samba", "Starting process...");
 	}
 
 	/* Create the memory context to hang everything off. */
@@ -719,6 +743,21 @@ static int binary_smbd_main(const char *binary_name,
 	}
 
 	talloc_set_destructor(state->event_ctx, event_ctx_destructor);
+
+	samba_tevent_trace_state = create_samba_tevent_trace_state(state);
+	if (samba_tevent_trace_state == NULL) {
+		exit_daemon("Samba failed to setup tevent tracing state",
+			    ENOTTY);
+		/*
+		 * return is never reached but is here to satisfy static
+		 * checkers
+		 */
+		return 1;
+	}
+
+	tevent_set_trace_callback(state->event_ctx,
+				  samba_tevent_trace_callback,
+				  samba_tevent_trace_state);
 
 	if (opt_interactive) {
 		/* terminate when stdin goes away */
@@ -801,6 +840,22 @@ static int binary_smbd_main(const char *binary_name,
 	if (se == NULL) {
 		TALLOC_FREE(state);
 		exit_daemon("Initialize SIGTERM handler failed", ENOMEM);
+		/*
+		 * return is never reached but is here to satisfy static
+		 * checkers
+		 */
+		return 1;
+	}
+
+	se = tevent_add_signal(state->event_ctx,
+				state->event_ctx,
+				SIGHUP,
+				0,
+				sighup_signal_handler,
+				state);
+	if (se == NULL) {
+		TALLOC_FREE(state);
+		exit_daemon("Initialize SIGHUP handler failed", ENOMEM);
 		/*
 		 * return is never reached but is here to satisfy static
 		 * checkers
@@ -924,7 +979,7 @@ static int binary_smbd_main(const char *binary_name,
 		}
 	}
 
-	if (opt_daemon) {
+	if (!opt_interactive) {
 		daemon_ready("samba");
 	}
 

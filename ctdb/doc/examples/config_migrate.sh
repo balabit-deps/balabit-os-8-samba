@@ -241,12 +241,13 @@ CTDB_LVS_PUBLIC_IP
 CTDB_MONITOR_MPDEVICES
 # 31.clamd
 CTDB_CLAMD_SOCKET
+# 48.netbios
+CTDB_SERVICE_NMB
 # 49.winbind
 CTDB_SERVICE_WINBIND
 # 50.samba
 CTDB_SAMBA_CHECK_PORTS
 CTDB_SAMBA_SKIP_SHARE_CHECK
-CTDB_SERVICE_NMB
 CTDB_SERVICE_SMB
 # 60.nfs
 CTDB_NFS_CALLOUT
@@ -323,7 +324,6 @@ TickleUpdateInterval
 TraverseTimeout
 VacuumFastPathCount
 VacuumInterval
-VacuumLimit
 VacuumMaxRunTime
 VerboseMemoryNames
 EOF
@@ -336,6 +336,7 @@ check_removed_tunable ()
 
 	grep -Fiqx "$_tunable" <<EOF
 NoIPHostOnAllDisabled
+VacuumLimit
 EOF
 }
 

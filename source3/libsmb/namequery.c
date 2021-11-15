@@ -931,7 +931,7 @@ bool name_status_find(const char *q_name,
 	struct sockaddr_storage ss;
 	struct node_status *addrs = NULL;
 	struct nmb_name nname;
-	int count, i;
+	int count = 0, i;
 	bool result = false;
 	NTSTATUS status;
 
@@ -1166,11 +1166,7 @@ int remove_duplicate_addrs2(struct ip_service *iplist, int count )
 	for (i = 0; i < count; i++) {
 		while (i < count &&
 				is_zero_addr(&iplist[i].ss)) {
-			if (count-i-1>0) {
-				memmove(&iplist[i],
-					&iplist[i+1],
-					(count-i-1)*sizeof(struct ip_service));
-			}
+			ARRAY_DEL_ELEMENT(iplist, i, count);
 			count--;
 		}
 	}
@@ -1221,6 +1217,7 @@ struct name_query_state {
 	struct sockaddr_storage my_addr;
 	struct sockaddr_storage addr;
 	bool bcast;
+	bool bcast_star_query;
 
 
 	uint8_t buf[1024];
@@ -1287,6 +1284,16 @@ struct tevent_req *name_query_send(TALLOC_CTX *mem_ctx,
 	nmb->header.ancount = 0;
 	nmb->header.nscount = 0;
 	nmb->header.arcount = 0;
+
+	if (bcast && (strcmp(name, "*")==0)) {
+		/*
+		 * We're doing a broadcast query for all
+		 * names in the area. Remember this so
+		 * we will wait for all names within
+		 * the timeout period.
+		 */
+		state->bcast_star_query = true;
+	}
 
 	make_nmb_name(&nmb->question.question_name,name,name_type);
 
@@ -1445,9 +1452,12 @@ static bool name_query_validator(struct packet_struct *p, void *private_data)
 	if (state->bcast) {
 		/*
 		 * We have to collect all entries coming in from broadcast
-		 * queries. If we got a unique name, we're done.
+		 * queries. If we got a unique name and we are not querying
+		 * all names registered within broadcast area (query
+		 * for the name '*', so state->bcast_star_query is set),
+		 * we're done.
 		 */
-		return got_unique_netbios_name;
+		return (got_unique_netbios_name && !state->bcast_star_query);
 	}
 	/*
 	 * WINS responses are accepted when they are received
@@ -1857,7 +1867,7 @@ struct tevent_req *name_resolve_bcast_send(TALLOC_CTX *mem_ctx,
 	}
 
 	subreq = name_queries_send(state, ev, name, name_type, true, true,
-				   bcast_addrs, num_bcast_addrs, 0, 1000);
+				   bcast_addrs, num_bcast_addrs, 0, 250);
 	if (tevent_req_nomem(subreq, req)) {
 		return tevent_req_post(req, ev);
 	}
@@ -2709,7 +2719,7 @@ NTSTATUS internal_resolve_name(const char *name,
 			}
 		} else if (strequal(tok, "wins")) {
 			/* don't resolve 1D via WINS */
-			struct sockaddr_storage *ss_list;
+			struct sockaddr_storage *ss_list = NULL;
 			if (name_type != 0x1D) {
 				status = resolve_wins(name, name_type,
 						      talloc_tos(),
@@ -2725,7 +2735,7 @@ NTSTATUS internal_resolve_name(const char *name,
 				}
 			}
 		} else if (strequal(tok, "bcast")) {
-			struct sockaddr_storage *ss_list;
+			struct sockaddr_storage *ss_list = NULL;
 			status = name_resolve_bcast(
 				name, name_type, talloc_tos(),
 				&ss_list, return_count);
@@ -2749,7 +2759,7 @@ NTSTATUS internal_resolve_name(const char *name,
 	SAFE_FREE(*return_iplist);
 	*return_count = 0;
 
-	return NT_STATUS_UNSUCCESSFUL;
+	return status;
 
   done:
 
@@ -2916,16 +2926,16 @@ NTSTATUS resolve_name_list(TALLOC_CTX *ctx,
 		}
 	}
 	if (num_entries == 0) {
-		SAFE_FREE(ss_list);
-		return NT_STATUS_BAD_NETWORK_NAME;
+		status = NT_STATUS_BAD_NETWORK_NAME;
+		goto done;
 	}
 
 	*return_ss_arr = talloc_array(ctx,
 				struct sockaddr_storage,
 				num_entries);
 	if (!(*return_ss_arr)) {
-		SAFE_FREE(ss_list);
-		return NT_STATUS_NO_MEMORY;
+		status = NT_STATUS_NO_MEMORY;
+		goto done;
 	}
 
 	for (i=0, num_entries = 0; i<count; i++) {
@@ -2937,9 +2947,9 @@ NTSTATUS resolve_name_list(TALLOC_CTX *ctx,
 
 	status = NT_STATUS_OK;
 	*p_num_entries = num_entries;
-
+done:
 	SAFE_FREE(ss_list);
-	return NT_STATUS_OK;
+	return status;
 }
 
 /********************************************************

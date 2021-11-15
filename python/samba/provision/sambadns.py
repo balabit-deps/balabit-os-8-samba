@@ -749,11 +749,6 @@ def create_zone_file(lp, logger, paths, targetdir, dnsdomain,
         hostip_host_line = ""
         gc_msdcs_ip_line = ""
 
-    # we need to freeze the zone while we update the contents
-    if targetdir is None:
-        rndc = ' '.join(lp.get("rndc command"))
-        os.system(rndc + " freeze " + lp.get("realm"))
-
     setup_file(setup_path("provision.zone"), paths.dns, {
             "HOSTNAME": hostname,
             "DNSDOMAIN": dnsdomain,
@@ -779,9 +774,6 @@ def create_zone_file(lp, logger, paths, targetdir, dnsdomain,
             if 'SAMBA_SELFTEST' not in os.environ:
                 logger.error("Failed to chown %s to bind gid %u" % (
                     paths.dns, paths.bind_gid))
-
-    if targetdir is None:
-        os.system(rndc + " unfreeze " + lp.get("realm"))
 
 
 def create_samdb_copy(samdb, logger, paths, names, domainsid, domainguid):
@@ -970,6 +962,8 @@ def create_named_conf(paths, realm, dnsdomain, dns_backend, logger):
         bind9_10 = '#'
         bind9_11 = '#'
         bind9_12 = '#'
+        bind9_14 = '#'
+        bind9_16 = '#'
         if bind_info.upper().find('BIND 9.8') != -1:
             bind9_8 = ''
         elif bind_info.upper().find('BIND 9.9') != -1:
@@ -980,8 +974,18 @@ def create_named_conf(paths, realm, dnsdomain, dns_backend, logger):
             bind9_11 = ''
         elif bind_info.upper().find('BIND 9.12') != -1:
             bind9_12 = ''
+        elif bind_info.upper().find('BIND 9.14') != -1:
+            bind9_14 = ''
+        elif bind_info.upper().find('BIND 9.16') != -1:
+            bind9_16 = ''
         elif bind_info.upper().find('BIND 9.7') != -1:
             raise ProvisioningError("DLZ option incompatible with BIND 9.7.")
+        elif bind_info.upper().find('BIND_9.13') != -1:
+            raise ProvisioningError("Only stable/esv releases of BIND are supported.")
+        elif bind_info.upper().find('BIND_9.15') != -1:
+            raise ProvisioningError("Only stable/esv releases of BIND are supported.")
+        elif bind_info.upper().find('BIND_9.17') != -1:
+            raise ProvisioningError("Only stable/esv releases of BIND are supported.")
         else:
             logger.warning("BIND version unknown, please modify %s manually." % paths.namedconf)
         setup_file(setup_path("named.conf.dlz"), paths.namedconf, {
@@ -991,8 +995,9 @@ def create_named_conf(paths, realm, dnsdomain, dns_backend, logger):
                     "BIND9_9": bind9_9,
                     "BIND9_10": bind9_10,
                     "BIND9_11": bind9_11,
-                    "BIND9_12": bind9_12
-
+                    "BIND9_12": bind9_12,
+                    "BIND9_14": bind9_14,
+                    "BIND9_16": bind9_16
                     })
 
 

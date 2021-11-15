@@ -23,7 +23,6 @@
 #include "includes.h"
 #include "system/passwd.h" /* uid_wrapper */
 #include "ntdomain.h"
-#include "../librpc/gen_ndr/srv_eventlog.h"
 #include "lib/eventlog/eventlog.h"
 #include "../libcli/security/security.h"
 #include "../librpc/gen_ndr/ndr_winreg_c.h"
@@ -32,6 +31,11 @@
 #include "smbd/smbd.h"
 #include "auth.h"
 #include "util_tdb.h"
+
+#include "rpc_server/rpc_server.h"
+#include "librpc/rpc/dcesrv_core.h"
+#include "librpc/gen_ndr/ndr_eventlog_scompat.h"
+#include "rpc_server/eventlog/srv_eventlog_reg.h"
 
 #undef  DBGC_CLASS
 #define DBGC_CLASS DBGC_RPC_SRV
@@ -66,8 +70,14 @@ static EVENTLOG_INFO *find_eventlog_info_by_hnd( struct pipes_struct * p,
 						struct policy_handle * handle )
 {
 	EVENTLOG_INFO *info;
+	NTSTATUS status;
 
-	if ( !find_policy_by_hnd( p, handle, (void **)(void *)&info ) ) {
+	info = find_policy_by_hnd(p,
+				  handle,
+				  DCESRV_HANDLE_ANY,
+				  EVENTLOG_INFO,
+				  &status);
+	if (!NT_STATUS_IS_OK(status)) {
 		DEBUG( 2,
 		       ( "find_eventlog_info_by_hnd: eventlog not found.\n" ) );
 		return NULL;
@@ -77,10 +87,75 @@ static EVENTLOG_INFO *find_eventlog_info_by_hnd( struct pipes_struct * p,
 }
 
 /********************************************************************
+ Pull the NT ACL from a file on disk or the OpenEventlog() access
+ check.  Caller is responsible for freeing the returned security
+ descriptor via TALLOC_FREE().  This is designed for dealing with
+ user space access checks in smbd outside of the VFS.  For example,
+ checking access rights in OpenEventlog() or from python.
+
 ********************************************************************/
 
-static bool elog_check_access( EVENTLOG_INFO *info, const struct security_token *token )
+static NTSTATUS get_nt_acl_no_snum(TALLOC_CTX *ctx,
+			    struct auth_session_info *session_info,
+			    const char *fname,
+				uint32_t security_info_wanted,
+				struct security_descriptor **sd)
 {
+	TALLOC_CTX *frame = talloc_stackframe();
+	struct conn_struct_tos *c = NULL;
+	NTSTATUS status = NT_STATUS_OK;
+	struct smb_filename *smb_fname = synthetic_smb_fname(talloc_tos(),
+						fname,
+						NULL,
+						NULL,
+						0,
+						0);
+
+	if (smb_fname == NULL) {
+		TALLOC_FREE(frame);
+		return NT_STATUS_NO_MEMORY;
+	}
+
+	if (!posix_locking_init(false)) {
+		TALLOC_FREE(frame);
+		return NT_STATUS_NO_MEMORY;
+	}
+
+	status = create_conn_struct_tos(global_messaging_context(),
+					-1,
+					"/",
+					session_info,
+					&c);
+	if (!NT_STATUS_IS_OK(status)) {
+		DEBUG(0,("create_conn_struct returned %s.\n",
+			nt_errstr(status)));
+		TALLOC_FREE(frame);
+		return status;
+	}
+
+	status = SMB_VFS_GET_NT_ACL_AT(c->conn,
+				c->conn->cwd_fsp,
+				smb_fname,
+				security_info_wanted,
+				ctx,
+				sd);
+	if (!NT_STATUS_IS_OK(status)) {
+		DEBUG(0, ("get_nt_acl_no_snum: SMB_VFS_GET_NT_ACL_AT returned %s.\n",
+			  nt_errstr(status)));
+	}
+
+	TALLOC_FREE(frame);
+
+	return status;
+}
+
+/********************************************************************
+********************************************************************/
+
+static bool elog_check_access(EVENTLOG_INFO *info,
+			      struct auth_session_info *session_info)
+{
+	const struct security_token *token = session_info->security_token;
 	char *tdbname = elog_tdbname(talloc_tos(), info->logname );
 	struct security_descriptor *sec_desc;
 	struct security_ace *ace;
@@ -92,6 +167,7 @@ static bool elog_check_access( EVENTLOG_INFO *info, const struct security_token 
 	/* get the security descriptor for the file */
 
 	status = get_nt_acl_no_snum( info,
+			session_info,
 			tdbname,
 			SECINFO_OWNER | SECINFO_GROUP | SECINFO_DACL,
 			&sec_desc);
@@ -242,7 +318,7 @@ static NTSTATUS elog_open( struct pipes_struct * p, const char *logname, struct 
 			elog->logname = talloc_strdup( elog, ELOG_APPL );
 
 			/* do the access check */
-			if ( !elog_check_access( elog, p->session_info->security_token ) ) {
+			if ( !elog_check_access( elog, p->session_info) ) {
 				TALLOC_FREE( elog );
 				return NT_STATUS_ACCESS_DENIED;
 			}
@@ -260,14 +336,14 @@ static NTSTATUS elog_open( struct pipes_struct * p, const char *logname, struct 
 
 	/* now do the access check.  Close the tdb if we fail here */
 
-	if ( !elog_check_access( elog, p->session_info->security_token ) ) {
+	if ( !elog_check_access( elog, p->session_info) ) {
 		TALLOC_FREE( elog );
 		return NT_STATUS_ACCESS_DENIED;
 	}
 
 	/* create the policy handle */
 
-	if ( !create_policy_hnd( p, hnd, elog ) ) {
+	if ( !create_policy_hnd( p, hnd, 0, elog ) ) {
 		TALLOC_FREE(elog);
 		return NT_STATUS_NO_MEMORY;
 	}
@@ -943,3 +1019,32 @@ NTSTATUS _eventlog_ReportEventAndSourceW(struct pipes_struct *p,
 	p->fault_state = DCERPC_FAULT_OP_RNG_ERROR;
 	return NT_STATUS_NOT_IMPLEMENTED;
 }
+
+static NTSTATUS eventlog__op_init_server(struct dcesrv_context *dce_ctx,
+		const struct dcesrv_endpoint_server *ep_server);
+
+#define DCESRV_INTERFACE_EVENTLOG_INIT_SERVER \
+	eventlog_init_server
+
+static NTSTATUS eventlog_init_server(struct dcesrv_context *dce_ctx,
+		const struct dcesrv_endpoint_server *ep_server)
+{
+	struct messaging_context *msg_ctx = global_messaging_context();
+	NTSTATUS status;
+	bool ok;
+
+	status = dcesrv_init_ep_server(dce_ctx, "winreg");
+	if (!NT_STATUS_IS_OK(status)) {
+		return status;
+	}
+
+	ok = eventlog_init_winreg(msg_ctx);
+	if (!ok) {
+		return NT_STATUS_UNSUCCESSFUL;
+	}
+
+	return eventlog__op_init_server(dce_ctx, ep_server);
+}
+
+/* include the generated boilerplate */
+#include "librpc/gen_ndr/ndr_eventlog_scompat.c"

@@ -317,7 +317,7 @@ int main(int argc, const char *argv[])
 		POPT_COMMON_CONNECTION
 		POPT_COMMON_CREDENTIALS
 		POPT_COMMON_VERSION
-		{ NULL }
+		{0}
 	};
 
 	setlinebuf(stdout);
@@ -387,6 +387,7 @@ int main(int argc, const char *argv[])
 
 	test_mask(argc_new-1, argv_new+1, mem_ctx, cli);
 
+	poptFreeContext(pc);
 	talloc_free(mem_ctx);
 	return(0);
 }

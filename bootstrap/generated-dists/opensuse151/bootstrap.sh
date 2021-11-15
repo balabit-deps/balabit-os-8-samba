@@ -19,6 +19,8 @@ zypper --non-interactive install \
     bind-utils \
     binutils \
     bison \
+    ccache \
+    chrpath \
     cups-devel \
     curl \
     dbus-1-devel \
@@ -42,7 +44,6 @@ zypper --non-interactive install \
     krb5-server \
     lcov \
     libacl-devel \
-    libaio-devel \
     libarchive-devel \
     libattr-devel \
     libblkid-devel \
@@ -51,7 +52,6 @@ zypper --non-interactive install \
     libcephfs-devel \
     libicu-devel \
     libjansson-devel \
-    libnettle-devel \
     libnsl-devel \
     libpcap-devel \
     libtasn1-devel \
@@ -78,18 +78,14 @@ zypper --non-interactive install \
     popt-devel \
     procps \
     psmisc \
-    python-crypto \
-    python-devel \
-    python-markdown \
-    python2-dnspython \
-    python2-gpg \
     python2-semanage \
     python3 \
     python3-Markdown \
+    python3-cryptography \
     python3-devel \
     python3-dnspython \
     python3-gpg \
-    python3-pycrypto \
+    python3-pyasn1 \
     readline-devel \
     rng-tools \
     rpcgen \
@@ -100,6 +96,7 @@ zypper --non-interactive install \
     systemd-devel \
     tar \
     tree \
+    wget \
     which \
     xfsprogs-devel \
     yum-utils \

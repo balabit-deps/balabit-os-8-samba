@@ -25,7 +25,8 @@
 #include "winbindd/winbindd_proto.h"
 #include "rpc_client/cli_pipe.h"
 #include "ntdomain.h"
-#include "librpc/gen_ndr/srv_winbind.h"
+#include "librpc/gen_ndr/ndr_winbind.h"
+#include "librpc/gen_ndr/ndr_winbind_scompat.h"
 #include "../librpc/gen_ndr/ndr_netlogon_c.h"
 #include "../librpc/gen_ndr/ndr_lsa_c.h"
 #include "idmap.h"
@@ -199,7 +200,7 @@ NTSTATUS _wbint_Sids2UnixIDs(struct pipes_struct *p,
 
 		sid_compose(m->sid, d->sid, ids[i].rid);
 		m->status = ID_UNKNOWN;
-		m->xid = (struct unixid) { .type = ids[i].type };
+		m->xid = (struct unixid) { .type = ids[i].type_hint };
 	}
 
 	status = dom->methods->sids_to_unixids(dom, id_map_ptrs);
@@ -225,6 +226,12 @@ NTSTATUS _wbint_Sids2UnixIDs(struct pipes_struct *p,
 
 	for (i=0; i<num_ids; i++) {
 		struct id_map *m = id_map_ptrs[i];
+
+		if (m->status == ID_REQUIRE_TYPE) {
+			ids[i].xid.id = UINT32_MAX;
+			ids[i].xid.type = ID_TYPE_WB_REQUIRE_TYPE;
+			continue;
+		}
 
 		if (!idmap_unix_id_is_in_range(m->xid.id, dom)) {
 			DBG_DEBUG("id %"PRIu32" is out of range "
@@ -275,8 +282,12 @@ NTSTATUS _wbint_UnixIDs2Sids(struct pipes_struct *p,
 	}
 
 	for (i=0; i<r->in.num_ids; i++) {
-		r->out.xids[i] = maps[i]->xid;
-		sid_copy(&r->out.sids[i], maps[i]->sid);
+		if (maps[i]->status == ID_MAPPED) {
+			r->out.xids[i] = maps[i]->xid;
+			sid_copy(&r->out.sids[i], maps[i]->sid);
+		} else {
+			r->out.sids[i] = (struct dom_sid) { 0 };
+		}
 	}
 
 	TALLOC_FREE(maps);
@@ -672,7 +683,8 @@ NTSTATUS _wbint_LookupRids(struct pipes_struct *p, struct wbint_LookupRids *r)
 					r->in.rids->rids, r->in.rids->num_rids,
 					&domain_name, &names, &types);
 	reset_cm_connection_on_error(domain, NULL, status);
-	if (!NT_STATUS_IS_OK(status)) {
+	if (!NT_STATUS_IS_OK(status) &&
+	    !NT_STATUS_EQUAL(status, STATUS_SOME_UNMAPPED)) {
 		return status;
 	}
 
@@ -927,6 +939,13 @@ NTSTATUS _winbind_SamLogon(struct pipes_struct *p,
 	uint16_t validation_level;
 	union netr_Validation *validation = NULL;
 	bool interactive = false;
+
+	/*
+	 * Make sure we start with authoritative=true,
+	 * it will only set to false if we don't know the
+	 * domain.
+	 */
+	r->out.authoritative = true;
 
 	domain = wb_child_domain();
 	if (domain == NULL) {
@@ -1899,3 +1918,5 @@ reconnect:
 
 	return status;
 }
+
+#include "librpc/gen_ndr/ndr_winbind_scompat.c"

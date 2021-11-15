@@ -123,8 +123,6 @@ static NTSTATUS add_trusted_domain(const char *domain_name,
 				   struct winbindd_domain **_d)
 {
 	struct winbindd_domain *domain = NULL;
-	const char **ignored_domains = NULL;
-	const char **dom = NULL;
 	int role = lp_server_role();
 	struct dom_sid_buf buf;
 
@@ -133,12 +131,8 @@ static NTSTATUS add_trusted_domain(const char *domain_name,
 		return NT_STATUS_INVALID_PARAMETER;
 	}
 
-	ignored_domains = lp_parm_string_list(-1, "winbind", "ignore domains", NULL);
-	for (dom=ignored_domains; dom && *dom; dom++) {
-		if (gen_fnmatch(*dom, domain_name) == 0) {
-			DEBUG(2,("Ignoring domain '%s'\n", domain_name));
-			return NT_STATUS_NO_SUCH_DOMAIN;
-		}
+	if (!is_allowed_domain(domain_name)) {
+		return NT_STATUS_NO_SUCH_DOMAIN;
 	}
 
 	/*
@@ -849,9 +843,16 @@ static void wb_imsg_new_trusted_domain(struct imessaging_context *msg,
 				       void *private_data,
 				       uint32_t msg_type,
 				       struct server_id server_id,
+				       size_t num_fds,
+				       int *fds,
 				       DATA_BLOB *data)
 {
 	bool ok;
+
+	if (num_fds != 0) {
+		DBG_WARNING("Received %zu fds, ignoring message\n", num_fds);
+		return;
+	}
 
 	DBG_NOTICE("Rescanning trusted domains\n");
 
@@ -940,7 +941,7 @@ static bool add_trusted_domains_dc(void)
 
 			/* Even in the parent winbindd we'll need to
 			   talk to the DC, so try and see if we can
-			   contact it. Theoretically this isn't neccessary
+			   contact it. Theoretically this isn't necessary
 			   as the init_dc_connection() in init_child_recv()
 			   will do this, but we can start detecting the DC
 			   early here. */
@@ -1014,7 +1015,7 @@ static bool add_trusted_domains_dc(void)
 		if (sec_chan_type != SEC_CHAN_NULL) {
 			/* Even in the parent winbindd we'll need to
 			   talk to the DC, so try and see if we can
-			   contact it. Theoretically this isn't neccessary
+			   contact it. Theoretically this isn't necessary
 			   as the init_dc_connection() in init_child_recv()
 			   will do this, but we can start detecting the DC
 			   early here. */
@@ -1250,15 +1251,37 @@ bool init_domain_list(void)
 			secure_channel_type = SEC_CHAN_LOCAL;
 		}
 
-		status = add_trusted_domain(get_global_sam_name(),
-					    NULL,
-					    get_global_sam_sid(),
-					    LSA_TRUST_TYPE_DOWNLEVEL,
-					    trust_flags,
-					    0, /* trust_attribs */
-					    secure_channel_type,
-					    NULL,
-					    &domain);
+		if ((pdb_domain_info != NULL) && (role == ROLE_IPA_DC)) {
+			/* This is IPA DC that presents itself as
+			 * an Active Directory domain controller to trusted AD
+			 * forests but in fact is a classic domain controller.
+			 */
+			trust_flags = NETR_TRUST_FLAG_PRIMARY;
+			trust_flags |= NETR_TRUST_FLAG_IN_FOREST;
+			trust_flags |= NETR_TRUST_FLAG_NATIVE;
+			trust_flags |= NETR_TRUST_FLAG_OUTBOUND;
+			trust_flags |= NETR_TRUST_FLAG_TREEROOT;
+			status = add_trusted_domain(pdb_domain_info->name,
+						    pdb_domain_info->dns_domain,
+						    &pdb_domain_info->sid,
+						    LSA_TRUST_TYPE_UPLEVEL,
+						    trust_flags,
+						    LSA_TRUST_ATTRIBUTE_WITHIN_FOREST,
+						    secure_channel_type,
+						    NULL,
+						    &domain);
+			TALLOC_FREE(pdb_domain_info);
+		} else {
+			status = add_trusted_domain(get_global_sam_name(),
+						    NULL,
+						    get_global_sam_sid(),
+						    LSA_TRUST_TYPE_DOWNLEVEL,
+						    trust_flags,
+						    0, /* trust_attribs */
+						    secure_channel_type,
+						    NULL,
+						    &domain);
+		}
 		if (!NT_STATUS_IS_OK(status)) {
 			DBG_ERR("Failed to add local SAM to "
 				"domain to winbindd's internal list\n");
@@ -1306,7 +1329,7 @@ bool init_domain_list(void)
 		}
 		/* Even in the parent winbindd we'll need to
 		   talk to the DC, so try and see if we can
-		   contact it. Theoretically this isn't neccessary
+		   contact it. Theoretically this isn't necessary
 		   as the init_dc_connection() in init_child_recv()
 		   will do this, but we can start detecting the DC
 		   early here. */
@@ -2091,6 +2114,13 @@ void winbindd_unset_locator_kdc_env(const struct winbindd_domain *domain)
 
 void set_auth_errors(struct winbindd_response *resp, NTSTATUS result)
 {
+	/*
+	 * Make sure we start with authoritative=true,
+	 * it will only set to false if we don't know the
+	 * domain.
+	 */
+	resp->data.auth.authoritative = true;
+
 	resp->data.auth.nt_status = NT_STATUS_V(result);
 	fstrcpy(resp->data.auth.nt_status_string, nt_errstr(result));
 

@@ -35,6 +35,7 @@
 #include "lib/pthreadpool/pthreadpool_tevent.h"
 #include "librpc/gen_ndr/ndr_ioctl.h"
 #include "offload_token.h"
+#include "util_reparse.h"
 
 #undef DBGC_CLASS
 #define DBGC_CLASS DBGC_VFS
@@ -123,14 +124,20 @@ static int vfswrap_statvfs(struct vfs_handle_struct *handle,
 static uint32_t vfswrap_fs_capabilities(struct vfs_handle_struct *handle,
 		enum timestamp_set_resolution *p_ts_res)
 {
+	const struct loadparm_substitution *lp_sub =
+		loadparm_s3_global_substitution();
 	connection_struct *conn = handle->conn;
 	uint32_t caps = FILE_CASE_SENSITIVE_SEARCH | FILE_CASE_PRESERVED_NAMES;
 	struct smb_filename *smb_fname_cpath = NULL;
 	struct vfs_statvfs_struct statbuf;
 	int ret;
 
-	smb_fname_cpath = synthetic_smb_fname(talloc_tos(), conn->connectpath,
-					      NULL, NULL, 0);
+	smb_fname_cpath = synthetic_smb_fname(talloc_tos(),
+					      conn->connectpath,
+					      NULL,
+					      NULL,
+					      0,
+					      0);
 	if (smb_fname_cpath == NULL) {
 		return caps;
 	}
@@ -174,7 +181,7 @@ static uint32_t vfswrap_fs_capabilities(struct vfs_handle_struct *handle,
 			"resolution of %s "
 			"available on share %s, directory %s\n",
 			*p_ts_res == TIMESTAMP_SET_MSEC ? "msec" : "sec",
-			lp_servicename(talloc_tos(), conn->params->service),
+			lp_servicename(talloc_tos(), lp_sub, conn->params->service),
 			conn->connectpath ));
 	}
 	TALLOC_FREE(smb_fname_cpath);
@@ -190,7 +197,7 @@ static NTSTATUS vfswrap_get_dfs_referrals(struct vfs_handle_struct *handle,
 	char *pathnamep = NULL;
 	char *local_dfs_path = NULL;
 	NTSTATUS status;
-	int i;
+	size_t i;
 	uint16_t max_referral_level = r->in.req.max_referral_level;
 
 	if (DEBUGLVL(10)) {
@@ -223,7 +230,9 @@ static NTSTATUS vfswrap_get_dfs_referrals(struct vfs_handle_struct *handle,
 	}
 
 	/* The following call can change cwd. */
-	status = get_referred_path(r, pathnamep,
+	status = get_referred_path(r,
+				   handle->conn->session_info,
+				   pathnamep,
 				   handle->conn->sconn->remote_address,
 				   handle->conn->sconn->local_address,
 				   !handle->conn->sconn->using_smb2,
@@ -364,6 +373,158 @@ static NTSTATUS vfswrap_get_dfs_referrals(struct vfs_handle_struct *handle,
 	return NT_STATUS_OK;
 }
 
+static NTSTATUS vfswrap_create_dfs_pathat(struct vfs_handle_struct *handle,
+				struct files_struct *dirfsp,
+				const struct smb_filename *smb_fname,
+				const struct referral *reflist,
+				size_t referral_count)
+{
+	TALLOC_CTX *frame = talloc_stackframe();
+	NTSTATUS status = NT_STATUS_NO_MEMORY;
+	int ret;
+	char *msdfs_link = NULL;
+
+	SMB_ASSERT(dirfsp == dirfsp->conn->cwd_fsp);
+
+	/* Form the msdfs_link contents */
+	msdfs_link = msdfs_link_string(frame,
+					reflist,
+					referral_count);
+	if (msdfs_link == NULL) {
+		goto out;
+	}
+
+	ret = symlinkat(msdfs_link,
+			dirfsp->fh->fd,
+			smb_fname->base_name);
+	if (ret == 0) {
+		status = NT_STATUS_OK;
+	} else {
+		status = map_nt_error_from_unix(errno);
+	}
+
+  out:
+
+	TALLOC_FREE(frame);
+	return status;
+}
+
+/*
+ * Read and return the contents of a DFS redirect given a
+ * pathname. A caller can pass in NULL for ppreflist and
+ * preferral_count but still determine if this was a
+ * DFS redirect point by getting NT_STATUS_OK back
+ * without incurring the overhead of reading and parsing
+ * the referral contents.
+ */
+
+static NTSTATUS vfswrap_read_dfs_pathat(struct vfs_handle_struct *handle,
+				TALLOC_CTX *mem_ctx,
+				struct files_struct *dirfsp,
+				struct smb_filename *smb_fname,
+				struct referral **ppreflist,
+				size_t *preferral_count)
+{
+	NTSTATUS status = NT_STATUS_NO_MEMORY;
+	size_t bufsize;
+	char *link_target = NULL;
+	int referral_len;
+	bool ok;
+#if defined(HAVE_BROKEN_READLINK)
+	char link_target_buf[PATH_MAX];
+#else
+	char link_target_buf[7];
+#endif
+	int ret;
+
+	SMB_ASSERT(dirfsp == dirfsp->conn->cwd_fsp);
+
+	if (is_named_stream(smb_fname)) {
+		status = NT_STATUS_OBJECT_NAME_NOT_FOUND;
+		goto err;
+	}
+
+	if (ppreflist == NULL && preferral_count == NULL) {
+		/*
+		 * We're only checking if this is a DFS
+		 * redirect. We don't need to return data.
+		 */
+		bufsize = sizeof(link_target_buf);
+		link_target = link_target_buf;
+	} else {
+		bufsize = PATH_MAX;
+		link_target = talloc_array(mem_ctx, char, bufsize);
+		if (!link_target) {
+			goto err;
+		}
+	}
+
+	referral_len = readlinkat(dirfsp->fh->fd,
+				smb_fname->base_name,
+				link_target,
+				bufsize - 1);
+	if (referral_len == -1) {
+		if (errno == EINVAL) {
+			/*
+			 * If the path isn't a link, readlinkat
+			 * returns EINVAL. Allow the caller to
+			 * detect this.
+			 */
+			DBG_INFO("%s is not a link.\n", smb_fname->base_name);
+			status = NT_STATUS_OBJECT_TYPE_MISMATCH;
+		} else {
+			status = map_nt_error_from_unix(errno);
+			DBG_ERR("Error reading "
+				"msdfs link %s: %s\n",
+				smb_fname->base_name,
+				strerror(errno));
+		}
+                goto err;
+        }
+	link_target[referral_len] = '\0';
+
+	DBG_INFO("%s -> %s\n",
+			smb_fname->base_name,
+			link_target);
+
+	if (!strnequal(link_target, "msdfs:", 6)) {
+		status = NT_STATUS_OBJECT_TYPE_MISMATCH;
+		goto err;
+	}
+
+	ret = sys_lstat(smb_fname->base_name,
+			&smb_fname->st,
+			lp_fake_directory_create_times(SNUM(handle->conn)));
+	if (ret < 0) {
+		status = map_nt_error_from_unix(errno);
+		goto err;
+	}
+
+	if (ppreflist == NULL && preferral_count == NULL) {
+		/* Early return for checking if this is a DFS link. */
+		return NT_STATUS_OK;
+	}
+
+	ok = parse_msdfs_symlink(mem_ctx,
+			lp_msdfs_shuffle_referrals(SNUM(handle->conn)),
+			link_target,
+			ppreflist,
+			preferral_count);
+
+	if (ok) {
+		status = NT_STATUS_OK;
+	} else {
+		status = NT_STATUS_NO_MEMORY;
+	}
+
+  err:
+
+	if (link_target != link_target_buf) {
+		TALLOC_FREE(link_target);
+	}
+	return status;
+}
+
 static NTSTATUS vfswrap_snap_check_path(struct vfs_handle_struct *handle,
 					TALLOC_CTX *mem_ctx,
 					const char *service_path,
@@ -392,19 +553,6 @@ static NTSTATUS vfswrap_snap_delete(struct vfs_handle_struct *handle,
 }
 
 /* Directory operations */
-
-static DIR *vfswrap_opendir(vfs_handle_struct *handle,
-				const struct smb_filename *smb_fname,
-				const char *mask,
-				uint32_t attr)
-{
-	DIR *result;
-
-	START_PROFILE(syscall_opendir);
-	result = opendir(smb_fname->base_name);
-	END_PROFILE(syscall_opendir);
-	return result;
-}
 
 static DIR *vfswrap_fdopendir(vfs_handle_struct *handle,
 			files_struct *fsp,
@@ -493,38 +641,34 @@ static void vfswrap_rewinddir(vfs_handle_struct *handle, DIR *dirp)
 	END_PROFILE(syscall_rewinddir);
 }
 
-static int vfswrap_mkdir(vfs_handle_struct *handle,
+static int vfswrap_mkdirat(vfs_handle_struct *handle,
+			struct files_struct *dirfsp,
 			const struct smb_filename *smb_fname,
 			mode_t mode)
 {
 	int result;
-	const char *path = smb_fname->base_name;
-	char *parent = NULL;
+	struct smb_filename *parent = NULL;
+	bool ok;
 
-	START_PROFILE(syscall_mkdir);
+	START_PROFILE(syscall_mkdirat);
 
-	if (lp_inherit_acls(SNUM(handle->conn))
-	    && parent_dirname(talloc_tos(), path, &parent, NULL)
-	    && directory_has_default_acl(handle->conn, parent)) {
-		mode = (0777 & lp_directory_mask(SNUM(handle->conn)));
+	SMB_ASSERT(dirfsp == dirfsp->conn->cwd_fsp);
+
+	if (lp_inherit_acls(SNUM(handle->conn))) {
+		ok = parent_smb_fname(talloc_tos(), smb_fname, &parent, NULL);
+		if (ok && directory_has_default_acl(handle->conn,
+				dirfsp,
+				parent))
+		{
+			mode = (0777 & lp_directory_mask(SNUM(handle->conn)));
+		}
 	}
 
 	TALLOC_FREE(parent);
 
-	result = mkdir(path, mode);
+	result = mkdirat(dirfsp->fh->fd, smb_fname->base_name, mode);
 
-	END_PROFILE(syscall_mkdir);
-	return result;
-}
-
-static int vfswrap_rmdir(vfs_handle_struct *handle,
-			const struct smb_filename *smb_fname)
-{
-	int result;
-
-	START_PROFILE(syscall_rmdir);
-	result = rmdir(smb_fname->base_name);
-	END_PROFILE(syscall_rmdir);
+	END_PROFILE(syscall_mkdirat);
 	return result;
 }
 
@@ -540,28 +684,32 @@ static int vfswrap_closedir(vfs_handle_struct *handle, DIR *dirp)
 
 /* File operations */
 
-static int vfswrap_open(vfs_handle_struct *handle,
-			struct smb_filename *smb_fname,
-			files_struct *fsp, int flags, mode_t mode)
+static int vfswrap_openat(vfs_handle_struct *handle,
+			  const struct files_struct *dirfsp,
+			  const struct smb_filename *smb_fname,
+			  files_struct *fsp,
+			  int flags,
+			  mode_t mode)
 {
-	int result = -1;
+	int result;
 
-	START_PROFILE(syscall_open);
+	START_PROFILE(syscall_openat);
 
-	if (smb_fname->stream_name) {
+	if (is_named_stream(smb_fname)) {
 		errno = ENOENT;
+		result = -1;
 		goto out;
 	}
 
-	result = open(smb_fname->base_name, flags, mode);
- out:
-	END_PROFILE(syscall_open);
+	result = openat(dirfsp->fh->fd, smb_fname->base_name, flags, mode);
+
+out:
+	END_PROFILE(syscall_openat);
 	return result;
 }
-
 static NTSTATUS vfswrap_create_file(vfs_handle_struct *handle,
 				    struct smb_request *req,
-				    uint16_t root_dir_fid,
+				    struct files_struct **dirfsp,
 				    struct smb_filename *smb_fname,
 				    uint32_t access_mask,
 				    uint32_t share_access,
@@ -569,7 +717,7 @@ static NTSTATUS vfswrap_create_file(vfs_handle_struct *handle,
 				    uint32_t create_options,
 				    uint32_t file_attributes,
 				    uint32_t oplock_request,
-				    struct smb2_lease *lease,
+				    const struct smb2_lease *lease,
 				    uint64_t allocation_size,
 				    uint32_t private_flags,
 				    struct security_descriptor *sd,
@@ -579,7 +727,7 @@ static NTSTATUS vfswrap_create_file(vfs_handle_struct *handle,
 				    const struct smb2_create_blobs *in_context_blobs,
 				    struct smb2_create_blobs *out_context_blobs)
 {
-	return create_file_default(handle->conn, req, root_dir_fid, smb_fname,
+	return create_file_default(handle->conn, req, dirfsp, smb_fname,
 				   access_mask, share_access,
 				   create_disposition, create_options,
 				   file_attributes, oplock_request, lease,
@@ -605,7 +753,7 @@ static ssize_t vfswrap_pread(vfs_handle_struct *handle, files_struct *fsp, void 
 
 #if defined(HAVE_PREAD) || defined(HAVE_PREAD64)
 	START_PROFILE_BYTES(syscall_pread, n);
-	result = sys_pread(fsp->fh->fd, data, n, offset);
+	result = sys_pread_full(fsp->fh->fd, data, n, offset);
 	END_PROFILE_BYTES(syscall_pread);
 
 	if (result == -1 && errno == ESPIPE) {
@@ -629,7 +777,7 @@ static ssize_t vfswrap_pwrite(vfs_handle_struct *handle, files_struct *fsp, cons
 
 #if defined(HAVE_PWRITE) || defined(HAVE_PRWITE64)
 	START_PROFILE_BYTES(syscall_pwrite, n);
-	result = sys_pwrite(fsp->fh->fd, data, n, offset);
+	result = sys_pwrite_full(fsp->fh->fd, data, n, offset);
 	END_PROFILE_BYTES(syscall_pwrite);
 
 	if (result == -1 && errno == ESPIPE) {
@@ -709,10 +857,10 @@ static void vfs_pread_do(void *private_data)
 
 	PROFILE_TIMESTAMP(&start_time);
 
-	do {
-		state->ret = pread(state->fd, state->buf, state->count,
-				   state->offset);
-	} while ((state->ret == -1) && (errno == EINTR));
+	state->ret = sys_pread_full(state->fd,
+				    state->buf,
+				    state->count,
+				    state->offset);
 
 	if (state->ret == -1) {
 		state->vfs_aio_state.error = errno;
@@ -837,10 +985,10 @@ static void vfs_pwrite_do(void *private_data)
 
 	PROFILE_TIMESTAMP(&start_time);
 
-	do {
-		state->ret = pwrite(state->fd, state->buf, state->count,
-				   state->offset);
-	} while ((state->ret == -1) && (errno == EINTR));
+	state->ret = sys_pwrite_full(state->fd,
+				     state->buf,
+				     state->count,
+				     state->offset);
 
 	if (state->ret == -1) {
 		state->vfs_aio_state.error = errno;
@@ -1067,23 +1215,28 @@ static ssize_t vfswrap_recvfile(vfs_handle_struct *handle,
 	return result;
 }
 
-static int vfswrap_rename(vfs_handle_struct *handle,
+static int vfswrap_renameat(vfs_handle_struct *handle,
+			  files_struct *srcfsp,
 			  const struct smb_filename *smb_fname_src,
+			  files_struct *dstfsp,
 			  const struct smb_filename *smb_fname_dst)
 {
 	int result = -1;
 
-	START_PROFILE(syscall_rename);
+	START_PROFILE(syscall_renameat);
 
-	if (smb_fname_src->stream_name || smb_fname_dst->stream_name) {
+	if (is_named_stream(smb_fname_src) || is_named_stream(smb_fname_dst)) {
 		errno = ENOENT;
 		goto out;
 	}
 
-	result = rename(smb_fname_src->base_name, smb_fname_dst->base_name);
+	result = renameat(srcfsp->fh->fd,
+			smb_fname_src->base_name,
+			dstfsp->fh->fd,
+			smb_fname_dst->base_name);
 
  out:
-	END_PROFILE(syscall_rename);
+	END_PROFILE(syscall_renameat);
 	return result;
 }
 
@@ -1094,7 +1247,7 @@ static int vfswrap_stat(vfs_handle_struct *handle,
 
 	START_PROFILE(syscall_stat);
 
-	if (smb_fname->stream_name) {
+	if (is_named_stream(smb_fname)) {
 		errno = ENOENT;
 		goto out;
 	}
@@ -1124,7 +1277,7 @@ static int vfswrap_lstat(vfs_handle_struct *handle,
 
 	START_PROFILE(syscall_lstat);
 
-	if (smb_fname->stream_name) {
+	if (is_named_stream(smb_fname)) {
 		errno = ENOENT;
 		goto out;
 	}
@@ -1215,18 +1368,21 @@ static NTSTATUS vfswrap_fsctl(struct vfs_handle_struct *handle,
 
 	case FSCTL_GET_REPARSE_POINT:
 	{
-		/* Fail it with STATUS_NOT_A_REPARSE_POINT */
-		DEBUG(10, ("FSCTL_GET_REPARSE_POINT: called on %s. "
-			   "Status: NOT_IMPLEMENTED\n", fsp_fnum_dbg(fsp)));
-		return NT_STATUS_NOT_A_REPARSE_POINT;
+		status = fsctl_get_reparse_point(
+			fsp, ctx, out_data, max_out_len, out_len);
+		return status;
 	}
 
 	case FSCTL_SET_REPARSE_POINT:
 	{
-		/* Fail it with STATUS_NOT_A_REPARSE_POINT */
-		DEBUG(10, ("FSCTL_SET_REPARSE_POINT: called on %s. "
-			   "Status: NOT_IMPLEMENTED\n", fsp_fnum_dbg(fsp)));
-		return NT_STATUS_NOT_A_REPARSE_POINT;
+		status = fsctl_set_reparse_point(fsp, ctx, _in_data, in_len);
+		return status;
+	}
+
+	case FSCTL_DELETE_REPARSE_POINT:
+	{
+		status = fsctl_del_reparse_point(fsp, ctx, _in_data, in_len);
+		return status;
 	}
 
 	case FSCTL_GET_SHADOW_COPY_DATA:
@@ -1499,9 +1655,8 @@ static NTSTATUS vfswrap_fsctl(struct vfs_handle_struct *handle,
 	return NT_STATUS_NOT_SUPPORTED;
 }
 
-static bool vfswrap_is_offline(struct vfs_handle_struct *handle,
-			       const struct smb_filename *fname,
-			       SMB_STRUCT_STAT *sbuf);
+static bool vfswrap_is_offline(struct connection_struct *conn,
+			       const struct smb_filename *fname);
 
 static NTSTATUS vfswrap_get_dos_attributes(struct vfs_handle_struct *handle,
 					   struct smb_filename *smb_fname,
@@ -1509,7 +1664,7 @@ static NTSTATUS vfswrap_get_dos_attributes(struct vfs_handle_struct *handle,
 {
 	bool offline;
 
-	offline = vfswrap_is_offline(handle, smb_fname, &smb_fname->st);
+	offline = vfswrap_is_offline(handle->conn, smb_fname);
 	if (offline) {
 		*dosmode |= FILE_ATTRIBUTE_OFFLINE;
 	}
@@ -1581,6 +1736,12 @@ static void vfswrap_get_dos_attributes_getxattr_done(struct tevent_req *subreq)
 		struct vfswrap_get_dos_attributes_state);
 	ssize_t xattr_size;
 	DATA_BLOB blob = {0};
+	char *path = NULL;
+	char *tofree = NULL;
+	char pathbuf[PATH_MAX+1];
+	ssize_t pathlen;
+	struct smb_filename smb_fname;
+	bool offline;
 	NTSTATUS status;
 
 	xattr_size = SMB_VFS_GETXATTRAT_RECV(subreq,
@@ -1629,6 +1790,30 @@ static void vfswrap_get_dos_attributes_getxattr_done(struct tevent_req *subreq)
 		return;
 	}
 
+	pathlen = full_path_tos(state->dir_fsp->fsp_name->base_name,
+				state->smb_fname->base_name,
+				pathbuf,
+				sizeof(pathbuf),
+				&path,
+				&tofree);
+	if (pathlen == -1) {
+		tevent_req_nterror(req, NT_STATUS_NO_MEMORY);
+		return;
+	}
+
+	smb_fname = (struct smb_filename) {
+		.base_name = path,
+		.st = state->smb_fname->st,
+		.flags = state->smb_fname->flags,
+		.twrp = state->smb_fname->twrp,
+	};
+
+	offline = vfswrap_is_offline(state->conn, &smb_fname);
+	if (offline) {
+		state->dosmode |= FILE_ATTRIBUTE_OFFLINE;
+	}
+	TALLOC_FREE(tofree);
+
 	tevent_req_done(req);
 	return;
 }
@@ -1659,7 +1844,7 @@ static NTSTATUS vfswrap_fget_dos_attributes(struct vfs_handle_struct *handle,
 {
 	bool offline;
 
-	offline = vfswrap_is_offline(handle, fsp->fsp_name, &fsp->fsp_name->st);
+	offline = vfswrap_is_offline(handle->conn, fsp->fsp_name);
 	if (offline) {
 		*dosmode |= FILE_ATTRIBUTE_OFFLINE;
 	}
@@ -1782,7 +1967,7 @@ static void vfswrap_offload_write_cleanup(struct tevent_req *req,
 		return;
 	}
 
-	ok = change_to_user_by_fsp(state->dst_fsp);
+	ok = change_to_user_and_service_by_fsp(state->dst_fsp);
 	SMB_ASSERT(ok);
 	state->dst_fsp = NULL;
 }
@@ -1898,7 +2083,7 @@ static struct tevent_req *vfswrap_offload_write_send(
 		return tevent_req_post(req, ev);
 	}
 
-	ok = change_to_user_by_fsp(src_fsp);
+	ok = change_to_user_and_service_by_fsp(src_fsp);
 	if (!ok) {
 		tevent_req_nterror(req, NT_STATUS_ACCESS_DENIED);
 		return tevent_req_post(req, ev);
@@ -2013,7 +2198,7 @@ static void vfswrap_offload_write_read_done(struct tevent_req *subreq)
 
 	state->src_off += nread;
 
-	ok = change_to_user_by_fsp(state->dst_fsp);
+	ok = change_to_user_and_service_by_fsp(state->dst_fsp);
 	if (!ok) {
 		tevent_req_nterror(req, NT_STATUS_INTERNAL_ERROR);
 		return;
@@ -2084,7 +2269,7 @@ static void vfswrap_offload_write_write_done(struct tevent_req *subreq)
 		return;
 	}
 
-	ok = change_to_user_by_fsp(state->src_fsp);
+	ok = change_to_user_and_service_by_fsp(state->src_fsp);
 	if (!ok) {
 		tevent_req_nterror(req, NT_STATUS_INTERNAL_ERROR);
 		return;
@@ -2196,21 +2381,27 @@ static uint64_t vfswrap_get_alloc_size(vfs_handle_struct *handle,
 	return result;
 }
 
-static int vfswrap_unlink(vfs_handle_struct *handle,
-			  const struct smb_filename *smb_fname)
+static int vfswrap_unlinkat(vfs_handle_struct *handle,
+			struct files_struct *dirfsp,
+			const struct smb_filename *smb_fname,
+			int flags)
 {
 	int result = -1;
 
-	START_PROFILE(syscall_unlink);
+	START_PROFILE(syscall_unlinkat);
 
-	if (smb_fname->stream_name) {
+	SMB_ASSERT(dirfsp == dirfsp->conn->cwd_fsp);
+
+	if (is_named_stream(smb_fname)) {
 		errno = ENOENT;
 		goto out;
 	}
-	result = unlink(smb_fname->base_name);
+	result = unlinkat(dirfsp->fh->fd,
+			smb_fname->base_name,
+			flags);
 
  out:
-	END_PROFILE(syscall_unlink);
+	END_PROFILE(syscall_unlinkat);
 	return result;
 }
 
@@ -2239,19 +2430,6 @@ static int vfswrap_fchmod(vfs_handle_struct *handle, files_struct *fsp, mode_t m
 #endif
 
 	END_PROFILE(syscall_fchmod);
-	return result;
-}
-
-static int vfswrap_chown(vfs_handle_struct *handle,
-			const struct smb_filename *smb_fname,
-			uid_t uid,
-			gid_t gid)
-{
-	int result;
-
-	START_PROFILE(syscall_chown);
-	result = chown(smb_fname->base_name, uid, gid);
-	END_PROFILE(syscall_chown);
 	return result;
 }
 
@@ -2311,6 +2489,7 @@ static struct smb_filename *vfswrap_getwd(vfs_handle_struct *handle,
 				result,
 				NULL,
 				NULL,
+				0,
 				0);
 	/*
 	 * sys_getwd() *always* returns malloced memory.
@@ -2334,21 +2513,21 @@ static int vfswrap_ntimes(vfs_handle_struct *handle,
 
 	START_PROFILE(syscall_ntimes);
 
-	if (smb_fname->stream_name) {
+	if (is_named_stream(smb_fname)) {
 		errno = ENOENT;
 		goto out;
 	}
 
 	if (ft != NULL) {
-		if (null_timespec(ft->atime)) {
+		if (is_omit_timespec(&ft->atime)) {
 			ft->atime= smb_fname->st.st_ex_atime;
 		}
 
-		if (null_timespec(ft->mtime)) {
+		if (is_omit_timespec(&ft->mtime)) {
 			ft->mtime = smb_fname->st.st_ex_mtime;
 		}
 
-		if (!null_timespec(ft->create_time)) {
+		if (!is_omit_timespec(&ft->create_time)) {
 			set_create_timespec_ea(handle->conn,
 					       smb_fname,
 					       ft->create_time);
@@ -2422,6 +2601,13 @@ static int strict_allocate_ftruncate(vfs_handle_struct *handle, files_struct *fs
 	int ret;
 	NTSTATUS status;
 	SMB_STRUCT_STAT *pst;
+	bool ok;
+
+	ok = vfs_valid_pwrite_range(len, 0);
+	if (!ok) {
+		errno = EINVAL;
+		return -1;
+	}
 
 	status = vfs_stat_fsp(fsp);
 	if (!NT_STATUS_IS_OK(status)) {
@@ -2486,7 +2672,7 @@ static int vfswrap_ftruncate(vfs_handle_struct *handle, files_struct *fsp, off_t
 
 	START_PROFILE(syscall_ftruncate);
 
-	if (lp_strict_allocate(SNUM(fsp->conn)) && !fsp->is_sparse) {
+	if (lp_strict_allocate(SNUM(fsp->conn)) && !fsp->fsp_flags.is_sparse) {
 		result = strict_allocate_ftruncate(handle, fsp, len);
 		END_PROFILE(syscall_ftruncate);
 		return result;
@@ -2583,7 +2769,7 @@ static bool vfswrap_lock(vfs_handle_struct *handle, files_struct *fsp, int op, o
 
 	START_PROFILE(syscall_fcntl_lock);
 
-	if (fsp->use_ofd_locks) {
+	if (fsp->fsp_flags.use_ofd_locks) {
 		op = map_process_lock_to_ofd_lock(op);
 	}
 
@@ -2593,12 +2779,57 @@ static bool vfswrap_lock(vfs_handle_struct *handle, files_struct *fsp, int op, o
 }
 
 static int vfswrap_kernel_flock(vfs_handle_struct *handle, files_struct *fsp,
-				uint32_t share_mode, uint32_t access_mask)
+				uint32_t share_access, uint32_t access_mask)
 {
 	START_PROFILE(syscall_kernel_flock);
-	kernel_flock(fsp->fh->fd, share_mode, access_mask);
+	kernel_flock(fsp->fh->fd, share_access, access_mask);
 	END_PROFILE(syscall_kernel_flock);
 	return 0;
+}
+
+static int vfswrap_fcntl(vfs_handle_struct *handle, files_struct *fsp, int cmd,
+			 va_list cmd_arg)
+{
+	void *argp;
+	va_list dup_cmd_arg;
+	int result;
+	int val;
+
+	START_PROFILE(syscall_fcntl);
+
+	va_copy(dup_cmd_arg, cmd_arg);
+
+	switch(cmd) {
+	case F_SETLK:
+	case F_SETLKW:
+	case F_GETLK:
+#if defined(HAVE_OFD_LOCKS)
+	case F_OFD_SETLK:
+	case F_OFD_SETLKW:
+	case F_OFD_GETLK:
+#endif
+#if defined(HAVE_F_OWNER_EX)
+	case F_GETOWN_EX:
+	case F_SETOWN_EX:
+#endif
+#if defined(HAVE_RW_HINTS)
+	case F_GET_RW_HINT:
+	case F_SET_RW_HINT:
+	case F_GET_FILE_RW_HINT:
+	case F_SET_FILE_RW_HINT:
+#endif
+		argp = va_arg(dup_cmd_arg, void *);
+		result = sys_fcntl_ptr(fsp->fh->fd, cmd, argp);
+		break;
+	default:
+		val = va_arg(dup_cmd_arg, int);
+		result = sys_fcntl_int(fsp->fh->fd, cmd, val);
+	}
+
+	va_end(dup_cmd_arg);
+
+	END_PROFILE(syscall_fcntl);
+	return result;
 }
 
 static bool vfswrap_getlock(vfs_handle_struct *handle, files_struct *fsp, off_t *poffset, off_t *pcount, int *ptype, pid_t *ppid)
@@ -2608,7 +2839,7 @@ static bool vfswrap_getlock(vfs_handle_struct *handle, files_struct *fsp, off_t 
 
 	START_PROFILE(syscall_fcntl_getlock);
 
-	if (fsp->use_ofd_locks) {
+	if (fsp->fsp_flags.use_ofd_locks) {
 		op = map_process_lock_to_ofd_lock(op);
 	}
 
@@ -2633,53 +2864,87 @@ static int vfswrap_linux_setlease(vfs_handle_struct *handle, files_struct *fsp,
 	return result;
 }
 
-static int vfswrap_symlink(vfs_handle_struct *handle,
-			const char *link_target,
+static int vfswrap_symlinkat(vfs_handle_struct *handle,
+			const struct smb_filename *link_target,
+			struct files_struct *dirfsp,
 			const struct smb_filename *new_smb_fname)
 {
 	int result;
 
-	START_PROFILE(syscall_symlink);
-	result = symlink(link_target, new_smb_fname->base_name);
-	END_PROFILE(syscall_symlink);
+	START_PROFILE(syscall_symlinkat);
+
+	SMB_ASSERT(dirfsp == dirfsp->conn->cwd_fsp);
+
+	result = symlinkat(link_target->base_name,
+			dirfsp->fh->fd,
+			new_smb_fname->base_name);
+	END_PROFILE(syscall_symlinkat);
 	return result;
 }
 
-static int vfswrap_readlink(vfs_handle_struct *handle,
+static int vfswrap_readlinkat(vfs_handle_struct *handle,
+			files_struct *dirfsp,
 			const struct smb_filename *smb_fname,
 			char *buf,
 			size_t bufsiz)
 {
 	int result;
 
-	START_PROFILE(syscall_readlink);
-	result = readlink(smb_fname->base_name, buf, bufsiz);
-	END_PROFILE(syscall_readlink);
+	START_PROFILE(syscall_readlinkat);
+
+	SMB_ASSERT(dirfsp == dirfsp->conn->cwd_fsp);
+
+	result = readlinkat(dirfsp->fh->fd,
+			smb_fname->base_name,
+			buf,
+			bufsiz);
+
+	END_PROFILE(syscall_readlinkat);
 	return result;
 }
 
-static int vfswrap_link(vfs_handle_struct *handle,
+static int vfswrap_linkat(vfs_handle_struct *handle,
+			files_struct *srcfsp,
 			const struct smb_filename *old_smb_fname,
-			const struct smb_filename *new_smb_fname)
+			files_struct *dstfsp,
+			const struct smb_filename *new_smb_fname,
+			int flags)
 {
 	int result;
 
-	START_PROFILE(syscall_link);
-	result = link(old_smb_fname->base_name, new_smb_fname->base_name);
-	END_PROFILE(syscall_link);
+	START_PROFILE(syscall_linkat);
+
+	SMB_ASSERT(srcfsp == srcfsp->conn->cwd_fsp);
+	SMB_ASSERT(dstfsp == dstfsp->conn->cwd_fsp);
+
+	result = linkat(srcfsp->fh->fd,
+			old_smb_fname->base_name,
+			dstfsp->fh->fd,
+			new_smb_fname->base_name,
+			flags);
+
+	END_PROFILE(syscall_linkat);
 	return result;
 }
 
-static int vfswrap_mknod(vfs_handle_struct *handle,
+static int vfswrap_mknodat(vfs_handle_struct *handle,
+			files_struct *dirfsp,
 			const struct smb_filename *smb_fname,
 			mode_t mode,
 			SMB_DEV_T dev)
 {
 	int result;
 
-	START_PROFILE(syscall_mknod);
-	result = sys_mknod(smb_fname->base_name, mode, dev);
-	END_PROFILE(syscall_mknod);
+	START_PROFILE(syscall_mknodat);
+
+	SMB_ASSERT(dirfsp == dirfsp->conn->cwd_fsp);
+
+	result = sys_mknodat(dirfsp->fh->fd,
+			smb_fname->base_name,
+			mode,
+			dev);
+
+	END_PROFILE(syscall_mknodat);
 	return result;
 }
 
@@ -2694,7 +2959,12 @@ static struct smb_filename *vfswrap_realpath(vfs_handle_struct *handle,
 	result = sys_realpath(smb_fname->base_name);
 	END_PROFILE(syscall_realpath);
 	if (result) {
-		result_fname = synthetic_smb_fname(ctx, result, NULL, NULL, 0);
+		result_fname = synthetic_smb_fname(ctx,
+						   result,
+						   NULL,
+						   NULL,
+						   0,
+						   0);
 		SAFE_FREE(result);
 	}
 	return result_fname;
@@ -2761,7 +3031,7 @@ static NTSTATUS vfswrap_streaminfo(vfs_handle_struct *handle,
 	struct stream_struct *tmp_streams = NULL;
 	int ret;
 
-	if ((fsp != NULL) && (fsp->is_directory)) {
+	if ((fsp != NULL) && (fsp->fsp_flags.is_directory)) {
 		/*
 		 * No default streams on directories
 		 */
@@ -2772,19 +3042,20 @@ static NTSTATUS vfswrap_streaminfo(vfs_handle_struct *handle,
 		ret = SMB_VFS_FSTAT(fsp, &sbuf);
 	}
 	else {
-		struct smb_filename smb_fname_cp;
+		struct smb_filename *smb_fname_cp = NULL;
 
-		ZERO_STRUCT(smb_fname_cp);
-		smb_fname_cp.base_name = discard_const_p(char,
-					smb_fname->base_name);
-		smb_fname_cp.flags = smb_fname->flags;
-
-		if (smb_fname_cp.flags & SMB_FILENAME_POSIX_PATH) {
-			ret = SMB_VFS_LSTAT(handle->conn, &smb_fname_cp);
-		} else {
-			ret = SMB_VFS_STAT(handle->conn, &smb_fname_cp);
+		smb_fname_cp = cp_smb_filename_nostream(talloc_tos(), smb_fname);
+		if (smb_fname_cp == NULL) {
+			return NT_STATUS_NO_MEMORY;
 		}
-		sbuf = smb_fname_cp.st;
+
+		if (smb_fname_cp->flags & SMB_FILENAME_POSIX_PATH) {
+			ret = SMB_VFS_LSTAT(handle->conn, smb_fname_cp);
+		} else {
+			ret = SMB_VFS_STAT(handle->conn, smb_fname_cp);
+		}
+		sbuf = smb_fname_cp->st;
+		TALLOC_FREE(smb_fname_cp);
 	}
 
 	if (ret == -1) {
@@ -2814,7 +3085,7 @@ static NTSTATUS vfswrap_streaminfo(vfs_handle_struct *handle,
 }
 
 static int vfswrap_get_real_filename(struct vfs_handle_struct *handle,
-				     const char *path,
+				     const struct smb_filename *path,
 				     const char *name,
 				     TALLOC_CTX *mem_ctx,
 				     char **found_name)
@@ -2879,21 +3150,25 @@ static NTSTATUS vfswrap_fget_nt_acl(vfs_handle_struct *handle,
 	return result;
 }
 
-static NTSTATUS vfswrap_get_nt_acl(vfs_handle_struct *handle,
-				   const struct smb_filename *smb_fname,
-				   uint32_t security_info,
-				   TALLOC_CTX *mem_ctx,
-				   struct security_descriptor **ppdesc)
+static NTSTATUS vfswrap_get_nt_acl_at(vfs_handle_struct *handle,
+			struct files_struct *dirfsp,
+			const struct smb_filename *smb_fname,
+			uint32_t security_info,
+			TALLOC_CTX *mem_ctx,
+			struct security_descriptor **ppdesc)
 {
 	NTSTATUS result;
 
-	START_PROFILE(get_nt_acl);
+	START_PROFILE(get_nt_acl_at);
+
+	SMB_ASSERT(dirfsp == dirfsp->conn->cwd_fsp);
+
 	result = posix_get_nt_acl(handle->conn,
 				smb_fname,
 				security_info,
 				mem_ctx,
 				ppdesc);
-	END_PROFILE(get_nt_acl);
+	END_PROFILE(get_nt_acl_at);
 	return result;
 }
 
@@ -2967,7 +3242,6 @@ struct vfswrap_getxattrat_state {
 	struct tevent_context *ev;
 	files_struct *dir_fsp;
 	const struct smb_filename *smb_fname;
-	struct tevent_req *req;
 
 	/*
 	 * The following variables are talloced off "state" which is protected
@@ -3020,7 +3294,6 @@ static struct tevent_req *vfswrap_getxattrat_send(
 		.ev = ev,
 		.dir_fsp = dir_fsp,
 		.smb_fname = smb_fname,
-		.req = req,
 	};
 
 	max_threads = pthreadpool_tevent_max_threads(dir_fsp->conn->sconn->pool);
@@ -3115,12 +3388,12 @@ static struct tevent_req *vfswrap_getxattrat_send(
 
 static void vfswrap_getxattrat_do_sync(struct tevent_req *req)
 {
-	struct vfswrap_getxattrat_state *state = talloc_get_type_abort(
+	struct vfswrap_getxattrat_state *state = tevent_req_data(
 		req, struct vfswrap_getxattrat_state);
 	char *path = NULL;
 	char *tofree = NULL;
 	char pathbuf[PATH_MAX+1];
-	size_t pathlen;
+	ssize_t pathlen;
 	int err;
 
 	pathlen = full_path_tos(state->dir_fsp->fsp_name->base_name,
@@ -3211,7 +3484,7 @@ static void vfswrap_getxattrat_done(struct tevent_req *subreq)
 	/*
 	 * Make sure we run as the user again
 	 */
-	ok = change_to_user_by_fsp(state->dir_fsp);
+	ok = change_to_user_and_service_by_fsp(state->dir_fsp);
 	SMB_ASSERT(ok);
 
 	ret = pthreadpool_tevent_job_recv(subreq);
@@ -3332,9 +3605,8 @@ static bool vfswrap_aio_force(struct vfs_handle_struct *handle, struct files_str
 	return false;
 }
 
-static bool vfswrap_is_offline(struct vfs_handle_struct *handle,
-			       const struct smb_filename *fname,
-			       SMB_STRUCT_STAT *sbuf)
+static bool vfswrap_is_offline(struct connection_struct *conn,
+			       const struct smb_filename *fname)
 {
 	NTSTATUS status;
 	char *path;
@@ -3344,7 +3616,7 @@ static bool vfswrap_is_offline(struct vfs_handle_struct *handle,
 		return false;
 	}
 
-	if (!lp_dmapi_support(SNUM(handle->conn)) || !dmapi_have_session()) {
+	if (!lp_dmapi_support(SNUM(conn)) || !dmapi_have_session()) {
 #if defined(ENOTSUP)
 		errno = ENOTSUP;
 #endif
@@ -3407,26 +3679,26 @@ static struct vfs_fn_pointers vfs_default_fns = {
 	.statvfs_fn = vfswrap_statvfs,
 	.fs_capabilities_fn = vfswrap_fs_capabilities,
 	.get_dfs_referrals_fn = vfswrap_get_dfs_referrals,
+	.create_dfs_pathat_fn = vfswrap_create_dfs_pathat,
+	.read_dfs_pathat_fn = vfswrap_read_dfs_pathat,
 	.snap_check_path_fn = vfswrap_snap_check_path,
 	.snap_create_fn = vfswrap_snap_create,
 	.snap_delete_fn = vfswrap_snap_delete,
 
 	/* Directory operations */
 
-	.opendir_fn = vfswrap_opendir,
 	.fdopendir_fn = vfswrap_fdopendir,
 	.readdir_fn = vfswrap_readdir,
 	.readdir_attr_fn = vfswrap_readdir_attr,
 	.seekdir_fn = vfswrap_seekdir,
 	.telldir_fn = vfswrap_telldir,
 	.rewind_dir_fn = vfswrap_rewinddir,
-	.mkdir_fn = vfswrap_mkdir,
-	.rmdir_fn = vfswrap_rmdir,
+	.mkdirat_fn = vfswrap_mkdirat,
 	.closedir_fn = vfswrap_closedir,
 
 	/* File operations */
 
-	.open_fn = vfswrap_open,
+	.openat_fn = vfswrap_openat,
 	.create_file_fn = vfswrap_create_file,
 	.close_fn = vfswrap_close,
 	.pread_fn = vfswrap_pread,
@@ -3438,17 +3710,16 @@ static struct vfs_fn_pointers vfs_default_fns = {
 	.lseek_fn = vfswrap_lseek,
 	.sendfile_fn = vfswrap_sendfile,
 	.recvfile_fn = vfswrap_recvfile,
-	.rename_fn = vfswrap_rename,
+	.renameat_fn = vfswrap_renameat,
 	.fsync_send_fn = vfswrap_fsync_send,
 	.fsync_recv_fn = vfswrap_fsync_recv,
 	.stat_fn = vfswrap_stat,
 	.fstat_fn = vfswrap_fstat,
 	.lstat_fn = vfswrap_lstat,
 	.get_alloc_size_fn = vfswrap_get_alloc_size,
-	.unlink_fn = vfswrap_unlink,
+	.unlinkat_fn = vfswrap_unlinkat,
 	.chmod_fn = vfswrap_chmod,
 	.fchmod_fn = vfswrap_fchmod,
-	.chown_fn = vfswrap_chown,
 	.fchown_fn = vfswrap_fchown,
 	.lchown_fn = vfswrap_lchown,
 	.chdir_fn = vfswrap_chdir,
@@ -3458,12 +3729,13 @@ static struct vfs_fn_pointers vfs_default_fns = {
 	.fallocate_fn = vfswrap_fallocate,
 	.lock_fn = vfswrap_lock,
 	.kernel_flock_fn = vfswrap_kernel_flock,
+	.fcntl_fn = vfswrap_fcntl,
 	.linux_setlease_fn = vfswrap_linux_setlease,
 	.getlock_fn = vfswrap_getlock,
-	.symlink_fn = vfswrap_symlink,
-	.readlink_fn = vfswrap_readlink,
-	.link_fn = vfswrap_link,
-	.mknod_fn = vfswrap_mknod,
+	.symlinkat_fn = vfswrap_symlinkat,
+	.readlinkat_fn = vfswrap_readlinkat,
+	.linkat_fn = vfswrap_linkat,
+	.mknodat_fn = vfswrap_mknodat,
 	.realpath_fn = vfswrap_realpath,
 	.chflags_fn = vfswrap_chflags,
 	.file_id_create_fn = vfswrap_file_id_create,
@@ -3492,7 +3764,7 @@ static struct vfs_fn_pointers vfs_default_fns = {
 	/* NT ACL operations. */
 
 	.fget_nt_acl_fn = vfswrap_fget_nt_acl,
-	.get_nt_acl_fn = vfswrap_get_nt_acl,
+	.get_nt_acl_at_fn = vfswrap_get_nt_acl_at,
 	.fset_nt_acl_fn = vfswrap_fset_nt_acl,
 	.audit_file_fn = vfswrap_audit_file,
 

@@ -50,6 +50,7 @@ NTSTATUS cli_cm_force_encryption_creds(struct cli_state *c,
 	uint16_t major, minor;
 	uint32_t caplow, caphigh;
 	NTSTATUS status;
+	bool temp_ipc = false;
 
 	if (smbXcli_conn_protocol(c->conn) >= PROTOCOL_SMB2_02) {
 		status = smb2cli_session_encryption_on(c->smb2.session);
@@ -72,12 +73,26 @@ NTSTATUS cli_cm_force_encryption_creds(struct cli_state *c,
 		return NT_STATUS_NOT_SUPPORTED;
 	}
 
+	if (c->smb1.tcon == NULL) {
+		status = cli_tree_connect_creds(c, "IPC$", "IPC", creds);
+		if (!NT_STATUS_IS_OK(status)) {
+			d_printf("Encryption required and "
+				"can't connect to IPC$ to check "
+				"UNIX CIFS extensions.\n");
+			return NT_STATUS_UNKNOWN_REVISION;
+		}
+		temp_ipc = true;
+	}
+
 	status = cli_unix_extensions_version(c, &major, &minor, &caplow,
 					     &caphigh);
 	if (!NT_STATUS_IS_OK(status)) {
 		d_printf("Encryption required and "
 			"can't get UNIX CIFS extensions "
 			"version from server.\n");
+		if (temp_ipc) {
+			cli_tdis(c);
+		}
 		return NT_STATUS_UNKNOWN_REVISION;
 	}
 
@@ -85,6 +100,9 @@ NTSTATUS cli_cm_force_encryption_creds(struct cli_state *c,
 		d_printf("Encryption required and "
 			"share %s doesn't support "
 			"encryption.\n", sharename);
+		if (temp_ipc) {
+			cli_tdis(c);
+		}
 		return NT_STATUS_UNSUPPORTED_COMPRESSION;
 	}
 
@@ -93,38 +111,16 @@ NTSTATUS cli_cm_force_encryption_creds(struct cli_state *c,
 		d_printf("Encryption required and "
 			"setup failed with error %s.\n",
 			nt_errstr(status));
+		if (temp_ipc) {
+			cli_tdis(c);
+		}
 		return status;
 	}
 
-	return NT_STATUS_OK;
-}
-
-NTSTATUS cli_cm_force_encryption(struct cli_state *c,
-			const char *username,
-			const char *password,
-			const char *domain,
-			const char *sharename)
-{
-	struct cli_credentials *creds = NULL;
-	NTSTATUS status;
-
-	creds = cli_session_creds_init(c,
-				       username,
-				       domain,
-				       NULL, /* default realm */
-				       password,
-				       c->use_kerberos,
-				       c->fallback_after_kerberos,
-				       c->use_ccache,
-				       c->pw_nt_hash);
-	if (creds == NULL) {
-		return NT_STATUS_NO_MEMORY;
+	if (temp_ipc) {
+		cli_tdis(c);
 	}
-
-	status = cli_cm_force_encryption_creds(c, creds, sharename);
-	/* gensec currently references the creds so we can't free them here */
-	talloc_unlink(c, creds);
-	return status;
+	return NT_STATUS_OK;
 }
 
 /********************************************************************
@@ -137,6 +133,7 @@ static NTSTATUS do_connect(TALLOC_CTX *ctx,
 					const struct user_auth_info *auth_info,
 					bool force_encrypt,
 					int max_protocol,
+					const struct sockaddr_storage *dest_ss,
 					int port,
 					int name_type,
 					struct cli_state **pcli)
@@ -177,21 +174,8 @@ static NTSTATUS do_connect(TALLOC_CTX *ctx,
 		return NT_STATUS_INVALID_PARAMETER;
 	}
 
-	if (get_cmdline_auth_info_use_kerberos(auth_info)) {
-		flags |= CLI_FULL_CONNECTION_USE_KERBEROS;
-	}
-	if (get_cmdline_auth_info_fallback_after_kerberos(auth_info)) {
-		flags |= CLI_FULL_CONNECTION_FALLBACK_AFTER_KERBEROS;
-	}
-	if (get_cmdline_auth_info_use_ccache(auth_info)) {
-		flags |= CLI_FULL_CONNECTION_USE_CCACHE;
-	}
-	if (get_cmdline_auth_info_use_pw_nt_hash(auth_info)) {
-		flags |= CLI_FULL_CONNECTION_USE_NT_HASH;
-	}
-
 	status = cli_connect_nb(
-		server, NULL, port, name_type, NULL,
+		server, dest_ss, port, name_type, NULL,
 		signing_state,
 		flags, &c);
 
@@ -261,6 +245,16 @@ static NTSTATUS do_connect(TALLOC_CTX *ctx,
 
 	DEBUG(4,(" session setup ok\n"));
 
+	if (force_encrypt) {
+		status = cli_cm_force_encryption_creds(c,
+						       creds,
+						       sharename);
+		if (!NT_STATUS_IS_OK(status)) {
+			cli_shutdown(c);
+			return status;
+		}
+	}
+
 	/* here's the fun part....to support 'msdfs proxy' shares
 	   (on Samba or windows) we have to issues a TRANS_GET_DFS_REFERRAL
 	   here before trying to connect to the original share.
@@ -274,7 +268,7 @@ static NTSTATUS do_connect(TALLOC_CTX *ctx,
 		return do_connect(ctx, newserver,
 				newshare, auth_info,
 				force_encrypt, max_protocol,
-				port, name_type, pcli);
+				NULL, port, name_type, pcli);
 	}
 
 	/* must be a normal share */
@@ -284,16 +278,6 @@ static NTSTATUS do_connect(TALLOC_CTX *ctx,
 		d_printf("tree connect failed: %s\n", nt_errstr(status));
 		cli_shutdown(c);
 		return status;
-	}
-
-	if (force_encrypt) {
-		status = cli_cm_force_encryption_creds(c,
-						       creds,
-						       sharename);
-		if (!NT_STATUS_IS_OK(status)) {
-			cli_shutdown(c);
-			return status;
-		}
 	}
 
 	DEBUG(4,(" tconx ok\n"));
@@ -329,20 +313,29 @@ static NTSTATUS cli_cm_connect(TALLOC_CTX *ctx,
 			       const struct user_auth_info *auth_info,
 			       bool force_encrypt,
 			       int max_protocol,
+			       const struct sockaddr_storage *dest_ss,
 			       int port,
 			       int name_type,
 			       struct cli_state **pcli)
 {
-	struct cli_state *cli;
+	struct cli_state *cli = NULL;
 	NTSTATUS status;
 
 	status = do_connect(ctx, server, share,
 				auth_info,
 				force_encrypt, max_protocol,
-				port, name_type, &cli);
+				dest_ss, port, name_type, &cli);
 
 	if (!NT_STATUS_IS_OK(status)) {
 		return status;
+	}
+
+	/*
+	 * This can't happen, this test is to satisfy static
+	 * checkers (clang)
+	 */
+	if (cli == NULL) {
+		return NT_STATUS_NO_MEMORY;
 	}
 
 	/* Enter into the list. */
@@ -416,6 +409,7 @@ NTSTATUS cli_cm_open(TALLOC_CTX *ctx,
 				const struct user_auth_info *auth_info,
 				bool force_encrypt,
 				int max_protocol,
+				const struct sockaddr_storage *dest_ss,
 				int port,
 				int name_type,
 				struct cli_state **pcli)
@@ -445,6 +439,7 @@ NTSTATUS cli_cm_open(TALLOC_CTX *ctx,
 				auth_info,
 				force_encrypt,
 				max_protocol,
+				dest_ss,
 				port,
 				name_type,
 				&c);
@@ -830,7 +825,7 @@ NTSTATUS cli_dfs_get_referral_ex(TALLOC_CTX *ctx,
 				status = NT_STATUS_INVALID_NETWORK_RESPONSE;
 				goto out;
 			}
-			clistr_pull_talloc(referrals,
+			pull_string_talloc(referrals,
 					   (const char *)rdata,
 					   recv_flags2,
 					   &referrals[i].dfspath,
@@ -993,6 +988,7 @@ NTSTATUS cli_resolve_path(TALLOC_CTX *ctx,
 			     dfs_auth_info,
 			     cli_state_is_encryption_on(rootcli),
 			     smbXcli_conn_protocol(rootcli->conn),
+			     NULL, /* dest_ss not needed, we reuse the transport */
 			     0,
 			     0x20,
 			     &cli_ipc);
@@ -1050,7 +1046,8 @@ NTSTATUS cli_resolve_path(TALLOC_CTX *ctx,
 				dfs_auth_info,
 				cli_state_is_encryption_on(rootcli),
 				smbXcli_conn_protocol(rootcli->conn),
-				0,
+				NULL, /* dest_ss */
+				0, /* port */
 				0x20,
 				targetcli);
 		if (!NT_STATUS_IS_OK(status)) {
@@ -1257,6 +1254,7 @@ bool cli_check_msdfs_proxy(TALLOC_CTX *ctx,
 	if (force_encrypt) {
 		status = cli_cm_force_encryption_creds(cli, creds, "IPC$");
 		if (!NT_STATUS_IS_OK(status)) {
+			cli_tdis(cli);
 			cli_state_restore_tcon(cli, orig_tcon);
 			return false;
 		}

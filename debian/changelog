@@ -1,3 +1,32 @@
+samba (2:4.13.14+dfsg-0ubuntu0.20.04.1) focal-security; urgency=medium
+
+  * Update to 4.13.14 as a security update (LP: #1950363)
+    - Removed patches included in new version:
+      + CVE-*.patch
+      + zerologon*.patch
+      + 0023-libsmb-Don-t-try-to-find-posix-stat-info-in-SMBC_get.patch
+      + build-Remove-tests-for-getdents-and-getdirentries.patch
+      + fix-double-free-with-unresolved-credentia-cache.patch
+      + wscript-remove-all-checks-for-_FUNC-and-__FUNC.patch
+      + wscript-split-function-check-to-one-per-line-and-sor.patch
+    - Add/Refresh patches from Hirsute package:
+      + Rename-mdfind-to-mdsearch.patch
+      + bug_221618_precise-64bit-prototype.patch
+      + fix-nfs-service-name-to-nfs-kernel-server.patch
+    - debian/control: bump libldb-dev Build-Depends to 2.2.3, bump
+      libtalloc to 2.3.1, libtdb to 1.4.3, and libtevent to 0.10.2.
+    - debian/*.install, debian/*.symbols: sync with Hirsute package, added
+      libdcerpc-pkt-auth.so.0.
+    - debian/rules: build with --enable-spotlight, remove --accel-aes as it
+      is no longer used with gnutls.
+    - debian/control: add libicu-dev to Build-Depends.
+    - debian/patches/trusted_domain_regression_fix.patch: fix regression
+      introduced in 4.13.14.
+    - CVE-2016-2124, CVE-2020-25717, CVE-2020-25718, CVE-2020-25719,
+      CVE-2020-25721, CVE-2020-25722, CVE-2021-3738, CVE-2021-23192
+
+ -- Marc Deslauriers <marc.deslauriers@ubuntu.com>  Mon, 01 Nov 2021 07:33:25 -0400
+
 samba (2:4.11.6+dfsg-0ubuntu1.10bb1) focal; urgency=medium
 
   * Balabit patched version

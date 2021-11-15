@@ -76,7 +76,9 @@ conf_args = \
 		--with-cluster-support \
 		--with-socketpath=/run/ctdb/ctdbd.socket \
 		--with-logdir=/var/log/ctdb \
-		--enable-etcd-reclock
+		--enable-etcd-reclock \
+		--enable-spotlight
+
 
 ifeq ($(UBUNTU_I386), 0)
 ifneq (,$(filter amd64 arm64 armel armhf i386 mips64el mipsel ppc64el ppc64 s390x x32, $(DEB_HOST_ARCH)))
@@ -102,11 +104,6 @@ ifeq ($(DEB_HOST_ARCH_OS), linux)
 else
 	conf_args += \
 		--without-systemd
-endif
-
-ifeq ($(DEB_HOST_ARCH_CPU), amd64)
-	conf_args += \
-		--accel-aes=intelaesni
 endif
 
 # Ubuntu i386 binary compatibility only effort: Disable some i386 packages

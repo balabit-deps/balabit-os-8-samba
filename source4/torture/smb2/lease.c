@@ -954,6 +954,190 @@ done:
 	return ret;
 }
 
+static bool test_lease_statopen4_do(struct torture_context *tctx,
+				    struct smb2_tree *tree,
+				    uint32_t access_mask,
+				    bool expect_stat_open)
+{
+	TALLOC_CTX *mem_ctx = talloc_new(tctx);
+	struct smb2_create io;
+	struct smb2_lease ls;
+	struct smb2_handle h1 = {{0}};
+	struct smb2_handle h2 = {{0}};
+	struct smb2_handle h3 = {{0}};
+	NTSTATUS status;
+	const char *fname = "lease_statopen2.dat";
+	bool ret = true;
+
+	/* Open file with RWH lease. */
+	smb2_lease_create_share(&io, &ls, false, fname,
+				smb2_util_share_access("RWD"),
+				LEASE1,
+				smb2_util_lease_state("RWH"));
+	io.in.desired_access = SEC_FILE_ALL;
+	status = smb2_create(tree, mem_ctx, &io);
+	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+					"smb2_create failed\n");
+	h1 = io.out.file.handle;
+	CHECK_LEASE(&io, "RWH", true, LEASE1, 0);
+
+	/* Stat open */
+	ZERO_STRUCT(io);
+	io.in.desired_access = access_mask;
+	io.in.share_access = NTCREATEX_SHARE_ACCESS_MASK;
+	io.in.file_attributes = FILE_ATTRIBUTE_NORMAL;
+	io.in.create_disposition = NTCREATEX_DISP_OPEN;
+	io.in.fname = fname;
+	status = smb2_create(tree, mem_ctx, &io);
+	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+					"smb2_create failed\n");
+	h2 = io.out.file.handle;
+
+	if (expect_stat_open) {
+		CHECK_NO_BREAK(tctx);
+		if (!ret) {
+			goto done;
+		}
+	} else {
+		CHECK_VAL(lease_break_info.count, 1);
+		if (!ret) {
+			goto done;
+		}
+		/*
+		 * Don't bother checking the lease state of an additional open
+		 * below...
+		 */
+		goto done;
+	}
+
+	/* Open file with RWH lease. */
+	smb2_lease_create_share(&io, &ls, false, fname,
+				smb2_util_share_access("RWD"),
+				LEASE1,
+				smb2_util_lease_state("RWH"));
+	io.in.desired_access = SEC_FILE_WRITE_DATA;
+	status = smb2_create(tree, mem_ctx, &io);
+	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+					"smb2_create failed\n");
+	h3 = io.out.file.handle;
+	CHECK_LEASE(&io, "RWH", true, LEASE1, 0);
+
+done:
+	if (!smb2_util_handle_empty(h3)) {
+		smb2_util_close(tree, h3);
+	}
+	if (!smb2_util_handle_empty(h2)) {
+		smb2_util_close(tree, h2);
+	}
+	if (!smb2_util_handle_empty(h1)) {
+		smb2_util_close(tree, h1);
+	}
+	talloc_free(mem_ctx);
+	return ret;
+}
+
+static bool test_lease_statopen4(struct torture_context *tctx,
+				 struct smb2_tree *tree)
+{
+	const char *fname = "lease_statopen4.dat";
+	struct smb2_handle h1 = {{0}};
+	uint32_t caps;
+	size_t i;
+	NTSTATUS status;
+	bool ret = true;
+	struct {
+		uint32_t access_mask;
+		bool expect_stat_open;
+	} tests[] = {
+		{
+			.access_mask = FILE_READ_DATA,
+			.expect_stat_open = false,
+		},
+		{
+			.access_mask = FILE_WRITE_DATA,
+			.expect_stat_open = false,
+		},
+		{
+			.access_mask = FILE_READ_EA,
+			.expect_stat_open = false,
+		},
+		{
+			.access_mask = FILE_WRITE_EA,
+			.expect_stat_open = false,
+		},
+		{
+			.access_mask = FILE_EXECUTE,
+			.expect_stat_open = false,
+		},
+		{
+			.access_mask = FILE_READ_ATTRIBUTES,
+			.expect_stat_open = true,
+		},
+		{
+			.access_mask = FILE_WRITE_ATTRIBUTES,
+			.expect_stat_open = true,
+		},
+		{
+			.access_mask = DELETE_ACCESS,
+			.expect_stat_open = false,
+		},
+		{
+			.access_mask = READ_CONTROL_ACCESS,
+			.expect_stat_open = true,
+		},
+		{
+			.access_mask = WRITE_DAC_ACCESS,
+			.expect_stat_open = false,
+		},
+		{
+			.access_mask = WRITE_OWNER_ACCESS,
+			.expect_stat_open = false,
+		},
+		{
+			.access_mask = SYNCHRONIZE_ACCESS,
+			.expect_stat_open = true,
+		},
+	};
+
+	caps = smb2cli_conn_server_capabilities(tree->session->transport->conn);
+	if (!(caps & SMB2_CAP_LEASING)) {
+		torture_skip(tctx, "leases are not supported");
+	}
+
+	smb2_util_unlink(tree, fname);
+	tree->session->transport->lease.handler	= torture_lease_handler;
+	tree->session->transport->lease.private_data = tree;
+
+	status = torture_smb2_testfile(tree, fname, &h1);
+	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+					"smb2_create failed\n");
+	smb2_util_close(tree, h1);
+	ZERO_STRUCT(h1);
+
+	for (i = 0; i < ARRAY_SIZE(tests); i++) {
+		ZERO_STRUCT(lease_break_info);
+
+		ret = test_lease_statopen4_do(tctx,
+					      tree,
+					      tests[i].access_mask,
+					      tests[i].expect_stat_open);
+		if (ret == true) {
+			continue;
+		}
+		torture_result(tctx, TORTURE_FAIL,
+			       "test %zu: access_mask: %s, "
+			       "expect_stat_open: %s\n",
+			       i,
+			       get_sec_mask_str(tree, tests[i].access_mask),
+			       tests[i].expect_stat_open ? "yes" : "no");
+		goto done;
+	}
+
+done:
+	smb2_util_unlink(tree, fname);
+	return ret;
+}
+
 static void torture_oplock_break_callback(struct smb2_request *req)
 {
 	NTSTATUS status;
@@ -3538,6 +3722,148 @@ static bool test_lease_timeout(struct torture_context *tctx,
 	return ret;
 }
 
+static bool test_lease_rename_wait(struct torture_context *tctx,
+                               struct smb2_tree *tree)
+{
+	TALLOC_CTX *mem_ctx = talloc_new(tctx);
+	struct smb2_create io;
+	struct smb2_lease ls1;
+	struct smb2_lease ls2;
+	struct smb2_lease ls3;
+	struct smb2_handle h1 = {{0}};
+	struct smb2_handle h2 = {{0}};
+	struct smb2_handle h3 = {{0}};
+	union smb_setfileinfo sinfo;
+	NTSTATUS status;
+	const char *fname_src = "lease_rename_src.dat";
+	const char *fname_dst = "lease_rename_dst.dat";
+	bool ret = true;
+	struct smb2_lease_break_ack ack = {};
+	struct smb2_request *rename_req = NULL;
+	uint32_t caps;
+	unsigned int i;
+
+	caps = smb2cli_conn_server_capabilities(tree->session->transport->conn);
+	if (!(caps & SMB2_CAP_LEASING)) {
+		torture_skip(tctx, "leases are not supported");
+	}
+
+	smb2_util_unlink(tree, fname_src);
+	smb2_util_unlink(tree, fname_dst);
+
+	/* Short timeout for fails. */
+	tree->session->transport->options.request_timeout = 15;
+
+	/* Grab a RH lease. */
+	smb2_lease_create(&io,
+			&ls1,
+			false,
+			fname_src,
+			LEASE1,
+			smb2_util_lease_state("RH"));
+	status = smb2_create(tree, mem_ctx, &io);
+	CHECK_STATUS(status, NT_STATUS_OK);
+	CHECK_CREATED(&io, CREATED, FILE_ATTRIBUTE_ARCHIVE);
+	CHECK_LEASE(&io, "RH", true, LEASE1, 0);
+	h1 = io.out.file.handle;
+
+	/* Second open with a RH lease. */
+	smb2_lease_create(&io,
+			&ls2,
+			false,
+			fname_src,
+			LEASE2,
+			smb2_util_lease_state("RH"));
+	io.in.create_disposition = NTCREATEX_DISP_OPEN;
+	io.in.desired_access = GENERIC_READ_ACCESS;
+	status = smb2_create(tree, mem_ctx, &io);
+	CHECK_STATUS(status, NT_STATUS_OK);
+	CHECK_CREATED(&io, EXISTED, FILE_ATTRIBUTE_ARCHIVE);
+	CHECK_LEASE(&io, "RH", true, LEASE2, 0);
+	h2 = io.out.file.handle;
+
+	/*
+	 * Don't ack a lease break.
+	 */
+	tree->session->transport->lease.handler	= torture_lease_handler;
+	tree->session->transport->lease.private_data = tree;
+	torture_reset_lease_break_info(tctx, &lease_break_info);
+	lease_break_info.lease_skip_ack = true;
+
+	/* Break with a rename. */
+	ZERO_STRUCT(sinfo);
+	sinfo.rename_information.level = RAW_SFILEINFO_RENAME_INFORMATION;
+	sinfo.rename_information.in.file.handle = h1;
+	sinfo.rename_information.in.overwrite = true;
+	sinfo.rename_information.in.new_name = fname_dst;
+	rename_req = smb2_setinfo_file_send(tree, &sinfo);
+
+	torture_assert(tctx,
+			rename_req != NULL,
+			"smb2_setinfo_file_send");
+	torture_assert(tctx,
+			rename_req->state == SMB2_REQUEST_RECV,
+			"rename pending");
+
+	/* Try and open the destination with a RH lease. */
+	smb2_lease_create(&io,
+			&ls3,
+			false,
+			fname_dst,
+			LEASE3,
+			smb2_util_lease_state("RH"));
+	/* We want to open, not create. */
+	io.in.create_disposition = NTCREATEX_DISP_OPEN;
+	io.in.desired_access = GENERIC_READ_ACCESS;
+	status = smb2_create(tree, mem_ctx, &io);
+	CHECK_STATUS(status, NT_STATUS_OBJECT_NAME_NOT_FOUND);
+
+	/*
+	 * The smb2_create() I/O should have picked up the break request
+	 * caused by the pending rename.
+	 */
+
+	/* Copy the break request. */
+	ack.in.lease.lease_key =
+		lease_break_info.lease_break.current_lease.lease_key;
+	ack.in.lease.lease_state =
+		lease_break_info.lease_break.new_lease_state;
+
+	/*
+	 * Give the server 3 more chances to have renamed
+	 * the file. Better than doing a sleep.
+	 */
+	for (i = 0; i < 3; i++) {
+		status = smb2_create(tree, mem_ctx, &io);
+		CHECK_STATUS(status, NT_STATUS_OBJECT_NAME_NOT_FOUND);
+	}
+
+	/* Ack the break. The server is now free to rename. */
+	status = smb2_lease_break_ack(tree, &ack);
+	CHECK_STATUS(status, NT_STATUS_OK);
+
+	/* Get the rename reply. */
+	status = smb2_setinfo_recv(rename_req);
+	CHECK_STATUS(status, NT_STATUS_OK);
+
+	/* The target should now exist. */
+	status = smb2_create(tree, mem_ctx, &io);
+	CHECK_STATUS(status, NT_STATUS_OK);
+	h3 = io.out.file.handle;
+
+ done:
+	smb2_util_close(tree, h1);
+	smb2_util_close(tree, h2);
+	smb2_util_close(tree, h3);
+
+	smb2_util_unlink(tree, fname_src);
+	smb2_util_unlink(tree, fname_dst);
+
+	talloc_free(mem_ctx);
+
+	return ret;
+}
+
 static bool test_lease_v2_rename(struct torture_context *tctx,
 				 struct smb2_tree *tree)
 {
@@ -3980,6 +4306,7 @@ struct torture_suite *torture_smb2_lease_init(TALLOC_CTX *ctx)
 	torture_suite_add_1smb2_test(suite, "statopen", test_lease_statopen);
 	torture_suite_add_1smb2_test(suite, "statopen2", test_lease_statopen2);
 	torture_suite_add_1smb2_test(suite, "statopen3", test_lease_statopen3);
+	torture_suite_add_1smb2_test(suite, "statopen4", test_lease_statopen4);
 	torture_suite_add_1smb2_test(suite, "upgrade", test_lease_upgrade);
 	torture_suite_add_1smb2_test(suite, "upgrade2", test_lease_upgrade2);
 	torture_suite_add_1smb2_test(suite, "upgrade3", test_lease_upgrade3);
@@ -4007,6 +4334,9 @@ struct torture_suite *torture_smb2_lease_init(TALLOC_CTX *ctx)
 	torture_suite_add_1smb2_test(suite, "dynamic_share", test_lease_dynamic_share);
 	torture_suite_add_1smb2_test(suite, "timeout", test_lease_timeout);
 	torture_suite_add_1smb2_test(suite, "unlink", test_lease_unlink);
+	torture_suite_add_1smb2_test(suite, "rename_wait",
+				test_lease_rename_wait);
+
 
 	suite->description = talloc_strdup(suite, "SMB2-LEASE tests");
 

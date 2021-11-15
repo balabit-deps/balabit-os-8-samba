@@ -201,8 +201,11 @@ static bool test_DsCrackNamesMatrix(struct torture_context *tctx,
 		for (j = 0; j < ARRAY_SIZE(formats); j++) {
 			torture_comment(tctx, "Converting %s (format %d)"
 						" to %d gave %s\n",
-						n_from[i], formats[i],
-						formats[j], n_matrix[i][j]);
+					n_from[i] == NULL ? "NULL" : n_from[i],
+					formats[i], formats[j],
+					n_matrix[i][j] == NULL ?
+						"NULL" : n_matrix[i][j]);
+
 			if (n_matrix[i][j] == n_from[j]) {
 				
 			/* We don't have a from name for these yet (and we can't map to them to find it out) */
@@ -673,14 +676,14 @@ bool test_DsCrackNames(struct torture_context *tctx,
 				.format_offered	= DRSUAPI_DS_NAME_FORMAT_DISPLAY,
 				.format_desired	= DRSUAPI_DS_NAME_FORMAT_FQDN_1779,
 				.str = test_dc,
-				.comment = "DISLPAY NAME search for DC short name",
+				.comment = "DISPLAY NAME search for DC short name",
 				.status = DRSUAPI_DS_NAME_STATUS_NOT_FOUND
 			},
 			{
 				.format_offered	= DRSUAPI_DS_NAME_FORMAT_SERVICE_PRINCIPAL,
 				.format_desired	= DRSUAPI_DS_NAME_FORMAT_FQDN_1779,
 				.str = talloc_asprintf(mem_ctx, "krbtgt/%s", dns_domain),
-				.comment = "Looking for KRBTGT as a serivce principal",
+				.comment = "Looking for KRBTGT as a service principal",
 				.status = DRSUAPI_DS_NAME_STATUS_DOMAIN_ONLY,
 				.expected_dns = dns_domain
 			},
@@ -688,7 +691,7 @@ bool test_DsCrackNames(struct torture_context *tctx,
 				.format_offered	= DRSUAPI_DS_NAME_FORMAT_SERVICE_PRINCIPAL,
 				.format_desired	= DRSUAPI_DS_NAME_FORMAT_FQDN_1779,
 				.str = talloc_asprintf(mem_ctx, "bogus/%s", dns_domain),
-				.comment = "Looking for bogus serivce principal",
+				.comment = "Looking for bogus service principal",
 				.status = DRSUAPI_DS_NAME_STATUS_DOMAIN_ONLY,
 				.expected_dns = dns_domain
 			},
@@ -696,7 +699,7 @@ bool test_DsCrackNames(struct torture_context *tctx,
 				.format_offered	= DRSUAPI_DS_NAME_FORMAT_SERVICE_PRINCIPAL,
 				.format_desired	= DRSUAPI_DS_NAME_FORMAT_FQDN_1779,
 				.str = talloc_asprintf(mem_ctx, "bogus/%s.%s", test_dc, dns_domain),
-				.comment = "Looking for bogus serivce on test DC",
+				.comment = "Looking for bogus service on test DC",
 				.status = DRSUAPI_DS_NAME_STATUS_DOMAIN_ONLY,
 				.expected_dns = talloc_asprintf(mem_ctx, "%s.%s", test_dc, dns_domain)
 			},
@@ -709,7 +712,7 @@ bool test_DsCrackNames(struct torture_context *tctx,
 			{ 
 				.format_offered	= DRSUAPI_DS_NAME_FORMAT_SERVICE_PRINCIPAL,
 				.format_desired	= DRSUAPI_DS_NAME_FORMAT_FQDN_1779,
-				.comment = "Looking for the kadmin/changepw service as a serivce principal",
+				.comment = "Looking for the kadmin/changepw service as a service principal",
 				.str = talloc_asprintf(mem_ctx, "kadmin/changepw"),
 				.status = DRSUAPI_DS_NAME_STATUS_OK,
 				.expected_str = talloc_asprintf(mem_ctx, "CN=krbtgt,CN=Users,%s", realm_dn_str),
@@ -798,7 +801,7 @@ bool test_DsCrackNames(struct torture_context *tctx,
 				.format_offered	= DRSUAPI_DS_NAME_FORMAT_GUID,
 				.format_desired	= DRSUAPI_DS_NAME_FORMAT_FQDN_1779,
 				.comment = "BIND GUID (ie, not in the directory)",
-				.str = GUID_string2(mem_ctx, &priv->bind_guid),
+				.str = DRSUAPI_DS_BIND_GUID,
 				.status = DRSUAPI_DS_NAME_STATUS_NOT_FOUND
 			},
 			{
@@ -860,7 +863,7 @@ bool test_DsCrackNames(struct torture_context *tctx,
 			{
 				.format_offered	= DRSUAPI_DS_NAME_FORMAT_SID_OR_SID_HISTORY,
 				.format_desired	= DRSUAPI_DS_NAME_FORMAT_NT4_ACCOUNT,
-				.comment = "BUITIN SID -> NT4 account",
+				.comment = "BUILTIN SID -> NT4 account",
 				.str = SID_BUILTIN,
 				.status = DRSUAPI_DS_NAME_STATUS_NO_MAPPING,
 				.alternate_status = DRSUAPI_DS_NAME_STATUS_NOT_UNIQUE

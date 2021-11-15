@@ -43,6 +43,8 @@
 	 SECINFO_DACL | SECINFO_PROTECTED_DACL | SECINFO_UNPROTECTED_DACL | \
 	 SECINFO_SACL | SECINFO_PROTECTED_SACL | SECINFO_UNPROTECTED_SACL)
 
+static PyTypeObject *dom_sid_Type = NULL;
+
 static PyTypeObject *get_pytype(const char *module, const char *type)
 {
 	PyObject *mod;
@@ -682,7 +684,7 @@ static PyObject *py_cli_settimeout(struct py_cli_state *self, PyObject *args)
 
 	omsecs = cli_set_timeout(self->cli, nmsecs);
 
-	return PyInt_FromLong(omsecs);
+	return PyLong_FromLong(omsecs);
 }
 
 static PyObject *py_cli_create(struct py_cli_state *self, PyObject *args,
@@ -883,27 +885,15 @@ static NTSTATUS py_smb_filesize(struct py_cli_state *self, uint16_t fnum,
 				off_t *size)
 {
 	NTSTATUS status;
+	struct tevent_req *req = NULL;
 
-	if (self->is_smb1) {
-		uint8_t *rdata = NULL;
-		struct tevent_req *req = NULL;
-
-		req = cli_qfileinfo_send(NULL, self->ev, self->cli, fnum,
-					 SMB_QUERY_FILE_ALL_INFO, 68,
-					 CLI_BUFFER_SIZE);
-		if (!py_tevent_req_wait_exc(self, req)) {
-			return NT_STATUS_INTERNAL_ERROR;
-		}
-		status = cli_qfileinfo_recv(req, NULL, NULL, &rdata, NULL);
-		if (NT_STATUS_IS_OK(status)) {
-			*size = IVAL2_TO_SMB_BIG_UINT(rdata, 48);
-		}
-		TALLOC_FREE(req);
-		TALLOC_FREE(rdata);
-	} else {
-		status = cli_qfileinfo_basic(self->cli, fnum, NULL, size,
-					     NULL, NULL, NULL, NULL, NULL);
+	req = cli_qfileinfo_basic_send(NULL, self->ev, self->cli, fnum);
+	if (!py_tevent_req_wait_exc(self, req)) {
+		return NT_STATUS_INTERNAL_ERROR;
 	}
+	status = cli_qfileinfo_basic_recv(
+		req, NULL, size, NULL, NULL, NULL, NULL, NULL);
+	TALLOC_FREE(req);
 	return status;
 }
 
@@ -1137,7 +1127,7 @@ static NTSTATUS list_helper(const char *mntpoint, struct file_info *finfo,
 	 */
 	file = Py_BuildValue("{s:s,s:i,s:s,s:O,s:l}",
 			     "name", finfo->name,
-			     "attrib", (int)finfo->mode,
+			     "attrib", (int)finfo->attr,
 			     "short_name", finfo->short_name,
 			     "size", size,
 			     "mtime",
@@ -1257,21 +1247,16 @@ static PyObject *py_cli_list(struct py_cli_state *self,
 static NTSTATUS unlink_file(struct py_cli_state *self, const char *filename)
 {
 	NTSTATUS status;
-	uint16_t attrs = (FILE_ATTRIBUTE_SYSTEM | FILE_ATTRIBUTE_HIDDEN);
+	uint32_t attrs = (FILE_ATTRIBUTE_SYSTEM | FILE_ATTRIBUTE_HIDDEN);
+	struct tevent_req *req = NULL;
 
-	if (self->is_smb1) {
-		struct tevent_req *req = NULL;
-
-		req = cli_unlink_send(NULL, self->ev, self->cli, filename,
-				      attrs);
-		if (!py_tevent_req_wait_exc(self, req)) {
-			return NT_STATUS_INTERNAL_ERROR;
-		}
-		status = cli_unlink_recv(req);
-		TALLOC_FREE(req);
-	} else {
-		status = cli_unlink(self->cli, filename, attrs);
+	req = cli_unlink_send(
+		NULL, self->ev, self->cli, filename, attrs);
+	if (!py_tevent_req_wait_exc(self, req)) {
+		return NT_STATUS_INTERNAL_ERROR;
 	}
+	status = cli_unlink_recv(req);
+	TALLOC_FREE(req);
 
 	return status;
 }
@@ -1297,19 +1282,15 @@ static PyObject *py_smb_unlink(struct py_cli_state *self, PyObject *args)
 static NTSTATUS remove_dir(struct py_cli_state *self, const char *dirname)
 {
 	NTSTATUS status;
+	struct tevent_req *req = NULL;
 
-	if (self->is_smb1) {
-		struct tevent_req *req = NULL;
-
-		req = cli_rmdir_send(NULL, self->ev, self->cli, dirname);
-		if (!py_tevent_req_wait_exc(self, req)) {
-			return NT_STATUS_INTERNAL_ERROR;
-		}
-		status = cli_rmdir_recv(req);
-		TALLOC_FREE(req);
-	} else {
-		status = cli_rmdir(self->cli, dirname);
+	req = cli_rmdir_send(NULL, self->ev, self->cli, dirname);
+	if (!py_tevent_req_wait_exc(self, req)) {
+		return NT_STATUS_INTERNAL_ERROR;
 	}
+	status = cli_rmdir_recv(req);
+	TALLOC_FREE(req);
+
 	return status;
 }
 
@@ -1335,26 +1316,138 @@ static PyObject *py_smb_mkdir(struct py_cli_state *self, PyObject *args)
 {
 	NTSTATUS status;
 	const char *dirname = NULL;
+	struct tevent_req *req = NULL;
 
 	if (!PyArg_ParseTuple(args, "s:mkdir", &dirname)) {
 		return NULL;
 	}
 
-	if (self->is_smb1) {
-		struct tevent_req *req = NULL;
-
-		req = cli_mkdir_send(NULL, self->ev, self->cli, dirname);
-		if (!py_tevent_req_wait_exc(self, req)) {
-			return NULL;
-		}
-		status = cli_mkdir_recv(req);
-		TALLOC_FREE(req);
-	} else {
-		status = cli_mkdir(self->cli, dirname);
+	req = cli_mkdir_send(NULL, self->ev, self->cli, dirname);
+	if (!py_tevent_req_wait_exc(self, req)) {
+		return NULL;
 	}
+	status = cli_mkdir_recv(req);
+	TALLOC_FREE(req);
 	PyErr_NTSTATUS_IS_ERR_RAISE(status);
 
 	Py_RETURN_NONE;
+}
+
+/*
+ * Does a whoami call
+ */
+static PyObject *py_smb_posix_whoami(struct py_cli_state *self,
+				     PyObject *Py_UNUSED(ignored))
+{
+	TALLOC_CTX *frame = talloc_stackframe();
+	NTSTATUS status;
+	struct tevent_req *req = NULL;
+	uint64_t uid;
+	uint64_t gid;
+	uint32_t num_gids;
+	uint64_t *gids = NULL;
+	uint32_t num_sids;
+	struct dom_sid *sids = NULL;
+	bool guest;
+	PyObject *py_gids = NULL;
+	PyObject *py_sids = NULL;
+	PyObject *py_guest = NULL;
+	PyObject *py_ret = NULL;
+	Py_ssize_t i;
+
+	req = cli_posix_whoami_send(frame, self->ev, self->cli);
+	if (!py_tevent_req_wait_exc(self, req)) {
+		goto fail;
+	}
+	status = cli_posix_whoami_recv(req,
+				frame,
+				&uid,
+				&gid,
+				&num_gids,
+				&gids,
+				&num_sids,
+				&sids,
+				&guest);
+	if (!NT_STATUS_IS_OK(status)) {
+		PyErr_SetNTSTATUS(status);
+		goto fail;
+	}
+	if (num_gids > PY_SSIZE_T_MAX) {
+		PyErr_SetString(PyExc_OverflowError, "posix_whoami: Too many GIDs");
+		goto fail;
+	}
+	if (num_sids > PY_SSIZE_T_MAX) {
+		PyErr_SetString(PyExc_OverflowError, "posix_whoami: Too many SIDs");
+		goto fail;
+	}
+
+	py_gids = PyList_New(num_gids);
+	if (!py_gids) {
+		goto fail;
+	}
+	for (i = 0; i < num_gids; ++i) {
+		int ret;
+		PyObject *py_item = PyLong_FromUnsignedLongLong(gids[i]);
+		if (!py_item) {
+			goto fail2;
+		}
+
+		ret = PyList_SetItem(py_gids, i, py_item);
+		if (ret) {
+			goto fail2;
+		}
+	}
+	py_sids = PyList_New(num_sids);
+	if (!py_sids) {
+		goto fail2;
+	}
+	for (i = 0; i < num_sids; ++i) {
+		int ret;
+		struct dom_sid *sid;
+		PyObject *py_item;
+
+		sid = dom_sid_dup(frame, &sids[i]);
+		if (!sid) {
+			PyErr_NoMemory();
+			goto fail3;
+		}
+
+		py_item = pytalloc_steal(dom_sid_Type, sid);
+		if (!py_item) {
+			PyErr_NoMemory();
+			goto fail3;
+		}
+
+		ret = PyList_SetItem(py_sids, i, py_item);
+		if (ret) {
+			goto fail3;
+		}
+	}
+
+	py_guest = guest ? Py_True : Py_False;
+
+	py_ret = Py_BuildValue("KKNNO",
+			uid,
+			gid,
+			py_gids,
+			py_sids,
+			py_guest);
+	if (!py_ret) {
+		goto fail3;
+	}
+
+	TALLOC_FREE(frame);
+	return py_ret;
+
+fail3:
+	Py_CLEAR(py_sids);
+
+fail2:
+	Py_CLEAR(py_gids);
+
+fail:
+	TALLOC_FREE(frame);
+	return NULL;
 }
 
 /*
@@ -1363,19 +1456,14 @@ static PyObject *py_smb_mkdir(struct py_cli_state *self, PyObject *args)
 static bool check_dir_path(struct py_cli_state *self, const char *path)
 {
 	NTSTATUS status;
+	struct tevent_req *req = NULL;
 
-	if (self->is_smb1) {
-		struct tevent_req *req = NULL;
-
-		req = cli_chkpath_send(NULL, self->ev, self->cli, path);
-		if (!py_tevent_req_wait_exc(self, req)) {
-			return false;
-		}
-		status = cli_chkpath_recv(req);
-		TALLOC_FREE(req);
-	} else {
-		status = cli_chkpath(self->cli, path);
+	req = cli_chkpath_send(NULL, self->ev, self->cli, path);
+	if (!py_tevent_req_wait_exc(self, req)) {
+		return false;
 	}
+	status = cli_chkpath_recv(req);
+	TALLOC_FREE(req);
 
 	return NT_STATUS_IS_OK(status);
 }
@@ -1426,7 +1514,7 @@ static NTSTATUS delete_tree_callback(const char *mntpoint,
 		return NT_STATUS_NO_MEMORY;
 	}
 
-	if (finfo->mode & FILE_ATTRIBUTE_DIRECTORY) {
+	if (finfo->attr & FILE_ATTRIBUTE_DIRECTORY) {
 
 		/* recursively delete the sub-directory and its contents */
 		status = delete_dir_tree(state->self, filepath);
@@ -1558,7 +1646,7 @@ static PyObject *py_smb_setacl(struct py_cli_state *self, PyObject *args)
 	if (!sd) {
 		PyErr_Format(PyExc_TypeError,
 			"Expected dcerpc.security.descriptor as argument, got %s",
-			talloc_get_name(pytalloc_get_ptr(py_sd)));
+			pytalloc_get_name(py_sd));
 		return NULL;
 	}
 
@@ -1618,6 +1706,8 @@ static PyMethodDef py_cli_state_methods[] = {
 	  "unlink(path) -> None\n\n \t\tDelete a file." },
 	{ "mkdir", (PyCFunction)py_smb_mkdir, METH_VARARGS,
 	  "mkdir(path) -> None\n\n \t\tCreate a directory." },
+	{ "posix_whoami", (PyCFunction)py_smb_posix_whoami, METH_NOARGS,
+	"posix_whoami() -> (uid, gid, gids, sids, guest)" },
 	{ "rmdir", (PyCFunction)py_smb_rmdir, METH_VARARGS,
 	  "rmdir(path) -> None\n\n \t\tDelete a directory." },
 	{ "chkpath", (PyCFunction)py_smb_chkpath, METH_VARARGS,
@@ -1654,7 +1744,7 @@ static PyTypeObject py_cli_state_type = {
 };
 
 static PyMethodDef py_libsmb_methods[] = {
-	{ NULL },
+	{0},
 };
 
 void initlibsmb_samba_internal(void);
@@ -1670,20 +1760,35 @@ static struct PyModuleDef moduledef = {
 MODULE_INIT_FUNC(libsmb_samba_internal)
 {
 	PyObject *m = NULL;
+	PyObject *mod = NULL;
 
 	talloc_stackframe();
+
+	if (PyType_Ready(&py_cli_state_type) < 0) {
+		return NULL;
+	}
 
 	m = PyModule_Create(&moduledef);
 	if (m == NULL) {
 		return m;
 	}
-	if (PyType_Ready(&py_cli_state_type) < 0) {
+
+	/* Import dom_sid type from dcerpc.security */
+	mod = PyImport_ImportModule("samba.dcerpc.security");
+	if (mod == NULL) {
 		return NULL;
 	}
+
+	dom_sid_Type = (PyTypeObject *)PyObject_GetAttrString(mod, "dom_sid");
+	if (dom_sid_Type == NULL) {
+		Py_DECREF(mod);
+		return NULL;
+	}
+
 	Py_INCREF(&py_cli_state_type);
 	PyModule_AddObject(m, "Conn", (PyObject *)&py_cli_state_type);
 
-#define ADD_FLAGS(val)	PyModule_AddObject(m, #val, PyInt_FromLong(val))
+#define ADD_FLAGS(val)	PyModule_AddObject(m, #val, PyLong_FromLong(val))
 
 	ADD_FLAGS(FILE_ATTRIBUTE_READONLY);
 	ADD_FLAGS(FILE_ATTRIBUTE_HIDDEN);

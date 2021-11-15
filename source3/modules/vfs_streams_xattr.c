@@ -219,6 +219,7 @@ static int streams_xattr_fstat(vfs_handle_struct *handle, files_struct *fsp,
 					io->base,
 					NULL,
 					NULL,
+					fsp->fsp_name->twrp,
 					fsp->fsp_name->flags);
 	if (smb_fname_base == NULL) {
 		errno = ENOMEM;
@@ -264,19 +265,14 @@ static int streams_xattr_stat(vfs_handle_struct *handle,
 	int result = -1;
 	char *xattr_name = NULL;
 
-	if (!is_ntfs_stream_smb_fname(smb_fname)) {
+	if (!is_named_stream(smb_fname)) {
 		return SMB_VFS_NEXT_STAT(handle, smb_fname);
 	}
 
 	/* Note if lp_posix_paths() is true, we can never
-	 * get here as is_ntfs_stream_smb_fname() is
+	 * get here as is_named_stream() is
 	 * always false. So we never need worry about
 	 * not following links here. */
-
-	/* If the default stream is requested, just stat the base file. */
-	if (is_ntfs_default_stream_smb_fname(smb_fname)) {
-		return streams_xattr_stat_base(handle, smb_fname, true);
-	}
 
 	/* Populate the stat struct with info from the base file. */
 	if (streams_xattr_stat_base(handle, smb_fname, true) == -1) {
@@ -322,13 +318,8 @@ static int streams_xattr_lstat(vfs_handle_struct *handle,
 	int result = -1;
 	char *xattr_name = NULL;
 
-	if (!is_ntfs_stream_smb_fname(smb_fname)) {
+	if (!is_named_stream(smb_fname)) {
 		return SMB_VFS_NEXT_LSTAT(handle, smb_fname);
-	}
-
-	/* If the default stream is requested, just stat the base file. */
-	if (is_ntfs_default_stream_smb_fname(smb_fname)) {
-		return streams_xattr_stat_base(handle, smb_fname, false);
 	}
 
 	/* Populate the stat struct with info from the base file. */
@@ -368,9 +359,12 @@ static int streams_xattr_lstat(vfs_handle_struct *handle,
 	return result;
 }
 
-static int streams_xattr_open(vfs_handle_struct *handle,
-			      struct smb_filename *smb_fname,
-			      files_struct *fsp, int flags, mode_t mode)
+static int streams_xattr_openat(struct vfs_handle_struct *handle,
+				const struct files_struct *dirfsp,
+				const struct smb_filename *smb_fname,
+				files_struct *fsp,
+				int flags,
+				mode_t mode)
 {
 	NTSTATUS status;
 	struct streams_xattr_config *config = NULL;
@@ -382,28 +376,24 @@ static int streams_xattr_open(vfs_handle_struct *handle,
 	bool set_empty_xattr = false;
 	int ret;
 
+	/*
+	 * For now assert this, so the below SMB_VFS_SETXATTR() works.
+	 */
+	SMB_ASSERT(dirfsp->fh->fd == AT_FDCWD);
+
 	SMB_VFS_HANDLE_GET_DATA(handle, config, struct streams_xattr_config,
 				return -1);
 
 	DEBUG(10, ("streams_xattr_open called for %s with flags 0x%x\n",
 		   smb_fname_str_dbg(smb_fname), flags));
 
-	if (!is_ntfs_stream_smb_fname(smb_fname)) {
-		return SMB_VFS_NEXT_OPEN(handle, smb_fname, fsp, flags, mode);
-	}
-
-	/* If the default stream is requested, just open the base file. */
-	if (is_ntfs_default_stream_smb_fname(smb_fname)) {
-		char *tmp_stream_name;
-
-		tmp_stream_name = smb_fname->stream_name;
-		smb_fname->stream_name = NULL;
-
-		ret = SMB_VFS_NEXT_OPEN(handle, smb_fname, fsp, flags, mode);
-
-		smb_fname->stream_name = tmp_stream_name;
-
-		return ret;
+	if (!is_named_stream(smb_fname)) {
+		return SMB_VFS_NEXT_OPENAT(handle,
+					   dirfsp,
+					   smb_fname,
+					   fsp,
+					   flags,
+					   mode);
 	}
 
 	status = streams_xattr_get_name(handle, talloc_tos(),
@@ -514,7 +504,7 @@ static int streams_xattr_open(vfs_handle_struct *handle,
 
  fail:
 	if (fakefd >= 0) {
-		close(fakefd);
+		vfs_fake_fd_close(fakefd);
 		fakefd = -1;
 	}
 
@@ -532,45 +522,30 @@ static int streams_xattr_close(vfs_handle_struct *handle,
 	DBG_DEBUG("streams_xattr_close called [%s] fd [%d]\n",
 			smb_fname_str_dbg(fsp->fsp_name), fd);
 
-	if (!is_ntfs_stream_smb_fname(fsp->fsp_name)) {
+	if (!is_named_stream(fsp->fsp_name)) {
 		return SMB_VFS_NEXT_CLOSE(handle, fsp);
 	}
 
-	if (is_ntfs_default_stream_smb_fname(fsp->fsp_name)) {
-		return SMB_VFS_NEXT_CLOSE(handle, fsp);
-	}
-
-	ret = close(fd);
+	ret = vfs_fake_fd_close(fd);
 	fsp->fh->fd = -1;
 
 	return ret;
 }
 
-static int streams_xattr_unlink(vfs_handle_struct *handle,
-				const struct smb_filename *smb_fname)
+static int streams_xattr_unlink_internal(vfs_handle_struct *handle,
+			struct files_struct *dirfsp,
+			const struct smb_filename *smb_fname,
+			int flags)
 {
 	NTSTATUS status;
 	int ret = -1;
 	char *xattr_name = NULL;
 
-	if (!is_ntfs_stream_smb_fname(smb_fname)) {
-		return SMB_VFS_NEXT_UNLINK(handle, smb_fname);
-	}
-
-	/* If the default stream is requested, just open the base file. */
-	if (is_ntfs_default_stream_smb_fname(smb_fname)) {
-		struct smb_filename *smb_fname_base = NULL;
-
-		smb_fname_base = cp_smb_filename(talloc_tos(), smb_fname);
-		if (smb_fname_base == NULL) {
-			errno = ENOMEM;
-			return -1;
-		}
-
-		ret = SMB_VFS_NEXT_UNLINK(handle, smb_fname_base);
-
-		TALLOC_FREE(smb_fname_base);
-		return ret;
+	if (!is_named_stream(smb_fname)) {
+		return SMB_VFS_NEXT_UNLINKAT(handle,
+					dirfsp,
+					smb_fname,
+					flags);
 	}
 
 	status = streams_xattr_get_name(handle, talloc_tos(),
@@ -594,8 +569,30 @@ static int streams_xattr_unlink(vfs_handle_struct *handle,
 	return ret;
 }
 
-static int streams_xattr_rename(vfs_handle_struct *handle,
+static int streams_xattr_unlinkat(vfs_handle_struct *handle,
+			struct files_struct *dirfsp,
+			const struct smb_filename *smb_fname,
+			int flags)
+{
+	int ret;
+	if (flags & AT_REMOVEDIR) {
+		ret = SMB_VFS_NEXT_UNLINKAT(handle,
+				dirfsp,
+				smb_fname,
+				flags);
+	} else {
+		ret = streams_xattr_unlink_internal(handle,
+				dirfsp,
+				smb_fname,
+				flags);
+	}
+	return ret;
+}
+
+static int streams_xattr_renameat(vfs_handle_struct *handle,
+				files_struct *srcfsp,
 				const struct smb_filename *smb_fname_src,
+				files_struct *dstfsp,
 				const struct smb_filename *smb_fname_dst)
 {
 	NTSTATUS status;
@@ -611,8 +608,11 @@ static int streams_xattr_rename(vfs_handle_struct *handle,
 	dst_is_stream = is_ntfs_stream_smb_fname(smb_fname_dst);
 
 	if (!src_is_stream && !dst_is_stream) {
-		return SMB_VFS_NEXT_RENAME(handle, smb_fname_src,
-					   smb_fname_dst);
+		return SMB_VFS_NEXT_RENAMEAT(handle,
+					srcfsp,
+					smb_fname_src,
+					dstfsp,
+					smb_fname_dst);
 	}
 
 	/* For now don't allow renames from or to the default stream. */
@@ -953,6 +953,7 @@ static ssize_t streams_xattr_pwrite(vfs_handle_struct *handle,
 					sio->base,
 					NULL,
 					NULL,
+					fsp->fsp_name->twrp,
 					fsp->fsp_name->flags);
 	if (smb_fname_base == NULL) {
 		errno = ENOMEM;
@@ -1023,6 +1024,7 @@ static ssize_t streams_xattr_pread(vfs_handle_struct *handle,
 					sio->base,
 					NULL,
 					NULL,
+					fsp->fsp_name->twrp,
 					fsp->fsp_name->flags);
 	if (smb_fname_base == NULL) {
 		errno = ENOMEM;
@@ -1240,6 +1242,7 @@ static int streams_xattr_ftruncate(struct vfs_handle_struct *handle,
 					sio->base,
 					NULL,
 					NULL,
+					fsp->fsp_name->twrp,
 					fsp->fsp_name->flags);
 	if (smb_fname_base == NULL) {
 		errno = ENOMEM;
@@ -1467,8 +1470,12 @@ static NTSTATUS streams_xattr_fget_nt_acl(vfs_handle_struct *handle,
 						mem_ctx, ppdesc);
 	}
 
-	return SMB_VFS_NEXT_GET_NT_ACL(handle, fsp->base_fsp->fsp_name,
-				       security_info, mem_ctx, ppdesc);
+	return SMB_VFS_NEXT_GET_NT_ACL_AT(handle,
+					handle->conn->cwd_fsp,
+					fsp->base_fsp->fsp_name,
+					security_info,
+					mem_ctx,
+					ppdesc);
 }
 
 static NTSTATUS streams_xattr_fset_nt_acl(vfs_handle_struct *handle,
@@ -1599,7 +1606,7 @@ static bool streams_xattr_getlock(vfs_handle_struct *handle,
 
 static int streams_xattr_kernel_flock(vfs_handle_struct *handle,
 				      files_struct *fsp,
-				      uint32_t share_mode,
+				      uint32_t share_access,
 				      uint32_t access_mask)
 {
 	struct stream_io *sio =
@@ -1607,7 +1614,7 @@ static int streams_xattr_kernel_flock(vfs_handle_struct *handle,
 
 	if (sio == NULL) {
 		return SMB_VFS_NEXT_KERNEL_FLOCK(handle, fsp,
-						 share_mode, access_mask);
+						 share_access, access_mask);
 	}
 
 	return 0;
@@ -1644,7 +1651,7 @@ static bool streams_xattr_strict_lock_check(struct vfs_handle_struct *handle,
 static struct vfs_fn_pointers vfs_streams_xattr_fns = {
 	.fs_capabilities_fn = streams_xattr_fs_capabilities,
 	.connect_fn = streams_xattr_connect,
-	.open_fn = streams_xattr_open,
+	.openat_fn = streams_xattr_openat,
 	.close_fn = streams_xattr_close,
 	.stat_fn = streams_xattr_stat,
 	.fstat_fn = streams_xattr_fstat,
@@ -1655,8 +1662,8 @@ static struct vfs_fn_pointers vfs_streams_xattr_fns = {
 	.pread_recv_fn = streams_xattr_pread_recv,
 	.pwrite_send_fn = streams_xattr_pwrite_send,
 	.pwrite_recv_fn = streams_xattr_pwrite_recv,
-	.unlink_fn = streams_xattr_unlink,
-	.rename_fn = streams_xattr_rename,
+	.unlinkat_fn = streams_xattr_unlinkat,
+	.renameat_fn = streams_xattr_renameat,
 	.ftruncate_fn = streams_xattr_ftruncate,
 	.fallocate_fn = streams_xattr_fallocate,
 	.streaminfo_fn = streams_xattr_streaminfo,

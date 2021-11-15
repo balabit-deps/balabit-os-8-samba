@@ -25,18 +25,23 @@
 #include "printing/queue_process.h"
 #include "printing/pcap.h"
 #include "printing/load.h"
+#include "printing/spoolssd.h"
 #include "ntdomain.h"
-#include "librpc/gen_ndr/srv_winreg.h"
-#include "librpc/gen_ndr/srv_spoolss.h"
+#include "librpc/gen_ndr/ndr_winreg_scompat.h"
+#include "librpc/gen_ndr/ndr_spoolss_scompat.h"
 #include "rpc_server/rpc_server.h"
+#include "rpc_server/rpc_service_setup.h"
 #include "rpc_server/rpc_ep_register.h"
 #include "rpc_server/rpc_config.h"
 #include "rpc_server/spoolss/srv_spoolss_nt.h"
 #include "librpc/rpc/dcerpc_ep.h"
+#include "librpc/rpc/dcesrv_core.h"
 #include "lib/server_prefork.h"
 #include "lib/server_prefork_util.h"
 
-#define SPOOLSS_PIPE_NAME "spoolss"
+#undef DBGC_CLASS
+#define DBGC_CLASS DBGC_RPC_SRV
+
 #define DAEMON_NAME "spoolssd"
 
 static struct server_id parent_id;
@@ -53,12 +58,11 @@ static struct pf_daemon_config default_pf_spoolss_cfg = {
 };
 static struct pf_daemon_config pf_spoolss_cfg = { 0 };
 
-pid_t start_spoolssd(struct tevent_context *ev_ctx,
-		     struct messaging_context *msg_ctx);
-
 static void spoolss_reopen_logs(int child_id)
 {
-	char *lfile = lp_logfile(talloc_tos());
+	const struct loadparm_substitution *lp_sub =
+		loadparm_s3_global_substitution();
+	char *lfile = lp_logfile(talloc_tos(), lp_sub);
 	char *ext;
 	int rc;
 
@@ -80,11 +84,11 @@ static void spoolss_reopen_logs(int child_id)
 		if (strstr(lfile, ext) == NULL) {
 			if (child_id) {
 				rc = asprintf(&lfile, "%s.%d",
-					      lp_logfile(talloc_tos()),
+					      lp_logfile(talloc_tos(), lp_sub),
 					      child_id);
 			} else {
 				rc = asprintf(&lfile, "%s.%s",
-					      lp_logfile(talloc_tos()),
+					      lp_logfile(talloc_tos(), lp_sub),
 					      ext);
 			}
 		}
@@ -188,21 +192,6 @@ static void spoolss_setup_sig_hup_handler(struct tevent_context *ev_ctx,
 	}
 }
 
-static bool spoolss_init_cb(void *ptr)
-{
-	struct messaging_context *msg_ctx = talloc_get_type_abort(
-		ptr, struct messaging_context);
-
-	return nt_printing_tdb_migrate(msg_ctx);
-}
-
-static bool spoolss_shutdown_cb(void *ptr)
-{
-	srv_spoolss_cleanup();
-
-	return true;
-}
-
 /* Children */
 
 static void spoolss_chld_sig_hup_handler(struct tevent_context *ev,
@@ -257,7 +246,6 @@ static bool spoolss_child_init(struct tevent_context *ev_ctx,
 			       int child_id, struct pf_worker_data *pf)
 {
 	NTSTATUS status;
-	struct rpc_srv_callbacks spoolss_cb;
 	struct messaging_context *msg_ctx = global_messaging_context();
 	bool ok;
 
@@ -290,34 +278,16 @@ static bool spoolss_child_init(struct tevent_context *ev_ctx,
 	 * a message as soon as the bq process completes the reload. */
 	load_printers();
 
-	/* try to reinit rpc queues */
-	spoolss_cb.init = spoolss_init_cb;
-	spoolss_cb.shutdown = spoolss_shutdown_cb;
-	spoolss_cb.private_data = msg_ctx;
-
-	status = rpc_winreg_init(NULL);
-	if (!NT_STATUS_IS_OK(status)) {
-		DEBUG(0, ("Failed to register winreg rpc interface! (%s)\n",
-			  nt_errstr(status)));
-		return false;
-	}
-
-	status = rpc_spoolss_init(&spoolss_cb);
-	if (!NT_STATUS_IS_OK(status)) {
-		DEBUG(0, ("Failed to register spoolss rpc interface! (%s)\n",
-			  nt_errstr(status)));
-		return false;
-	}
-
 	return true;
 }
 
 struct spoolss_children_data {
 	struct tevent_context *ev_ctx;
 	struct messaging_context *msg_ctx;
+	struct dcesrv_context *dce_ctx;
 	struct pf_worker_data *pf;
 	int listen_fd_size;
-	int *listen_fds;
+	struct pf_listen_fd *listen_fds;
 };
 
 static void spoolss_next_client(void *pvt);
@@ -327,12 +297,15 @@ static int spoolss_children_main(struct tevent_context *ev_ctx,
 				 struct pf_worker_data *pf,
 				 int child_id,
 				 int listen_fd_size,
-				 int *listen_fds,
+				 struct pf_listen_fd *listen_fds,
 				 void *private_data)
 {
 	struct spoolss_children_data *data;
 	bool ok;
 	int ret = 0;
+	struct dcesrv_context *dce_ctx = NULL;
+
+	dce_ctx = talloc_get_type_abort(private_data, struct dcesrv_context);
 
 	ok = spoolss_child_init(ev_ctx, child_id, pf);
 	if (!ok) {
@@ -346,6 +319,7 @@ static int spoolss_children_main(struct tevent_context *ev_ctx,
 	data->pf = pf;
 	data->ev_ctx = ev_ctx;
 	data->msg_ctx = msg_ctx;
+	data->dce_ctx = dce_ctx;
 	data->listen_fd_size = listen_fd_size;
 	data->listen_fds = listen_fds;
 
@@ -365,7 +339,8 @@ static int spoolss_children_main(struct tevent_context *ev_ctx,
 	return ret;
 }
 
-static void spoolss_client_terminated(void *pvt)
+static void spoolss_client_terminated(struct dcesrv_connection *conn,
+				      void *pvt)
 {
 	struct spoolss_children_data *data;
 
@@ -378,8 +353,6 @@ static void spoolss_client_terminated(void *pvt)
 
 struct spoolss_new_client {
 	struct spoolss_children_data *data;
-	struct tsocket_address *srv_addr;
-	struct tsocket_address *cli_addr;
 };
 
 static void spoolss_handle_client(struct tevent_req *req);
@@ -423,12 +396,16 @@ static void spoolss_handle_client(struct tevent_req *req)
 	const DATA_BLOB ping = data_blob_null;
 	int ret;
 	int sd;
+	struct tsocket_address *srv_addr = NULL;
+	struct tsocket_address *cli_addr = NULL;
+	void *listen_fd_data = NULL;
+	struct dcesrv_endpoint *ep = NULL;
 
 	client = tevent_req_callback_data(req, struct spoolss_new_client);
 	data = client->data;
 
-	ret = prefork_listen_recv(req, client, &sd,
-				  &client->srv_addr, &client->cli_addr);
+	ret = prefork_listen_recv(req, data, &sd, &listen_fd_data,
+				  &srv_addr, &cli_addr);
 
 	/* this will free the request too */
 	talloc_free(client);
@@ -438,6 +415,8 @@ static void spoolss_handle_client(struct tevent_req *req)
 		return;
 	}
 
+	ep = talloc_get_type_abort(listen_fd_data, struct dcesrv_endpoint);
+
 	/* Warn parent that our status changed */
 	messaging_send(data->msg_ctx, parent_id,
 			MSG_PREFORK_CHILD_EVENT, &ping);
@@ -445,9 +424,15 @@ static void spoolss_handle_client(struct tevent_req *req)
 	DEBUG(2, ("Spoolss preforked child %d got client connection!\n",
 		  (int)(data->pf->pid)));
 
-	named_pipe_accept_function(data->ev_ctx, data->msg_ctx,
-				   SPOOLSS_PIPE_NAME, sd,
-				   spoolss_client_terminated, data);
+	dcerpc_ncacn_accept(data->ev_ctx,
+			    data->msg_ctx,
+			    data->dce_ctx,
+			    ep,
+			    cli_addr,
+			    srv_addr,
+			    sd,
+			    spoolss_client_terminated,
+			    data);
 }
 
 /* ==== Main Process Functions ==== */
@@ -573,14 +558,16 @@ static void print_queue_forward(struct messaging_context *msg,
 
 static char *get_bq_logfile(void)
 {
-	char *lfile = lp_logfile(talloc_tos());
+	const struct loadparm_substitution *lp_sub =
+		loadparm_s3_global_substitution();
+	char *lfile = lp_logfile(talloc_tos(), lp_sub);
 	int rc;
 
 	if (lfile == NULL || lfile[0] == '\0') {
 		rc = asprintf(&lfile, "%s/log.%s.bq",
 					get_dyn_LOGFILEBASE(), DAEMON_NAME);
 	} else {
-		rc = asprintf(&lfile, "%s.bq", lp_logfile(talloc_tos()));
+		rc = asprintf(&lfile, "%s.bq", lp_logfile(talloc_tos(), lp_sub));
 	}
 	if (rc == -1) {
 		lfile = NULL;
@@ -588,18 +575,91 @@ static char *get_bq_logfile(void)
 	return lfile;
 }
 
-pid_t start_spoolssd(struct tevent_context *ev_ctx,
-		    struct messaging_context *msg_ctx)
+static NTSTATUS spoolssd_create_sockets(struct tevent_context *ev_ctx,
+		struct messaging_context *msg_ctx,
+		struct dcesrv_context *dce_ctx,
+		struct pf_listen_fd *listen_fd,
+		int *listen_fd_size)
 {
+	NTSTATUS status;
+	int fd = -1;
+	int rc;
 	enum rpc_service_mode_e epm_mode = rpc_epmapper_mode();
-	struct rpc_srv_callbacks spoolss_cb;
-	struct dcerpc_binding_vector *v;
-	TALLOC_CTX *mem_ctx;
+	uint32_t i;
+	struct dcesrv_endpoint *e = NULL;
+
+	DBG_INFO("Initializing DCE/RPC connection endpoints\n");
+
+	for (e = dce_ctx->endpoint_list; e; e = e->next) {
+		status = dcesrv_create_endpoint_sockets(ev_ctx,
+							msg_ctx,
+							dce_ctx,
+							e,
+							listen_fd,
+							listen_fd_size);
+		if (!NT_STATUS_IS_OK(status)) {
+			char *ep_string = dcerpc_binding_string(
+					dce_ctx, e->ep_description);
+			DBG_ERR("Failed to create endpoint '%s': %s\n",
+				ep_string, nt_errstr(status));
+			TALLOC_FREE(ep_string);
+			goto done;
+		}
+	}
+
+	for (i = 0; i < *listen_fd_size; i++) {
+		rc = listen(listen_fd[i].fd, pf_spoolss_cfg.max_allowed_clients);
+		if (rc == -1) {
+			char *ep_string = dcerpc_binding_string(
+					dce_ctx, e->ep_description);
+			DBG_ERR("Failed to listen on endpoint '%s': %s\n",
+				ep_string, strerror(errno));
+			status = map_nt_error_from_unix(errno);
+			TALLOC_FREE(ep_string);
+			goto done;
+		}
+	}
+
+	if (epm_mode != RPC_SERVICE_MODE_DISABLED &&
+	    (lp_parm_bool(-1, "rpc_server", "register_embedded_np", false))) {
+		for (e = dce_ctx->endpoint_list; e; e = e->next) {
+			struct dcesrv_if_list *ifl = NULL;
+			for (ifl = e->interface_list; ifl; ifl = ifl->next) {
+				status = rpc_ep_register(ev_ctx,
+							 msg_ctx,
+							 dce_ctx,
+							 ifl->iface);
+				if (!NT_STATUS_IS_OK(status)) {
+					DBG_ERR("Failed to register interface"
+						" in endpoint mapper: %s\n",
+						nt_errstr(status));
+					goto done;
+				}
+			}
+		}
+	}
+
+	status = NT_STATUS_OK;
+done:
+	if (fd != -1) {
+		close(fd);
+	}
+
+	return status;
+}
+
+pid_t start_spoolssd(struct tevent_context *ev_ctx,
+		     struct messaging_context *msg_ctx,
+		     struct dcesrv_context *dce_ctx)
+{
 	pid_t pid;
 	NTSTATUS status;
-	int listen_fd;
+	struct pf_listen_fd listen_fds[1];
+	int listen_fds_size = 0;
 	int ret;
 	bool ok;
+	const struct dcesrv_endpoint_server *ep_server = NULL;
+	const char *ep_servers[] = { "winreg", "spoolss", NULL };
 
 	DEBUG(1, ("Forking SPOOLSS Daemon\n"));
 
@@ -616,6 +676,7 @@ pid_t start_spoolssd(struct tevent_context *ev_ctx,
 	if (pid == -1) {
 		DEBUG(0, ("Failed to fork SPOOLSS [%s]\n",
 			   strerror(errno)));
+		exit(1);
 	}
 
 	/* parent or error */
@@ -655,27 +716,74 @@ pid_t start_spoolssd(struct tevent_context *ev_ctx,
 		background_lpq_updater_pid = pid;
 	}
 
-	/* the listening fd must be created before the children are actually
-	 * forked out. */
-	listen_fd = create_named_pipe_socket(SPOOLSS_PIPE_NAME);
-	if (listen_fd == -1) {
+	DBG_INFO("Registering DCE/RPC endpoint servers\n");
+
+	ep_server = winreg_get_ep_server();
+	if (ep_server == NULL) {
+		DBG_ERR("Failed to get 'winreg' endpoint server\n");
 		exit(1);
 	}
 
-	ret = listen(listen_fd, pf_spoolss_cfg.max_allowed_clients);
-	if (ret == -1) {
-		DEBUG(0, ("Failed to listen on spoolss pipe - %s\n",
-			  strerror(errno)));
+	status = dcerpc_register_ep_server(ep_server);
+	if (!NT_STATUS_IS_OK(status) &&
+	    !NT_STATUS_EQUAL(status, NT_STATUS_OBJECT_NAME_COLLISION)) {
+		DBG_ERR("Failed to register 'winreg' endpoint server: %s\n",
+			nt_errstr(status));
+		exit(1);
+	}
+
+	ep_server = spoolss_get_ep_server();
+	if (ep_server == NULL) {
+		DBG_ERR("Failed to get 'spoolss' endpoint server\n");
+		exit(1);
+	}
+
+	status = dcerpc_register_ep_server(ep_server);
+	if (!NT_STATUS_IS_OK(status)) {
+		DBG_ERR("Failed to register 'spoolss' endpoint server: %s\n",
+			nt_errstr(status));
+		exit(1);
+	}
+
+	DBG_INFO("Reinitializing DCE/RPC server context\n");
+
+	status = dcesrv_reinit_context(dce_ctx);
+	if (!NT_STATUS_IS_OK(status)) {
+		DBG_ERR("Failed to reinit DCE/RPC context: %s\n",
+			nt_errstr(status));
+		exit(1);
+	}
+
+	DBG_INFO("Initializing DCE/RPC registered endpoint servers\n");
+
+	/* Init ep servers */
+	status = dcesrv_init_ep_servers(dce_ctx, ep_servers);
+	if (!NT_STATUS_IS_OK(status)) {
+		DBG_ERR("Failed to init DCE/RPC endpoint server: %s\n",
+			nt_errstr(status));
+		exit(1);
+	}
+
+	/* the listening fd must be created before the children are actually
+	 * forked out. */
+	status = spoolssd_create_sockets(ev_ctx,
+					 msg_ctx,
+					 dce_ctx,
+					 listen_fds,
+					 &listen_fds_size);
+	if (!NT_STATUS_IS_OK(status)) {
+		DBG_ERR("Failed to create sockets: %s\n",
+			nt_errstr(status));
 		exit(1);
 	}
 
 	/* start children before any more initialization is done */
 	ok = prefork_create_pool(ev_ctx, /* mem_ctx */
 				 ev_ctx, msg_ctx,
-				 1, &listen_fd,
+				 listen_fds_size, listen_fds,
 				 pf_spoolss_cfg.min_children,
 				 pf_spoolss_cfg.max_children,
-				 &spoolss_children_main, NULL,
+				 &spoolss_children_main, dce_ctx,
 				 &spoolss_pool);
 	if (!ok) {
 		exit(1);
@@ -698,60 +806,6 @@ pid_t start_spoolssd(struct tevent_context *ev_ctx,
 	 * client enumeration anyway.
 	 */
 	load_printers();
-
-	mem_ctx = talloc_new(NULL);
-	if (mem_ctx == NULL) {
-		exit(1);
-	}
-
-	/*
-	 * Initialize spoolss with an init function to convert printers first.
-	 * static_init_rpc will try to initialize the spoolss server too but you
-	 * can't register it twice.
-	 */
-	spoolss_cb.init = spoolss_init_cb;
-	spoolss_cb.shutdown = spoolss_shutdown_cb;
-	spoolss_cb.private_data = msg_ctx;
-
-	status = rpc_winreg_init(NULL);
-	if (!NT_STATUS_IS_OK(status)) {
-		DEBUG(0, ("Failed to register winreg rpc interface! (%s)\n",
-			  nt_errstr(status)));
-		exit(1);
-	}
-
-	status = rpc_spoolss_init(&spoolss_cb);
-	if (!NT_STATUS_IS_OK(status)) {
-		DEBUG(0, ("Failed to register spoolss rpc interface! (%s)\n",
-			  nt_errstr(status)));
-		exit(1);
-	}
-
-	if (epm_mode != RPC_SERVICE_MODE_DISABLED &&
-	    (lp_parm_bool(-1, "rpc_server", "register_embedded_np", false))) {
-		status = dcerpc_binding_vector_new(mem_ctx, &v);
-		if (!NT_STATUS_IS_OK(status)) {
-			DEBUG(0, ("Failed to create binding vector (%s)\n",
-				  nt_errstr(status)));
-			exit(1);
-		}
-
-		status = dcerpc_binding_vector_add_np_default(&ndr_table_spoolss, v);
-		if (!NT_STATUS_IS_OK(status)) {
-			DEBUG(0, ("Failed to add np to binding vector (%s)\n",
-				  nt_errstr(status)));
-			exit(1);
-		}
-
-		status = rpc_ep_register(ev_ctx, msg_ctx, &ndr_table_spoolss, v);
-		if (!NT_STATUS_IS_OK(status)) {
-			DEBUG(0, ("Failed to register spoolss endpoint! (%s)\n",
-				  nt_errstr(status)));
-			exit(1);
-		}
-	}
-
-	talloc_free(mem_ctx);
 
 	ok = spoolssd_setup_children_monitor(ev_ctx, msg_ctx);
 	if (!ok) {

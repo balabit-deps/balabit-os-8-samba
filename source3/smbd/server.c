@@ -70,6 +70,7 @@ struct smbd_parent_context {
 
 	struct tevent_context *ev_ctx;
 	struct messaging_context *msg_ctx;
+	struct dcesrv_context *dce_ctx;
 
 	/* the list of listening sockets */
 	struct smbd_open_socket *sockets;
@@ -419,7 +420,7 @@ static bool smbd_notifyd_init(struct messaging_context *msg, bool interactive,
 	}
 
 	if (pid != 0) {
-		if (am_parent != 0) {
+		if (am_parent != NULL) {
 			add_child_pid(am_parent, pid);
 		}
 		*ppid = pid_to_procid(pid);
@@ -432,6 +433,8 @@ static bool smbd_notifyd_init(struct messaging_context *msg, bool interactive,
 			  __func__, nt_errstr(status)));
 		exit(1);
 	}
+
+	reopen_logs();
 
 	/* Set up sighup handler for notifyd */
 	se = tevent_add_signal(ev,
@@ -940,6 +943,7 @@ static void smbd_accept_connection(struct tevent_context *ev,
 	struct smbd_open_socket *s = talloc_get_type_abort(private_data,
 				     struct smbd_open_socket);
 	struct messaging_context *msg_ctx = s->parent->msg_ctx;
+	struct dcesrv_context *dce_ctx = s->parent->dce_ctx;
 	struct sockaddr_storage addr;
 	socklen_t in_addrlen = sizeof(addr);
 	int fd;
@@ -958,7 +962,7 @@ static void smbd_accept_connection(struct tevent_context *ev,
 
 	if (s->parent->interactive) {
 		reinit_after_fork(msg_ctx, ev, true, NULL);
-		smbd_process(ev, msg_ctx, fd, true);
+		smbd_process(ev, msg_ctx, dce_ctx, fd, true);
 		exit_server_cleanly("end of interactive mode");
 		return;
 	}
@@ -1007,7 +1011,7 @@ static void smbd_accept_connection(struct tevent_context *ev,
 			smb_panic("reinit_after_fork() failed");
 		}
 
-		smbd_process(ev, msg_ctx, fd, false);
+		smbd_process(ev, msg_ctx, dce_ctx, fd, false);
 	 exit:
 		exit_server_cleanly("end of child");
 		return;
@@ -1040,7 +1044,7 @@ static void smbd_accept_connection(struct tevent_context *ev,
 	 * writes only two messages for each child
 	 * started/finished. But each child writes,
 	 * say, 50 messages also in logserver.smb,
-	 * begining with the debug_count of the
+	 * beginning with the debug_count of the
 	 * parent, before the child opens its own log
 	 * file logserver.client. In a worst case
 	 * scenario the size of logserver.smb would be
@@ -1252,6 +1256,8 @@ static bool open_sockets_smbd(struct smbd_parent_context *parent,
 	messaging_register(msg_ctx, NULL, MSG_DEBUG, smbd_msg_debug);
 	messaging_register(msg_ctx, NULL, MSG_SMB_FORCE_TDIS,
 			   smb_parent_send_to_children);
+	messaging_register(msg_ctx, NULL, MSG_SMB_FORCE_TDIS_DENIED,
+			   smb_parent_send_to_children);
 	messaging_register(msg_ctx, NULL, MSG_SMB_KILL_CLIENT_IP,
 			   smb_parent_send_to_children);
 	messaging_register(msg_ctx, NULL, MSG_SMB_TELL_NUM_CHILDREN,
@@ -1417,8 +1423,9 @@ struct smbd_claim_version_state {
 	char *version;
 };
 
-static void smbd_claim_version_parser(const struct g_lock_rec *locks,
-				      size_t num_locks,
+static void smbd_claim_version_parser(struct server_id exclusive,
+				      size_t num_shared,
+				      struct server_id *shared,
 				      const uint8_t *data,
 				      size_t datalen,
 				      void *private_data)
@@ -1442,6 +1449,7 @@ static NTSTATUS smbd_claim_version(struct messaging_context *msg,
 				   const char *version)
 {
 	const char *name = "samba_version_string";
+	const TDB_DATA key = string_term_tdb_data(name);
 	struct smbd_claim_version_state state;
 	struct g_lock_ctx *ctx;
 	NTSTATUS status;
@@ -1452,8 +1460,8 @@ static NTSTATUS smbd_claim_version(struct messaging_context *msg,
 		return NT_STATUS_UNSUCCESSFUL;
 	}
 
-	status = g_lock_lock(ctx, string_term_tdb_data(name), G_LOCK_READ,
-			     (struct timeval) { .tv_sec = 60 });
+	status = g_lock_lock(
+		ctx, key, G_LOCK_READ, (struct timeval) { .tv_sec = 60 });
 	if (!NT_STATUS_IS_OK(status)) {
 		DBG_WARNING("g_lock_lock(G_LOCK_READ) failed: %s\n",
 			    nt_errstr(status));
@@ -1463,12 +1471,11 @@ static NTSTATUS smbd_claim_version(struct messaging_context *msg,
 
 	state = (struct smbd_claim_version_state) { .mem_ctx = ctx };
 
-	status = g_lock_dump(ctx, string_term_tdb_data(name),
-			     smbd_claim_version_parser, &state);
+	status = g_lock_dump(ctx, key, smbd_claim_version_parser, &state);
 	if (!NT_STATUS_IS_OK(status) &&
 	    !NT_STATUS_EQUAL(status, NT_STATUS_NOT_FOUND)) {
 		DBG_ERR("Could not read samba_version_string\n");
-		g_lock_unlock(ctx, string_term_tdb_data(name));
+		g_lock_unlock(ctx, key);
 		TALLOC_FREE(ctx);
 		return status;
 	}
@@ -1482,8 +1489,8 @@ static NTSTATUS smbd_claim_version(struct messaging_context *msg,
 		return NT_STATUS_OK;
 	}
 
-	status = g_lock_lock(ctx, string_term_tdb_data(name), G_LOCK_WRITE,
-			     (struct timeval) { .tv_sec = 60 });
+	status = g_lock_lock(
+		ctx, key, G_LOCK_UPGRADE, (struct timeval) { .tv_sec = 60 });
 	if (!NT_STATUS_IS_OK(status)) {
 		DBG_WARNING("g_lock_lock(G_LOCK_WRITE) failed: %s\n",
 			    nt_errstr(status));
@@ -1493,9 +1500,8 @@ static NTSTATUS smbd_claim_version(struct messaging_context *msg,
 		return NT_STATUS_SXS_VERSION_CONFLICT;
 	}
 
-	status = g_lock_write_data(ctx, string_term_tdb_data(name),
-				   (const uint8_t *)version,
-				   strlen(version)+1);
+	status = g_lock_write_data(
+		ctx, key, (const uint8_t *)version, strlen(version)+1);
 	if (!NT_STATUS_IS_OK(status)) {
 		DBG_WARNING("g_lock_write_data failed: %s\n",
 			    nt_errstr(status));
@@ -1503,8 +1509,8 @@ static NTSTATUS smbd_claim_version(struct messaging_context *msg,
 		return status;
 	}
 
-	status = g_lock_lock(ctx, string_term_tdb_data(name), G_LOCK_READ,
-			     (struct timeval) { .tv_sec = 60 });
+	status = g_lock_lock(
+		ctx, key, G_LOCK_DOWNGRADE, (struct timeval) { .tv_sec = 60 });
 	if (!NT_STATUS_IS_OK(status)) {
 		DBG_WARNING("g_lock_lock(G_LOCK_READ) failed: %s\n",
 			    nt_errstr(status));
@@ -1623,10 +1629,13 @@ extern void build_options(bool screen);
 	NTSTATUS status;
 	struct tevent_context *ev_ctx;
 	struct messaging_context *msg_ctx;
+	struct dcesrv_context *dce_ctx = NULL;
 	struct server_id server_id;
 	struct tevent_signal *se;
 	int profiling_level;
 	char *np_dir = NULL;
+	const struct loadparm_substitution *lp_sub =
+		loadparm_s3_global_substitution();
 	static const struct smbd_shim smbd_shim_fns =
 	{
 		.send_stat_cache_delete_message = smbd_send_stat_cache_delete_message,
@@ -1740,7 +1749,7 @@ extern void build_options(bool screen);
 	gain_root_group_privilege();
 
 	fault_setup();
-	dump_core_setup("smbd", lp_logfile(talloc_tos()));
+	dump_core_setup("smbd", lp_logfile(talloc_tos(), lp_sub));
 
 	/* we are never interested in SIGPIPE */
 	BlockSignals(True,SIGPIPE);
@@ -1824,6 +1833,11 @@ extern void build_options(bool screen);
 		exit(1);
 	}
 
+	dce_ctx = global_dcesrv_context();
+	if (dce_ctx == NULL) {
+		exit(1);
+	}
+
 	/*
 	 * Reloading of the printers will not work here as we don't have a
 	 * server info and rpc services set up. It will be called later.
@@ -1875,6 +1889,8 @@ extern void build_options(bool screen);
 	if (is_daemon && !interactive) {
 		DEBUG(3, ("Becoming a daemon.\n"));
 		become_daemon(Fork, no_process_group, log_stdout);
+	} else {
+		daemon_status("smbd", "Starting process ...");
 	}
 
 #ifdef HAVE_SETPGID
@@ -1919,6 +1935,7 @@ extern void build_options(bool screen);
 	parent->interactive = interactive;
 	parent->ev_ctx = ev_ctx;
 	parent->msg_ctx = msg_ctx;
+	parent->dce_ctx = dce_ctx;
 	am_parent = parent;
 
 	se = tevent_add_signal(parent->ev_ctx,
@@ -1956,7 +1973,7 @@ extern void build_options(bool screen);
 		exit_daemon("smbd can not open secrets.tdb", EACCES);
 	}
 
-	if (lp_server_role() == ROLE_DOMAIN_BDC || lp_server_role() == ROLE_DOMAIN_PDC) {
+	if (lp_server_role() == ROLE_DOMAIN_BDC || lp_server_role() == ROLE_DOMAIN_PDC || lp_server_role() == ROLE_IPA_DC) {
 		struct loadparm_context *lp_ctx = loadparm_init_s3(NULL, loadparm_s3_helpers());
 		if (!open_schannel_session_store(NULL, lp_ctx)) {
 			exit_daemon("ERROR: Samba cannot open schannel store for secured NETLOGON operations.", EACCES);
@@ -2019,7 +2036,8 @@ extern void build_options(bool screen);
 	   after the fork on every single connection.  This is a small
 	   performance improvment and reduces the total number of system
 	   fds used. */
-	if (!share_info_db_init()) {
+	status = share_info_db_init();
+	if (!NT_STATUS_IS_OK(status)) {
 		exit_daemon("ERROR: failed to load share info db.", EACCES);
 	}
 
@@ -2074,17 +2092,13 @@ extern void build_options(bool screen);
 		return -1;
 	}
 
-	if (is_daemon && !interactive) {
-		if (rpc_epmapper_daemon() == RPC_DAEMON_FORK) {
-			start_epmd(ev_ctx, msg_ctx);
-		}
-	}
-
-	if (!dcesrv_ep_setup(ev_ctx, msg_ctx)) {
+	status = dcesrv_init(ev_ctx, ev_ctx, msg_ctx, dce_ctx);
+	if (!NT_STATUS_IS_OK(status)) {
+		DBG_ERR("Failed to setup RPC server: %s\n", nt_errstr(status));
 		exit_daemon("Samba cannot setup ep pipe", EACCES);
 	}
 
-	if (is_daemon && !interactive) {
+	if (!interactive) {
 		daemon_ready("smbd");
 	}
 
@@ -2093,19 +2107,27 @@ extern void build_options(bool screen);
 	 *  and we fork a copy of ourselves here */
 	if (is_daemon && !interactive) {
 
+		if (rpc_epmapper_daemon() == RPC_DAEMON_FORK) {
+			start_epmd(ev_ctx, msg_ctx, dce_ctx);
+		}
+
 		if (rpc_lsasd_daemon() == RPC_DAEMON_FORK) {
-			start_lsasd(ev_ctx, msg_ctx);
+			start_lsasd(ev_ctx, msg_ctx, dce_ctx);
 		}
 
 		if (rpc_fss_daemon() == RPC_DAEMON_FORK) {
-			start_fssd(ev_ctx, msg_ctx);
+			start_fssd(ev_ctx, msg_ctx, dce_ctx);
 		}
 
 		if (!lp__disable_spoolss() &&
 		    (rpc_spoolss_daemon() != RPC_DAEMON_DISABLED)) {
 			bool bgq = lp_parm_bool(-1, "smbd", "backgroundqueue", true);
-
-			if (!printing_subsystem_init(ev_ctx, msg_ctx, true, bgq)) {
+			bool ok = printing_subsystem_init(ev_ctx,
+							  msg_ctx,
+							  dce_ctx,
+							  true,
+							  bgq);
+			if (!ok) {
 				exit_daemon("Samba failed to init printing subsystem", EACCES);
 			}
 		}
@@ -2113,12 +2135,17 @@ extern void build_options(bool screen);
 #ifdef WITH_SPOTLIGHT
 		if ((rpc_mdssvc_mode() == RPC_SERVICE_MODE_EXTERNAL) &&
 		    (rpc_mdssd_daemon() == RPC_DAEMON_FORK)) {
-			start_mdssd(ev_ctx, msg_ctx);
+			start_mdssd(ev_ctx, msg_ctx, dce_ctx);
 		}
 #endif
 	} else if (!lp__disable_spoolss() &&
 		   (rpc_spoolss_daemon() != RPC_DAEMON_DISABLED)) {
-		if (!printing_subsystem_init(ev_ctx, msg_ctx, false, false)) {
+		bool ok = printing_subsystem_init(ev_ctx,
+						  msg_ctx,
+						  dce_ctx,
+						  false,
+						  false);
+		if (!ok) {
 			exit(1);
 		}
 	}
@@ -2144,7 +2171,7 @@ extern void build_options(bool screen);
 	        /* Stop zombies */
 		smbd_setup_sig_chld_handler(parent);
 
-		smbd_process(ev_ctx, msg_ctx, sock, true);
+		smbd_process(ev_ctx, msg_ctx, dce_ctx, sock, true);
 
 		exit_server_cleanly(NULL);
 		return(0);

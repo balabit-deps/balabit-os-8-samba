@@ -84,7 +84,29 @@ EXCLUDE_USAGE = {
     'selftest/tests.py',
     'python/samba/subunit/run.py',
     'bin/python/samba/subunit/run.py',
-    'python/samba/tests/dcerpc/raw_protocol.py'
+    'python/samba/tests/dcerpc/raw_protocol.py',
+    'python/samba/tests/krb5/kcrypto.py',
+    'python/samba/tests/krb5/simple_tests.py',
+    'python/samba/tests/krb5/s4u_tests.py',
+    'python/samba/tests/krb5/xrealm_tests.py',
+    'python/samba/tests/krb5/as_canonicalization_tests.py',
+    'python/samba/tests/krb5/compatability_tests.py',
+    'python/samba/tests/krb5/rfc4120_constants.py',
+    'python/samba/tests/krb5/kdc_tests.py',
+    'python/samba/tests/krb5/kdc_base_test.py',
+    'python/samba/tests/krb5/kdc_tgs_tests.py',
+    'python/samba/tests/krb5/test_ccache.py',
+    'python/samba/tests/krb5/test_ldap.py',
+    'python/samba/tests/krb5/test_rpc.py',
+    'python/samba/tests/krb5/test_smb.py',
+    'python/samba/tests/krb5/ms_kile_client_principal_lookup_tests.py',
+    'python/samba/tests/krb5/as_req_tests.py',
+    'python/samba/tests/krb5/fast_tests.py',
+    'python/samba/tests/krb5/rodc_tests.py',
+    'python/samba/tests/krb5/salt_tests.py',
+    'python/samba/tests/krb5/spn_tests.py',
+    'python/samba/tests/krb5/alias_tests.py',
+    'python/samba/tests/krb5/test_min_domain_uid.py',
 }
 
 EXCLUDE_HELP = {
@@ -101,6 +123,7 @@ EXCLUDE_DIRS = {
     'bin/ab',
     'bin/python/samba/tests',
     'bin/python/samba/tests/dcerpc',
+    'bin/python/samba/tests/krb5',
 }
 
 
@@ -331,8 +354,9 @@ class HelpTestSuper(TestCase):
 
                     if self.check_return_code:
                         self.assertEqual(p.returncode, 0,
-                                         "%s %s\nreturncode should not be %d" %
-                                         (filename, h, p.returncode))
+                                         "%s %s\nreturncode should not be %d\n"
+                                         "err:\n%s\nout:\n%s" %
+                                         (filename, h, p.returncode, err, out))
                     if self.check_contains_usage:
                         self.assertIn('usage', outl, 'lacks "Usage:"\n')
                     if self.check_multiline:

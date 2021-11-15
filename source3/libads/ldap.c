@@ -92,7 +92,25 @@ static void gotalarm_sig(int signum)
 		return NULL;
 	}
 
-#ifdef HAVE_LDAP_INITIALIZE
+#ifdef HAVE_LDAP_INIT_FD
+	{
+		int fd = -1;
+		NTSTATUS status = NT_STATUS_UNSUCCESSFUL;
+		unsigned timeout_ms = 1000 * to;
+
+		status = open_socket_out(ss, port, timeout_ms, &fd);
+		if (!NT_STATUS_IS_OK(status)) {
+			DEBUG(3, ("open_socket_out: failed to open socket\n"));
+			return NULL;
+		}
+
+/* define LDAP_PROTO_TCP from openldap.h if required */
+#ifndef LDAP_PROTO_TCP
+#define LDAP_PROTO_TCP 1
+#endif
+		ldap_err = ldap_init_fd(fd, LDAP_PROTO_TCP, uri, &ldp);
+	}
+#elif defined(HAVE_LDAP_INITIALIZE)
 	ldap_err = ldap_initialize(&ldp, uri);
 #else
 	ldp = ldap_open(server, port);
@@ -367,7 +385,7 @@ static NTSTATUS resolve_and_ping_netbios(ADS_STRUCT *ads,
 {
 	int count, i;
 	struct ip_service *ip_list;
-	NTSTATUS status = NT_STATUS_UNSUCCESSFUL;
+	NTSTATUS status;
 
 	DEBUG(6, ("resolve_and_ping_netbios: (cldap) looking for domain '%s'\n",
 		  domain));
@@ -414,7 +432,7 @@ static NTSTATUS resolve_and_ping_dns(ADS_STRUCT *ads, const char *sitename,
 {
 	int count;
 	struct ip_service *ip_list = NULL;
-	NTSTATUS status = NT_STATUS_UNSUCCESSFUL;
+	NTSTATUS status;
 
 	DEBUG(6, ("resolve_and_ping_dns: (cldap) looking for realm '%s'\n",
 		  realm));
@@ -669,7 +687,7 @@ got_connection:
 
 	/* Otherwise setup the TCP LDAP session */
 
-	ads->ldap.ld = ldap_open_with_timeout(addr,
+	ads->ldap.ld = ldap_open_with_timeout(ads->config.ldap_server_name,
 					      &ads->ldap.ss,
 					      ads->ldap.port, lp_ldap_timeout());
 	if (ads->ldap.ld == NULL) {
@@ -685,13 +703,6 @@ got_connection:
 	}
 
 	ldap_set_option(ads->ldap.ld, LDAP_OPT_PROTOCOL_VERSION, &version);
-
-	if ( lp_ldap_ssl_ads() ) {
-		status = ADS_ERROR(smbldap_start_tls(ads->ldap.ld, version));
-		if (!ADS_ERR_OK(status)) {
-			goto out;
-		}
-	}
 
 	/* fill in the current time and offsets */
 
@@ -1373,9 +1384,11 @@ char *ads_parent_dn(const char *dn)
 		"userAccountControl",
 		"DnsHostName",
 		"ServicePrincipalName",
+		"userPrincipalName",
 		"unicodePwd",
 
 		/* Additional attributes Samba checks */
+		"msDS-AdditionalDnsHostName",
 		"msDS-SupportedEncryptionTypes",
 		"nTSecurityDescriptor",
 
@@ -1801,7 +1814,7 @@ uint32_t ads_get_kvno(ADS_STRUCT *ads, const char *account_name)
 	char *filter;
 	const char *attrs[] = {"msDS-KeyVersionNumber", NULL};
 	char *dn_string = NULL;
-	ADS_STATUS ret = ADS_ERROR(LDAP_SUCCESS);
+	ADS_STATUS ret;
 
 	DEBUG(5,("ads_get_kvno: Searching for account %s\n", account_name));
 	if (asprintf(&filter, "(samAccountName=%s)", account_name) == -1) {
@@ -1880,7 +1893,7 @@ ADS_STATUS ads_clear_service_principal_names(ADS_STRUCT *ads, const char *machin
 	LDAPMessage *res = NULL;
 	ADS_MODLIST mods;
 	const char *servicePrincipalName[1] = {NULL};
-	ADS_STATUS ret = ADS_ERROR(LDAP_SUCCESS);
+	ADS_STATUS ret;
 	char *dn_string = NULL;
 
 	ret = ads_find_machine_acct(ads, &res, machine_name);
@@ -2370,7 +2383,8 @@ ADS_STATUS ads_create_machine_acct(ADS_STRUCT *ads,
 	/* Make sure to NULL terminate the array */
 	spn_array = talloc_realloc(ctx, spn_array, const char *, num_spns + 1);
 	if (spn_array == NULL) {
-		return ADS_ERROR_LDAP(LDAP_NO_MEMORY);
+		ret = ADS_ERROR(LDAP_NO_MEMORY);
+		goto done;
 	}
 	spn_array[num_spns] = NULL;
 
@@ -3661,6 +3675,92 @@ out:
 	ads_msgfree(ads, res);
 
 	return name;
+}
+
+/********************************************************************
+********************************************************************/
+
+static char **get_addl_hosts(ADS_STRUCT *ads, TALLOC_CTX *mem_ctx,
+			      LDAPMessage *msg, size_t *num_values)
+{
+	const char *field = "msDS-AdditionalDnsHostName";
+	struct berval **values = NULL;
+	char **ret = NULL;
+	size_t i, converted_size;
+
+	/*
+	 * Windows DC implicitly adds a short name for each FQDN added to
+	 * msDS-AdditionalDnsHostName, but it comes with a strage binary
+	 * suffix "\0$" which we should ignore (see bug #14406).
+	 */
+
+	values = ldap_get_values_len(ads->ldap.ld, msg, field);
+	if (values == NULL) {
+		return NULL;
+	}
+
+	*num_values = ldap_count_values_len(values);
+
+	ret = talloc_array(mem_ctx, char *, *num_values + 1);
+	if (ret == NULL) {
+		ldap_value_free_len(values);
+		return NULL;
+	}
+
+	for (i = 0; i < *num_values; i++) {
+		ret[i] = NULL;
+		if (!convert_string_talloc(mem_ctx, CH_UTF8, CH_UNIX,
+					   values[i]->bv_val,
+					   strnlen(values[i]->bv_val,
+						   values[i]->bv_len),
+					   &ret[i], &converted_size)) {
+			ldap_value_free_len(values);
+			return NULL;
+		}
+	}
+	ret[i] = NULL;
+
+	ldap_value_free_len(values);
+	return ret;
+}
+
+ADS_STATUS ads_get_additional_dns_hostnames(TALLOC_CTX *mem_ctx,
+					    ADS_STRUCT *ads,
+					    const char *machine_name,
+					    char ***hostnames_array,
+					    size_t *num_hostnames)
+{
+	ADS_STATUS status;
+	LDAPMessage *res = NULL;
+	int count;
+
+	status = ads_find_machine_acct(ads,
+				       &res,
+				       machine_name);
+	if (!ADS_ERR_OK(status)) {
+		DEBUG(1,("Host Account for %s not found... skipping operation.\n",
+			 machine_name));
+		return status;
+	}
+
+	count = ads_count_replies(ads, res);
+	if (count != 1) {
+		status = ADS_ERROR(LDAP_NO_SUCH_OBJECT);
+		goto done;
+	}
+
+	*hostnames_array = get_addl_hosts(ads, mem_ctx, res, num_hostnames);
+	if (*hostnames_array == NULL) {
+		DEBUG(1, ("Host account for %s does not have msDS-AdditionalDnsHostName.\n",
+			  machine_name));
+		status = ADS_ERROR(LDAP_NO_SUCH_OBJECT);
+		goto done;
+	}
+
+done:
+	ads_msgfree(ads, res);
+
+	return status;
 }
 
 /********************************************************************

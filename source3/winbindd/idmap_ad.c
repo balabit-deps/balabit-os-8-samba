@@ -162,6 +162,14 @@ static TLDAPRC get_attrnames_by_oids(struct tldap_context *ld,
 	}
 
 	TALLOC_FREE(msgs);
+	for (i=0; i<num_oids; i++) {
+		if (names[i] == NULL) {
+			DBG_ERR("Failed to retrieve schema name for "
+				"oid [%s]. Schema mode is incorrect "
+				"for this domain.\n", oids[i]);
+			return TLDAP_FILTER_ERROR;
+		}
+	}
 
 	return TLDAP_SUCCESS;
 }
@@ -246,6 +254,41 @@ static TLDAPRC get_posix_schema_names(struct tldap_context *ld,
 	return TLDAP_SUCCESS;
 }
 
+static void idmap_ad_tldap_debug(void *log_private,
+				 enum tldap_debug_level level,
+				 const char *fmt,
+				 va_list ap)
+{
+       int samba_level = -1;
+
+       switch (level) {
+       case TLDAP_DEBUG_FATAL:
+               samba_level = DBGLVL_ERR;
+               break;
+       case TLDAP_DEBUG_ERROR:
+               samba_level = DBGLVL_ERR;
+               break;
+       case TLDAP_DEBUG_WARNING:
+               samba_level = DBGLVL_WARNING;
+               break;
+       case TLDAP_DEBUG_TRACE:
+               samba_level = DBGLVL_DEBUG;
+               break;
+       }
+
+       if (CHECK_DEBUGLVL(samba_level)) {
+               char *s = NULL;
+               int ret;
+
+               ret = vasprintf(&s, fmt, ap);
+               if (ret == -1) {
+                       return;
+               }
+               DEBUG(samba_level, ("idmap_ad_tldap: %s", s));
+               free(s);
+       }
+}
+
 static NTSTATUS idmap_ad_get_tldap_ctx(TALLOC_CTX *mem_ctx,
 				       const char *domname,
 				       struct tldap_context **pld)
@@ -299,6 +342,7 @@ static NTSTATUS idmap_ad_get_tldap_ctx(TALLOC_CTX *mem_ctx,
 		TALLOC_FREE(dcinfo);
 		return NT_STATUS_NO_MEMORY;
 	}
+	tldap_set_debug(ld, idmap_ad_tldap_debug, NULL);
 
 	/*
 	 * Here we use or own machine account as
@@ -959,7 +1003,7 @@ static NTSTATUS idmap_ad_sids_to_unixids_retry(struct idmap_domain *dom,
 	return status;
 }
 
-static struct idmap_methods ad_methods = {
+static const struct idmap_methods ad_methods = {
 	.init            = idmap_ad_initialize,
 	.unixids_to_sids = idmap_ad_unixids_to_sids_retry,
 	.sids_to_unixids = idmap_ad_sids_to_unixids_retry,

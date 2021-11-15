@@ -137,10 +137,13 @@ WERROR NetJoinDomain_r(struct libnetapi_ctx *ctx,
 			goto done;
 		}
 
-		encode_wkssvc_join_password_buffer(ctx,
-						   r->in.password,
-						   &session_key,
-						   &encrypted_password);
+		werr = encode_wkssvc_join_password_buffer(ctx,
+							  r->in.password,
+							  &session_key,
+							  &encrypted_password);
+		if (!W_ERROR_IS_OK(werr)) {
+			goto done;
+		}
 	}
 
 	old_timeout = rpccli_set_timeout(pipe_cli, 600000);
@@ -279,10 +282,13 @@ WERROR NetUnjoinDomain_r(struct libnetapi_ctx *ctx,
 			goto done;
 		}
 
-		encode_wkssvc_join_password_buffer(ctx,
-						   r->in.password,
-						   &session_key,
-						   &encrypted_password);
+		werr = encode_wkssvc_join_password_buffer(ctx,
+							  r->in.password,
+							  &session_key,
+							  &encrypted_password);
+		if (!W_ERROR_IS_OK(werr)) {
+			goto done;
+		}
 	}
 
 	old_timeout = rpccli_set_timeout(pipe_cli, 60000);
@@ -369,6 +375,7 @@ WERROR NetGetJoinInformation_l(struct libnetapi_ctx *ctx,
 		case ROLE_DOMAIN_MEMBER:
 		case ROLE_DOMAIN_PDC:
 		case ROLE_DOMAIN_BDC:
+		case ROLE_IPA_DC:
 			*r->out.name_type = NetSetupDomainName;
 			break;
 		case ROLE_STANDALONE:
@@ -484,10 +491,13 @@ WERROR NetGetJoinableOUs_r(struct libnetapi_ctx *ctx,
 			goto done;
 		}
 
-		encode_wkssvc_join_password_buffer(ctx,
-						   r->in.password,
-						   &session_key,
-						   &encrypted_password);
+		werr = encode_wkssvc_join_password_buffer(ctx,
+							  r->in.password,
+							  &session_key,
+							  &encrypted_password);
+		if (!W_ERROR_IS_OK(werr)) {
+			goto done;
+		}
 	}
 
 	status = dcerpc_wkssvc_NetrGetJoinableOus2(b, talloc_tos(),
@@ -537,10 +547,13 @@ WERROR NetRenameMachineInDomain_r(struct libnetapi_ctx *ctx,
 			goto done;
 		}
 
-		encode_wkssvc_join_password_buffer(ctx,
-						   r->in.password,
-						   &session_key,
-						   &encrypted_password);
+		werr = encode_wkssvc_join_password_buffer(ctx,
+							  r->in.password,
+							  &session_key,
+							  &encrypted_password);
+		if (!W_ERROR_IS_OK(werr)) {
+			goto done;
+		}
 	}
 
 	status = dcerpc_wkssvc_NetrRenameMachineInDomain2(b, talloc_tos(),

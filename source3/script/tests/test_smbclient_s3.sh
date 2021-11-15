@@ -33,6 +33,10 @@ incdir=`dirname $0`/../../../testprogs/blackbox
 
 failed=0
 
+# Do not let deprecated option warnings muck this up
+SAMBA_DEPRECATED_SUPPRESS=1
+export SAMBA_DEPRECATED_SUPPRESS
+
 # Test that a noninteractive smbclient does not prompt
 test_noninteractive_no_prompt()
 {
@@ -331,7 +335,7 @@ test_msdfs_link()
     tmpfile=$PREFIX/smbclient.in.$$
     prompt="  msdfs-target  "
 
-    cmd='$SMBCLIENT "$@" -U$USERNAME%$PASSWORD //$SERVER/msdfs-share -I $SERVER_IP $ADDARGS -m nt1 -c dir 2>&1'
+    cmd='$SMBCLIENT "$@" -U$USERNAME%$PASSWORD //$SERVER/msdfs-share -I $SERVER_IP $ADDARGS -m $PROTOCOL -c dir 2>&1'
     out=`eval $cmd`
     ret=$?
 
@@ -694,7 +698,9 @@ EOF
 test_bad_names()
 {
     # First with SMB1
-    cmd='CLI_FORCE_INTERACTIVE=yes $SMBCLIENT "$@" -U$USERNAME%$PASSWORD //$SERVER/badname-tmp -I $SERVER_IP $ADDARGS -mNT1 -c ls 2>&1'
+
+if [ $PROTOCOL = "NT1" ]; then
+    cmd='CLI_FORCE_INTERACTIVE=yes $SMBCLIENT "$@" -U$USERNAME%$PASSWORD //$SERVER/badname-tmp -I $SERVER_IP $ADDARGS -m$PROTOCOL -c ls 2>&1'
     eval echo "$cmd"
     out=`eval $cmd`
     ret=$?
@@ -752,9 +758,12 @@ test_bad_names()
 	echo "failed listing \\badname-tmp - grep (5) failed with $ret"
 	return 1
     fi
+fi
+
+if [ $PROTOCOL = "SMB3" ]; then
 
     # Now check again with -mSMB3
-    cmd='CLI_FORCE_INTERACTIVE=yes $SMBCLIENT "$@" -U$USERNAME%$PASSWORD //$SERVER/badname-tmp -I $SERVER_IP $ADDARGS -mSMB3 -c ls 2>&1'
+    cmd='CLI_FORCE_INTERACTIVE=yes $SMBCLIENT "$@" -U$USERNAME%$PASSWORD //$SERVER/badname-tmp -I $SERVER_IP $ADDARGS -m$PROTOCOL -c ls 2>&1'
     eval echo "$cmd"
     out=`eval $cmd`
     ret=$?
@@ -812,6 +821,7 @@ test_bad_names()
 	echo "failed listing \\badname-tmp - SMB3 grep (5) failed with $ret"
 	return 1
     fi
+fi
 }
 
 # Test accessing an share with a name that must be mangled - with acl_xattrs.
@@ -862,8 +872,9 @@ del smbclient
 del scopy_file
 quit
 EOF
+if [ $PROTOCOL = "SMB3" ]; then
     # First SMB3
-    cmd='CLI_FORCE_INTERACTIVE=yes $SMBCLIENT "$@" -U$USERNAME%$PASSWORD //$SERVER/tmp -I $SERVER_IP $ADDARGS -mSMB3 < $tmpfile 2>&1'
+    cmd='CLI_FORCE_INTERACTIVE=yes $SMBCLIENT "$@" -U$USERNAME%$PASSWORD //$SERVER/tmp -I $SERVER_IP $ADDARGS -m$PROTOOCL < $tmpfile 2>&1'
     eval echo "$cmd"
     out=`eval $cmd`
     ret=$?
@@ -883,12 +894,13 @@ EOF
 	echo "failed md5sum (1)"
 	return 1
     fi
-
+fi
 #
 # Now do again using SMB1
 # to force client-side fallback.
 #
 
+if [ $PROTOCOL = "NT1" ]; then
     cat > $tmpfile <<EOF
 put ${SMBCLIENT}
 scopy smbclient scopy_file
@@ -898,7 +910,7 @@ del smbclient
 del scopy_file
 quit
 EOF
-    cmd='CLI_FORCE_INTERACTIVE=yes $SMBCLIENT "$@" -U$USERNAME%$PASSWORD //$SERVER/tmp -I $SERVER_IP $ADDARGS -mNT1 < $tmpfile 2>&1'
+    cmd='CLI_FORCE_INTERACTIVE=yes $SMBCLIENT "$@" -U$USERNAME%$PASSWORD //$SERVER/tmp -I $SERVER_IP $ADDARGS -m$PROTOCOL < $tmpfile 2>&1'
     eval echo "$cmd"
     out=`eval $cmd`
     ret=$?
@@ -918,6 +930,7 @@ EOF
 	echo "failed md5sum (2)"
 	return 1
     fi
+fi
 }
 
 # Test creating a stream on the root of the share directory filname - :foobar
@@ -1460,7 +1473,7 @@ test_utimes()
 del utimes_test
 put ${SMBCLIENT} utimes_test
 allinfo utimes_test
-utimes utimes_test -1 17:01:01-05:10:20 -1 -1
+utimes utimes_test 2016:02:04-06:19:20 17:01:01-05:10:20 -1 -1
 allinfo utimes_test
 del utimes_test
 quit
@@ -1488,15 +1501,16 @@ EOF
 	return
     fi
 
-    # Now, we should have 2 identical create_time, write_time, change_time
-    # values, but one access_time of Jan  1 05:10:20 AM.
+    # Now, we should have 2 identical write_time and change_time
+    # values, but one access_time of Jan  1 05:10:20 AM,
+    # and one create_time of Feb 04 06:19:20 AM 2016
     out_sorted=`echo "$out" | sort | uniq`
     num_create=`echo "$out_sorted" | grep -c 'create_time:'`
     num_access=`echo "$out_sorted" | grep -c 'access_time:'`
     num_write=`echo "$out_sorted" | grep -c 'write_time:'`
     num_change=`echo "$out_sorted" | grep -c 'change_time:'`
-    if [ "$num_create" != "1" ]; then
-        echo "failed - should only get one create_time $out"
+    if [ "$num_create" != "2" ]; then
+        echo "failed - should get two create_time $out"
         false
         return
     fi
@@ -1524,6 +1538,18 @@ EOF
        echo "$out"
        echo
        echo "failed - should get access_time:    Sun Jan  1 05:10:20 [AM] 2017"
+       false
+       return
+    fi
+
+    # This could be: Thu Feb  4 06:19:20 AM 2016
+    # or           : Thu Feb  4 06:19:20 2016 CET
+    echo "$out" | grep 'create_time:.*Thu Feb.*4 06:19:20 .*2016.*'
+    ret=$?
+    if [ $ret -ne 0 ] ; then
+       echo "$out"
+       echo
+       echo "failed - should get access_time:    Thu Feb  4 06:19:20 [AM] 2016"
        false
        return
     fi

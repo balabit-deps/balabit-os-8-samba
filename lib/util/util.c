@@ -35,6 +35,11 @@
 #include "debug.h"
 #include "samba_util.h"
 #include "lib/util/select.h"
+#include <libgen.h>
+
+#ifdef HAVE_SYS_PRCTL_H
+#include <sys/prctl.h>
+#endif
 
 #undef malloc
 #undef strcasecmp
@@ -339,6 +344,7 @@ _PUBLIC_ bool directory_exist(const char *dname)
 
 /**
  * Try to create the specified directory if it didn't exist.
+ * A symlink to a directory is also accepted as a valid existing directory.
  *
  * @retval true if the directory already existed
  * or was successfully created.
@@ -353,9 +359,12 @@ _PUBLIC_ bool directory_create_or_exist(const char *dname,
 	old_umask = umask(0);
 	ret = mkdir(dname, dir_perms);
 	if (ret == -1 && errno != EEXIST) {
-		DBG_WARNING("mkdir failed on directory %s: %s\n",
+		int dbg_level = geteuid() == 0 ? DBGLVL_ERR : DBGLVL_NOTICE;
+
+		DBG_PREFIX(dbg_level,
+			   ("mkdir failed on directory %s: %s\n",
 			    dname,
-			    strerror(errno));
+			    strerror(errno)));
 		umask(old_umask);
 		return false;
 	}
@@ -369,12 +378,64 @@ _PUBLIC_ bool directory_create_or_exist(const char *dname,
 			return false;
 		}
 
-		if (!S_ISDIR(sbuf.st_mode)) {
-			return false;
+		if (S_ISDIR(sbuf.st_mode)) {
+			return true;
 		}
+
+		if (S_ISLNK(sbuf.st_mode)) {
+			ret = stat(dname, &sbuf);
+			if (ret != 0) {
+				return false;
+			}
+
+			if (S_ISDIR(sbuf.st_mode)) {
+				return true;
+			}
+		}
+
+		return false;
 	}
 
 	return true;
+}
+
+_PUBLIC_ bool directory_create_or_exists_recursive(
+		const char *dname,
+		mode_t dir_perms)
+{
+	bool ok;
+
+	ok = directory_create_or_exist(dname, dir_perms);
+	if (!ok) {
+		if (!directory_exist(dname)) {
+			char tmp[PATH_MAX] = {0};
+			char *parent = NULL;
+			size_t n;
+
+			/* Use the null context */
+			n = strlcpy(tmp, dname, sizeof(tmp));
+			if (n < strlen(dname)) {
+				DBG_ERR("Path too long!\n");
+				return false;
+			}
+
+			parent = dirname(tmp);
+			if (parent == NULL) {
+				DBG_ERR("Failed to create dirname!\n");
+				return false;
+			}
+
+			ok = directory_create_or_exists_recursive(parent,
+								  dir_perms);
+			if (!ok) {
+				return false;
+			}
+
+			ok = directory_create_or_exist(dname, dir_perms);
+		}
+	}
+
+	return ok;
 }
 
 /**
@@ -1279,6 +1340,12 @@ void anonymous_shared_free(void *ptr)
 void samba_start_debugger(void)
 {
 	char *cmd = NULL;
+#if defined(HAVE_PRCTL) && defined(PR_SET_PTRACER)
+	/*
+	 * Make sure all children can attach a debugger.
+	 */
+	prctl(PR_SET_PTRACER, getpid(), 0, 0, 0);
+#endif
 	if (asprintf(&cmd, "xterm -e \"gdb --pid %u\"&", getpid()) == -1) {
 		return;
 	}

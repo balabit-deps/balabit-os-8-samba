@@ -169,15 +169,19 @@ static void smb2cli_ioctl_done(struct tevent_req *subreq)
 		tevent_req_data(req,
 		struct smb2cli_ioctl_state);
 	NTSTATUS status;
+	NTSTATUS error;
 	struct iovec *iov;
 	uint8_t *fixed;
-	uint8_t *dyn;
-	size_t dyn_len;
+	DATA_BLOB dyn_buffer = data_blob_null;
 	uint32_t dyn_ofs = SMB2_HDR_BODY + 0x30;
+	uint32_t input_min_offset;
 	uint32_t input_buffer_offset;
 	uint32_t input_buffer_length;
+	uint32_t input_next_offset;
+	uint32_t output_min_offset;
 	uint32_t output_buffer_offset;
 	uint32_t output_buffer_length;
+	uint32_t output_next_offset;
 	static const struct smb2cli_req_expected_response expected[] = {
 	{
 		.status = NT_STATUS_OK,
@@ -247,92 +251,44 @@ static void smb2cli_ioctl_done(struct tevent_req *subreq)
 
 	state->recv_iov = iov;
 	fixed = (uint8_t *)iov[1].iov_base;
-	dyn = (uint8_t *)iov[2].iov_base;
-	dyn_len = iov[2].iov_len;
+	dyn_buffer = data_blob_const((uint8_t *)iov[2].iov_base,
+				     iov[2].iov_len);
 
 	input_buffer_offset = IVAL(fixed, 0x18);
 	input_buffer_length = IVAL(fixed, 0x1C);
 	output_buffer_offset = IVAL(fixed, 0x20);
 	output_buffer_length = IVAL(fixed, 0x24);
 
-	if ((input_buffer_offset > 0) && (input_buffer_length > 0)) {
-		uint32_t ofs;
-
-		if (input_buffer_offset != dyn_ofs) {
-			tevent_req_nterror(
-				req, NT_STATUS_INVALID_NETWORK_RESPONSE);
-			return;
-		}
-
-		ofs = input_buffer_length;
-		ofs = NDR_ROUND(ofs, 8);
-
-		if (state->max_input_length == 0) {
-			/*
-			 * If max_input_length is 0 we ignore
-			 * the input_buffer_length, because
-			 * Windows 2008 echos the DCERPC request
-			 * from the requested input_buffer
-			 * to the response input_buffer.
-			 */
-			input_buffer_length = 0;
-		}
-
-		if (input_buffer_length > dyn_len) {
-			tevent_req_nterror(
-				req, NT_STATUS_INVALID_NETWORK_RESPONSE);
-			return;
-		}
-
-		if (input_buffer_length > state->max_input_length) {
-			tevent_req_nterror(
-				req, NT_STATUS_INVALID_NETWORK_RESPONSE);
-			return;
-		}
-
-		state->out_input_buffer.data = dyn;
-		state->out_input_buffer.length = input_buffer_length;
-
-		if (ofs > dyn_len) {
-			tevent_req_nterror(
-				req, NT_STATUS_INVALID_NETWORK_RESPONSE);
-			return;
-		}
-
-		dyn_ofs += ofs;
-		dyn += ofs;
-		dyn_len -= ofs;
+	input_min_offset = dyn_ofs;
+	input_next_offset = dyn_ofs;
+	error = smb2cli_parse_dyn_buffer(dyn_ofs,
+					 dyn_buffer,
+					 input_min_offset,
+					 input_buffer_offset,
+					 input_buffer_length,
+					 state->max_input_length,
+					 &input_next_offset,
+					 &state->out_input_buffer);
+	if (tevent_req_nterror(req, error)) {
+		return;
 	}
 
-	if ((output_buffer_offset > 0) && (output_buffer_length > 0)) {
-		if (output_buffer_offset != dyn_ofs) {
-			tevent_req_nterror(
-				req, NT_STATUS_INVALID_NETWORK_RESPONSE);
-			return;
-		}
-
-		if (state->max_output_length == 0) {
-			/*
-			 * We do the same logic as for
-			 * max_input_length.
-			 */
-			output_buffer_length = 0;
-		}
-
-		if (output_buffer_length > dyn_len) {
-			tevent_req_nterror(
-				req, NT_STATUS_INVALID_NETWORK_RESPONSE);
-			return;
-		}
-
-		if (output_buffer_length > state->max_output_length) {
-			tevent_req_nterror(
-				req, NT_STATUS_INVALID_NETWORK_RESPONSE);
-			return;
-		}
-
-		state->out_output_buffer.data = dyn;
-		state->out_output_buffer.length = output_buffer_length;
+	/*
+	 * If output data is returned, the output offset MUST be set to
+	 * InputOffset + InputCount rounded up to a multiple of 8.
+	 */
+	output_min_offset = NDR_ROUND(input_next_offset, 8);
+	output_next_offset = 0; /* this variable is completely ignored */
+	error = smb2cli_parse_dyn_buffer(dyn_ofs,
+					 dyn_buffer,
+					 output_min_offset,
+					 output_buffer_offset,
+					 output_buffer_length,
+					 state->max_output_length,
+					 &output_next_offset,
+					 &state->out_output_buffer);
+	if (tevent_req_nterror(req, error)) {
+		return;
 	}
 
 	state->out_valid = true;

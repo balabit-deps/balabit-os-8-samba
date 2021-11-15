@@ -57,6 +57,8 @@ NTSTATUS print_spool_open(files_struct *fsp,
 			  const char *fname,
 			  uint64_t current_vuid)
 {
+	const struct loadparm_substitution *lp_sub =
+		loadparm_s3_global_substitution();
 	NTSTATUS status;
 	TALLOC_CTX *tmp_ctx;
 	struct print_file_data *pf;
@@ -78,7 +80,7 @@ NTSTATUS print_spool_open(files_struct *fsp,
 		status = NT_STATUS_NO_MEMORY;
 		goto done;
 	}
-	pf->svcname = lp_servicename(pf, SNUM(fsp->conn));
+	pf->svcname = lp_servicename(pf, lp_sub, SNUM(fsp->conn));
 
 	/* the document name is derived from the file name.
 	 * "Remote Downlevel Document" is added in front to
@@ -119,6 +121,7 @@ NTSTATUS print_spool_open(files_struct *fsp,
 
 	pf->filename = talloc_asprintf(pf, "%s/%sXXXXXX",
 					lp_path(talloc_tos(),
+						lp_sub,
 						SNUM(fsp->conn)),
 					PRINT_SPOOL_PREFIX);
 	if (!pf->filename) {
@@ -210,7 +213,12 @@ NTSTATUS print_spool_open(files_struct *fsp,
 	}
 
 	/* setup a full fsp */
-	fsp->fsp_name = synthetic_smb_fname(fsp, pf->filename, NULL, NULL, 0);
+	fsp->fsp_name = synthetic_smb_fname(fsp,
+					    pf->filename,
+					    NULL,
+					    NULL,
+					    0,
+					    0);
 	if (fsp->fsp_name == NULL) {
 		status = NT_STATUS_NO_MEMORY;
 		goto done;
@@ -225,14 +233,14 @@ NTSTATUS print_spool_open(files_struct *fsp,
 	fsp->fh->fd = fd;
 
 	fsp->vuid = current_vuid;
-	fsp->can_lock = false;
-	fsp->can_read = false;
+	fsp->fsp_flags.can_lock = false;
+	fsp->fsp_flags.can_read = false;
 	fsp->access_mask = FILE_GENERIC_WRITE;
-	fsp->can_write = true;
-	fsp->modified = false;
+	fsp->fsp_flags.can_write = true;
+	fsp->fsp_flags.modified = false;
 	fsp->oplock_type = NO_OPLOCK;
 	fsp->sent_oplock_break = NO_BREAK_SENT;
-	fsp->is_directory = false;
+	fsp->fsp_flags.is_directory = false;
 
 	fsp->print_file = pf;
 

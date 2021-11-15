@@ -137,7 +137,7 @@ struct ctdb_call {
 /* SRVID to inform clients that an IP address has been taken over */
 #define CTDB_SRVID_TAKE_IP 0xF301000000000000LL
 
-/* SRVID to inform recovery daemon of the node flags */
+/* SRVID to inform recovery daemon of the node flags - OBSOLETE */
 #define CTDB_SRVID_SET_NODE_FLAGS 0xF400000000000000LL
 
 /* SRVID to inform recovery daemon to update public ip assignment */
@@ -373,6 +373,11 @@ enum ctdb_controls {CTDB_CONTROL_PROCESS_EXISTS          = 0,
 		    CTDB_CONTROL_CHECK_PID_SRVID         = 151,
 		    CTDB_CONTROL_TUNNEL_REGISTER         = 152,
 		    CTDB_CONTROL_TUNNEL_DEREGISTER       = 153,
+		    CTDB_CONTROL_VACUUM_FETCH            = 154,
+		    CTDB_CONTROL_DB_VACUUM               = 155,
+		    CTDB_CONTROL_ECHO_DATA               = 156,
+		    CTDB_CONTROL_DISABLE_NODE            = 157,
+		    CTDB_CONTROL_ENABLE_NODE             = 158,
 };
 
 #define MAX_COUNT_BUCKETS 16
@@ -851,6 +856,17 @@ struct ctdb_pid_srvid {
 	uint64_t srvid;
 };
 
+struct ctdb_db_vacuum {
+	uint32_t db_id;
+	bool full_vacuum_run;
+
+};
+
+struct ctdb_echo_data {
+	uint32_t timeout;
+	TDB_DATA buf;
+};
+
 struct ctdb_req_control_data {
 	uint32_t opcode;
 	union {
@@ -888,6 +904,8 @@ struct ctdb_req_control_data {
 		struct ctdb_traverse_start_ext *traverse_start_ext;
 		struct ctdb_traverse_all_ext *traverse_all_ext;
 		struct ctdb_pid_srvid *pid_srvid;
+		struct ctdb_db_vacuum *db_vacuum;
+		struct ctdb_echo_data *echo_data;
 	} data;
 };
 
@@ -923,6 +941,7 @@ struct ctdb_reply_control_data {
 		enum ctdb_runstate runstate;
 		uint32_t num_records;
 		int tdb_flags;
+		struct ctdb_echo_data *echo_data;
 	} data;
 };
 
@@ -935,6 +954,7 @@ struct ctdb_req_control {
 #define CTDB_CTRL_FLAG_OPCODE_SPECIFIC   0xFFFF0000
 /* Ugly overloading of this field... */
 #define CTDB_PUBLIC_IP_FLAGS_ONLY_AVAILABLE 0x00010000
+#define CTDB_CTRL_FLAG_ATTACH_RECOVERY      0x00020000
 	uint32_t flags;
 	struct ctdb_req_control_data rdata;
 };

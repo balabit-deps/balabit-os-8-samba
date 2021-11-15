@@ -1,0 +1,29 @@
+From 28d1032a1c1734b9fb5d98cd3159e559da433036 Mon Sep 17 00:00:00 2001
+From: Stefan Metzmacher <metze@samba.org>
+Date: Tue, 9 Nov 2021 20:50:20 +0100
+Subject: [PATCH] s3:winbindd: fix "allow trusted domains = no" regression
+
+add_trusted_domain() should only reject domains
+based on is_allowed_domain(), which now also
+checks "allow trusted domains = no", if we don't
+have an explicit trust to the domain (SEC_CHAN_NULL).
+
+We use at least SEC_CHAN_LOCAL for local domains like
+BUILTIN.
+
+Signed-off-by: Stefan Metzmacher <metze@samba.org>
+---
+ source3/winbindd/winbindd_util.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+--- a/source3/winbindd/winbindd_util.c
++++ b/source3/winbindd/winbindd_util.c
+@@ -131,7 +131,7 @@ static NTSTATUS add_trusted_domain(const
+ 		return NT_STATUS_INVALID_PARAMETER;
+ 	}
+ 
+-	if (!is_allowed_domain(domain_name)) {
++	if (secure_channel_type == SEC_CHAN_NULL && !is_allowed_domain(domain_name)) {
+ 		return NT_STATUS_NO_SUCH_DOMAIN;
+ 	}
+ 

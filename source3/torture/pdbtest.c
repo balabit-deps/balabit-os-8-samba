@@ -277,10 +277,15 @@ static bool test_auth(TALLOC_CTX *mem_ctx, struct samu *pdb_entry)
 	struct netr_SamInfo6 *info6_wbc = NULL;
 	NTSTATUS status;
 	bool ok;
-	uint8_t authoritative = 0;
+	uint8_t authoritative = 1;
+	int rc;
 
-	SMBOWFencrypt(pdb_get_nt_passwd(pdb_entry), challenge_8,
-		      local_nt_response);
+	rc = SMBOWFencrypt(pdb_get_nt_passwd(pdb_entry), challenge_8,
+			   local_nt_response);
+	if (rc != 0) {
+		return False;
+	}
+
 	SMBsesskeygen_ntv1(pdb_get_nt_passwd(pdb_entry), local_nt_session_key);
 
 	if (tsocket_address_inet_from_strings(NULL, "ip", NULL, 0, &remote_address) != 0) {

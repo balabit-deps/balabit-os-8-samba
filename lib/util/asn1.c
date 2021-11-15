@@ -36,15 +36,19 @@ struct asn1_data {
 	off_t ofs;
 	struct nesting *nesting;
 	bool has_error;
+	unsigned depth;
+	unsigned max_depth;
 };
 
 /* allocate an asn1 structure */
-struct asn1_data *asn1_init(TALLOC_CTX *mem_ctx)
+struct asn1_data *asn1_init(TALLOC_CTX *mem_ctx, unsigned max_depth)
 {
 	struct asn1_data *ret = talloc_zero(mem_ctx, struct asn1_data);
 	if (ret == NULL) {
-		DEBUG(0,("asn1_init failed! out of memory\n"));
+		DBG_ERR("asn1_init failed! out of memory\n");
+		return ret;
 	}
+	ret->max_depth = max_depth;
 	return ret;
 }
 
@@ -480,6 +484,11 @@ bool asn1_check_BOOLEAN(struct asn1_data *data, bool v)
 /* load a struct asn1_data structure with a lump of data, ready to be parsed */
 bool asn1_load(struct asn1_data *data, DATA_BLOB blob)
 {
+	/*
+	 * Save the maximum depth
+	 */
+	unsigned max_depth = data->max_depth;
+
 	ZERO_STRUCTP(data);
 	data->data = (uint8_t *)talloc_memdup(data, blob.data, blob.length);
 	if (!data->data) {
@@ -487,6 +496,7 @@ bool asn1_load(struct asn1_data *data, DATA_BLOB blob)
 		return false;
 	}
 	data->length = blob.length;
+	data->max_depth = max_depth;
 	return true;
 }
 
@@ -637,6 +647,16 @@ bool asn1_start_tag(struct asn1_data *data, uint8_t tag)
 	uint8_t b;
 	struct nesting *nesting;
 
+	/*
+	 * Check the depth of the parse tree and prevent it from growing
+	 * too large.
+	 */
+	data->depth++;
+	if (data->depth > data->max_depth) {
+		data->has_error = true;
+		return false;
+	}
+
 	if (!asn1_read_uint8(data, &b))
 		return false;
 
@@ -693,6 +713,10 @@ bool asn1_end_tag(struct asn1_data *data)
 {
 	struct nesting *nesting;
 
+	if (data->depth == 0) {
+		smb_panic("Unbalanced ASN.1 Tag nesting");
+	}
+	data->depth--;
 	/* make sure we read it all */
 	if (asn1_tag_remaining(data) != 0) {
 		data->has_error = true;
@@ -1024,9 +1048,10 @@ bool asn1_read_BitString(struct asn1_data *data, TALLOC_CTX *mem_ctx, DATA_BLOB 
 	return true;
 }
 
-/* read an integer */
+/* read a non-negative enumerated value */
 bool asn1_read_enumerated(struct asn1_data *data, int *v)
 {
+	unsigned int val_will_wrap = (0xFF << ((sizeof(int)*8)-8));
 	*v = 0;
 
 	if (!asn1_start_tag(data, ASN1_ENUMERATED)) return false;
@@ -1035,7 +1060,22 @@ bool asn1_read_enumerated(struct asn1_data *data, int *v)
 		if (!asn1_read_uint8(data, &b)) {
 			return false;
 		}
+		if (*v & val_will_wrap) {
+			/*
+			 * There is something already in
+			 * the top byte of the int. If we
+			 * shift left by 8 it's going to
+			 * wrap. Prevent this.
+			 */
+			data->has_error = true;
+			return false;
+		}
 		*v = (*v << 8) + b;
+		if (*v < 0) {
+			/* ASN1_ENUMERATED can't be -ve. */
+			data->has_error = true;
+			return false;
+		}
 	}
 	return asn1_end_tag(data);
 }
@@ -1103,9 +1143,14 @@ bool asn1_extract_blob(struct asn1_data *asn1, TALLOC_CTX *mem_ctx,
 */
 void asn1_load_nocopy(struct asn1_data *data, uint8_t *buf, size_t len)
 {
+	/*
+	 * Save max_depth
+	 */
+	unsigned max_depth = data->max_depth;
 	ZERO_STRUCTP(data);
 	data->data = buf;
 	data->length = len;
+	data->max_depth = max_depth;
 }
 
 int asn1_peek_full_tag(DATA_BLOB blob, uint8_t tag, size_t *packet_size)
@@ -1130,4 +1175,11 @@ int asn1_peek_full_tag(DATA_BLOB blob, uint8_t tag, size_t *packet_size)
 
 	*packet_size = size;
 	return 0;
+}
+
+/*
+ * Get the length of the ASN.1 data
+ */
+size_t asn1_get_length(const struct asn1_data *asn1) {
+	return asn1->length;
 }

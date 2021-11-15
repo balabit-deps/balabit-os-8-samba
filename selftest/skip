@@ -75,6 +75,8 @@
 ^samba3.smb2.durable-open-disconnect    # Not a test, but a way to create a disconnected durable
 ^samba3.smb2.scan                       # No tests
 ^samba3.smb2.oplock.levelii501		# No test yet
+^samba3.smb2.timestamp_resolution       # See the comment on the test
+^samba4.smb2.timestamp_resolution
 ^samba3.rpc.samr.passwords.lockout\(ad_dc\) # No point running this version, it just waits 12 times longer the samba4 version of this test, covering the same code
 ^samba4.base.iometer
 ^samba4.base.casetable
@@ -150,8 +152,12 @@ bench # don't run benchmarks in our selftest
 ^samba4.*.base.birthtime
 ^samba4.*base.defer_open
 ^samba4.smb2.acls # new test which doesn't pass yet
+^samba4.smb2.sdread
 # ktutil might not be installed or from mit...
 # we should build a samba4ktutil and use that instead
 ^samba4.blackbox.ktpass # this test isn't portable ...
 ^samba4.rpc.unixinfo # This contains a server-side getpwuid call which hangs the server when nss_winbindd is in use
 ^samba.tests.dcerpc.unix  # This contains a server-side getpwuid call which hangs the server when nss_winbindd is in use
+^samba4.smb2.mangle.*\(ad_dc_ntvfs\)$ # Ignore ad_dc_ntvfs since this is a new test
+^samba4.smb2.tcon.*\(ad_dc_ntvfs\)$ # Ignore ad_dc_ntvfs since this is a new test
+^samba4.smb2.mkdir.*\(ad_dc_ntvfs\)$ # Ignore ad_dc_ntvfs since this is a new test

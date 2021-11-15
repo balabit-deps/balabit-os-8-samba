@@ -25,6 +25,7 @@ from samba import samdb
 from samba import ntacls
 
 from samba.auth import system_session
+from samba.auth_util import system_session_unix
 from samba.dcerpc import security
 from samba.tests import env_loadparm
 from samba.tests.smbd_base import SmbdBaseTests
@@ -110,13 +111,13 @@ class NtaclsBackupRestoreTests(SmbdBaseTests):
         """
 
         dirpath = os.path.join(self.service_root, 'a-dir')
-        smbd.mkdir(dirpath, self.service)
+        smbd.mkdir(dirpath, system_session_unix(), self.service)
         mode = os.stat(dirpath).st_mode
 
         # This works in conjunction with the TEST_UMASK in smbd_base
         # to ensure that permissions are not related to the umask
         # but instead the smb.conf settings
-        self.assertEquals(mode & 0o777, 0o755)
+        self.assertEqual(mode & 0o777, 0o755)
         self.assertTrue(os.path.isdir(dirpath))
 
     def test_smbd_create_file(self):
@@ -125,7 +126,7 @@ class NtaclsBackupRestoreTests(SmbdBaseTests):
         """
 
         filepath = os.path.join(self.service_root, 'a-file')
-        smbd.create_file(filepath, self.service)
+        smbd.create_file(filepath, system_session_unix(), self.service)
         self.assertTrue(os.path.isfile(filepath))
 
         mode = os.stat(filepath).st_mode
@@ -133,11 +134,11 @@ class NtaclsBackupRestoreTests(SmbdBaseTests):
         # This works in conjunction with the TEST_UMASK in smbd_base
         # to ensure that permissions are not related to the umask
         # but instead the smb.conf settings
-        self.assertEquals(mode & 0o777, 0o644)
+        self.assertEqual(mode & 0o777, 0o644)
 
         # As well as checking that unlink works, this removes the
         # fake xattrs from the dev/inode based DB
-        smbd.unlink(filepath, self.service)
+        smbd.unlink(filepath, system_session_unix(), self.service)
         self.assertFalse(os.path.isfile(filepath))
 
     def test_compare_getntacl(self):
@@ -151,13 +152,13 @@ class NtaclsBackupRestoreTests(SmbdBaseTests):
         sd0 = self.smb_helper.get_acl(file_name, as_sddl=True)
 
         sd1 = self.ntacls_helper.getntacl(
-            file_path, as_sddl=True, direct_db_access=False)
+            file_path, system_session_unix(), as_sddl=True, direct_db_access=False)
 
         sd2 = self.ntacls_helper.getntacl(
-            file_path, as_sddl=True, direct_db_access=True)
+            file_path, system_session_unix(), as_sddl=True, direct_db_access=True)
 
-        self.assertEquals(sd0, sd1)
-        self.assertEquals(sd1, sd2)
+        self.assertEqual(sd0, sd1)
+        self.assertEqual(sd1, sd2)
 
     def test_backup_online(self):
         """

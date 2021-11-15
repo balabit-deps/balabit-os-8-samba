@@ -681,6 +681,7 @@ int regedit_getch(void)
 static void regedit_panic_handler(const char *msg)
 {
 	endwin();
+	smb_panic_log(msg);
 	smb_panic_s3(msg);
 }
 
@@ -787,6 +788,7 @@ int main(int argc, const char **argv)
 		fprintf(stderr, "Unable to open registry: %s\n",
 			win_errstr(rv));
 		TALLOC_FREE(frame);
+		poptFreeContext(pc);
 
 		return 1;
 	}
@@ -794,6 +796,7 @@ int main(int argc, const char **argv)
 	display_window(frame, ctx);
 
 	TALLOC_FREE(frame);
+	poptFreeContext(pc);
 
 	return 0;
 }

@@ -447,8 +447,13 @@ int rep_dlclose(void *handle);
 /* prototype is in system/network.h */
 #endif
 
+/* for old gcc releases that don't have the feature test macro __has_attribute */
+#ifndef __has_attribute
+#define __has_attribute(x) 0
+#endif
+
 #ifndef PRINTF_ATTRIBUTE
-#ifdef HAVE___ATTRIBUTE__
+#if __has_attribute(format) || (__GNUC__ >= 3)
 /** Use gcc attribute to check printf fns.  a1 is the 1-based index of
  * the parameter containing the format, and a2 the index of the first
  * argument. Note that some gcc 2.x versions don't handle this
@@ -844,7 +849,16 @@ typedef unsigned long long ptrdiff_t ;
 /**
  * Work out how many elements there are in a static array.
  */
+#ifdef ARRAY_SIZE
+#undef ARRAY_SIZE
+#endif
 #define ARRAY_SIZE(a) (sizeof(a)/sizeof(a[0]))
+
+/**
+ * Remove an array element by moving the rest one down
+ */
+#define ARRAY_DEL_ELEMENT(a,i,n) \
+if((i)<((n)-1)){memmove(&((a)[(i)]),&((a)[(i)+1]),(sizeof(*(a))*((n)-(i)-1)));}
 
 /**
  * Pointer difference macro
@@ -867,13 +881,8 @@ typedef unsigned long long ptrdiff_t ;
 #define MAX_DNS_NAME_LENGTH 256 /* Actually 255 but +1 for terminating null. */
 #endif
 
-#ifndef HAVE_CRYPT
-char *ufc_crypt(const char *key, const char *salt);
-#define crypt ufc_crypt
-#else
 #ifdef HAVE_CRYPT_H
 #include <crypt.h>
-#endif
 #endif
 
 /* these macros gain us a few percent of speed on gcc */
@@ -967,6 +976,22 @@ bool nss_wrapper_enabled(void);
 bool nss_wrapper_hosts_enabled(void);
 bool socket_wrapper_enabled(void);
 bool uid_wrapper_enabled(void);
+
+static inline bool _hexcharval(char c, uint8_t *val)
+{
+	if ((c >= '0') && (c <= '9')) { *val = c - '0';      return true; }
+	if ((c >= 'a') && (c <= 'f')) {	*val = c - 'a' + 10; return true; }
+	if ((c >= 'A') && (c <= 'F')) { *val = c - 'A' + 10; return true; }
+	return false;
+}
+
+static inline bool hex_byte(const char *in, uint8_t *out)
+{
+	uint8_t hi=0, lo=0;
+	bool ok = _hexcharval(in[0], &hi) && _hexcharval(in[1], &lo);
+	*out = (hi<<4)+lo;
+	return ok;
+}
 
 /* Needed for Solaris atomic_add_XX functions. */
 #if defined(HAVE_SYS_ATOMIC_H)

@@ -1,50 +1,85 @@
-                   ==============================
-                   Release Notes for Samba 4.11.6
-                          January 28, 2020
-		   ==============================
+                   ===============================
+                   Release Notes for Samba 4.13.14
+                           November 9, 2021
+                   ===============================
 
 
-This is the latest stable release of the Samba 4.11 release series.
+This is a security release in order to address the following defects:
+
+o CVE-2016-2124:  SMB1 client connections can be downgraded to plaintext
+                  authentication.
+                  https://www.samba.org/samba/security/CVE-2016-2124.html
+
+o CVE-2020-25717: A user on the domain can become root on domain members.
+                  https://www.samba.org/samba/security/CVE-2020-25717.html
+                  (PLEASE READ! There are important behaviour changes described)
+
+o CVE-2020-25718: Samba AD DC did not correctly sandbox Kerberos tickets issued
+                  by an RODC.
+                  https://www.samba.org/samba/security/CVE-2020-25718.html
+
+o CVE-2020-25719: Samba AD DC did not always rely on the SID and PAC in Kerberos
+                  tickets.
+                  https://www.samba.org/samba/security/CVE-2020-25719.html
+
+o CVE-2020-25721: Kerberos acceptors need easy access to stable AD identifiers
+                  (eg objectSid).
+                  https://www.samba.org/samba/security/CVE-2020-25721.html
+
+o CVE-2020-25722: Samba AD DC did not do suffienct access and conformance
+                  checking of data stored.
+                  https://www.samba.org/samba/security/CVE-2020-25722.html
+
+o CVE-2021-3738:  Use after free in Samba AD DC RPC server.
+                  https://www.samba.org/samba/security/CVE-2021-3738.html
+
+o CVE-2021-23192: Subsequent DCE/RPC fragment injection vulnerability.
+                  https://www.samba.org/samba/security/CVE-2021-23192.html
 
 
-Changes since 4.11.5:
+Changes since 4.13.13
 ---------------------
 
 o  Douglas Bagnall <douglas.bagnall@catalyst.net.nz>
-   * BUG 14209: pygpo: Use correct method flags.
+   * CVE-2020-25722
 
-o  David Disseldorp <ddiss@samba.org>
-   * BUG 14216: vfs_ceph_snapshots: Fix root relative path handling.
+o  Andrew Bartlett <abartlet@samba.org>
+   * CVE-2020-25718
+   * CVE-2020-25719
+   * CVE-2020-25721
+   * CVE-2020-25722
 
-o  Torsten Fohrer <torsten.fohrer@sbe.de>
-   * BUG 14209: Avoiding bad call flags with python 3.8, using METH_NOARGS
-     instead of zero.
+o  Ralph Boehme <slow@samba.org>
+   * CVE-2020-25717
 
-o  Fabrice Fontaine <fontaine.fabrice@gmail.com>
-   * BUG 14218: source4/utils/oLschema2ldif: Include stdint.h before cmocka.h.
+o  Alexander Bokovoy <ab@samba.org>
+   * CVE-2020-25717
 
-o  Björn Jacke <bjacke@samba.org>
-   * BUG 14122: docs-xml/winbindnssinfo: Clarify interaction with idmap_ad etc.
+o  Samuel Cabrero <scabrero@samba.org>
+   * CVE-2020-25717
 
-o  Volker Lendecke <vl@samba.org>
-   * BUG 14251: smbd: Fix the build with clang.
+o  Nadezhda Ivanova <nivanova@symas.com>
+   * CVE-2020-25722
 
-o  Gary Lockyer <gary@catalyst.net.nz>
-   * BUG 14199: upgradedns: Ensure lmdb lock files linked.
-
-o  Anoop C S <anoopcs@redhat.com>
-   * BUG 14182: s3: VFS: glusterfs: Reset nlinks for symlink entries during
-     readdir.
+o  Stefan Metzmacher <metze@samba.org>
+   * CVE-2016-2124
+   * CVE-2020-25717
+   * CVE-2020-25719
+   * CVE-2020-25722
+   * CVE-2021-23192
+   * CVE-2021-3738
+   * ldb: version 2.2.3
 
 o  Andreas Schneider <asn@samba.org>
-   * BUG 14101: smbc_stat() doesn't return the correct st_mode and also the
-     uid/gid is not filled (SMBv1) file.
-   * BUG 14219: librpc: Fix string length checking in
-     ndr_pull_charset_to_null().
+   * CVE-2020-25719
 
-o  Martin Schwenke <martin@meltin.net>
-   * BUG 14227: ctdb-scripts: Strip square brackets when gathering connection
-     info.
+o  Joseph Sutton <josephsutton@catalyst.net.nz>
+   * CVE-2020-17049
+   * CVE-2020-25718
+   * CVE-2020-25719
+   * CVE-2020-25721
+   * CVE-2020-25722
+   * MS CVE-2020-17049
 
 
 #######################################
@@ -52,12 +87,13 @@ Reporting bugs & Development Discussion
 #######################################
 
 Please discuss this release on the samba-technical mailing list or by
-joining the #samba-technical IRC channel on irc.freenode.net.
+joining the #samba-technical IRC channel on irc.libera.chat or the
+#samba-technical:matrix.org matrix channel.
 
 If you do report problems then please try to send high quality
 feedback. If you don't provide vital information to help us track down
 the problem then you will probably be ignored.  All bug reports should
-be filed under the "Samba 4.1 and newer" product in the project's Bugzilla
+be filed under the Samba 4.1 and newer product in the project's Bugzilla
 database (https://bugzilla.samba.org/).
 
 
@@ -70,196 +106,81 @@ database (https://bugzilla.samba.org/).
 Release notes for older releases follow:
 ----------------------------------------
 
-                   ==============================
-                   Release Notes for Samba 4.11.5
-                          January 21, 2020
-		   ==============================
+
+                   ===============================
+                   Release Notes for Samba 4.13.13
+                          October 29, 2021
+                   ===============================
 
 
-This is a security release in order to address the following defects:
-
-o CVE-2019-14902: Replication of ACLs set to inherit down a subtree on AD
-		  Directory not automatic.        
-o CVE-2019-14907: Crash after failed character conversion at log level 3 or
-		  above.                                               
-o CVE-2019-19344: Use after free during DNS zone scavenging in Samba AD DC.
-                                                                                
-                                                                                
-=======                                                                         
-Details                                                                         
-=======                                                                         
-                                                                                
-o  CVE-2019-14902:                                                                                
-   The implementation of ACL inheritance in the Samba AD DC was not complete,
-   and so absent a 'full-sync' replication, ACLs could get out of sync between
-   domain controllers. 
-
-o  CVE-2019-14907:
-   When processing untrusted string input Samba can read past the end of the
-   allocated buffer when printing a "Conversion error" message to the logs.
-
-o  CVE-2019-19344:                                                                                
-   During DNS zone scavenging (of expired dynamic entries) there is a read of
-   memory after it has been freed.
-
-For more details and workarounds, please refer to the security advisories.
+This is the latest stable release of the Samba 4.13 release series.
 
 
-Changes since 4.11.4:
+Changes since 4.13.12
 ---------------------
+
+o  Douglas Bagnall <douglas.bagnall@catalyst.net.nz>
+   * BUG 14868: rodc_rwdc test flaps.
+   * BUG 14881: Backport bronze bit fixes, tests, and selftest improvements.
 
 o  Andrew Bartlett <abartlet@samba.org>
-   * BUG 12497: CVE-2019-14902: Replication of ACLs down subtree on AD Directory
-     not automatic.
-   * BUG 14208: CVE-2019-14907: lib/util: Do not print the failed to convert
-     string into the logs.
-
-o  Gary Lockyer <gary@catalyst.net.nz>
-   * BUG 14050: CVE-2019-19344: kcc dns scavenging: Fix use after free in
-     dns_tombstone_records_zone.
-
-
-#######################################
-Reporting bugs & Development Discussion
-#######################################
-
-Please discuss this release on the samba-technical mailing list or by
-joining the #samba-technical IRC channel on irc.freenode.net.
-
-If you do report problems then please try to send high quality
-feedback. If you don't provide vital information to help us track down
-the problem then you will probably be ignored.  All bug reports should
-be filed under the "Samba 4.1 and newer" product in the project's Bugzilla
-database (https://bugzilla.samba.org/).
-
-
-======================================================================
-== Our Code, Our Bugs, Our Responsibility.
-== The Samba Team
-======================================================================
-
-
-----------------------------------------------------------------------
-
-
-                   ==============================
-                   Release Notes for Samba 4.11.4
-                          December 16, 2019
-		   ==============================
-
-
-This is the latest stable release of the Samba 4.11 release series.
-
-
-Changes since 4.11.3:
----------------------
-
-o  Jeremy Allison <jra@samba.org>
-   * BUG 14161: s3: libsmb: Ensure SMB1 cli_qpathinfo2() doesn't return an inode
-     number.
-   * BUG 14174: s3: utils: smbtree. Ensure we don't call cli_RNetShareEnum()
-     on an SMB1 connection.
-   * BUG 14176: NT_STATUS_ACCESS_DENIED becomes EINVAL when using SMB2 in
-     SMBC_opendir_ctx.
-   * BUG 14189: s3: smbd: SMB2 - Ensure we use the correct session_id if
-     encrypting an interim response.
-   * BUG 14205: Prevent smbd crash after invalid SMB1 negprot.
-
-o  Ralph Boehme <slow@samba.org>
-   * BUG 13745: s3:printing: Fix %J substition.
-   * BUG 13925: s3: Remove now unneeded call to cmdline_messaging_context().
-   * BUG 14069: Incomplete conversion of former parametric options.
-   * BUG 14070: Fix sync dosmode fallback in async dosmode codepath.
-   * BUG 14171: vfs_fruit returns capped resource fork length.
+   * BUG 14642: Provide a fix for MS CVE-2020-17049 in Samba [SECURITY] 'Bronze
+     bit' S4U2Proxy Constrained Delegation bypass in Samba with
+     embedded Heimdal.
+   * BUG 14836: Python ldb.msg_diff() memory handling failure.
+   * BUG 14845: "in" operator on ldb.Message is case sensitive.
+   * BUG 14848: Release LDB 2.3.1 for Samba 4.14.9.
+   * BUG 14871: Fix Samba support for UF_NO_AUTH_DATA_REQUIRED.
+   * BUG 14874: Allow special chars like "@" in samAccountName when generating
+     the salt.
+   * BUG 14881: Backport bronze bit fixes, tests, and selftest improvements.
 
 o  Isaac Boukris <iboukris@gmail.com>
-   * BUG 14116: libnet_join: Add SPNs for additional-dns-hostnames entries.
+   * BUG 14642: Provide a fix for MS CVE-2020-17049 in Samba [SECURITY] 'Bronze
+     bit' S4U2Proxy Constrained Delegation bypass in Samba with
+     embedded Heimdal.
+   * BUG 14881: Backport bronze bit fixes, tests, and selftest improvements.
 
-o  Volker Lendecke <vl@samba.org>
-   * BUG 14211: smbd: Increase a debug level.
+o  Viktor Dukhovni <viktor@twosigma.com>
+   * BUG 12998: Fix transit path validation.
+   * BUG 14881: Backport bronze bit fixes, tests, and selftest improvements.
+
+o  Luke Howard <lukeh@padl.com>
+   * BUG 14642: Provide a fix for MS CVE-2020-17049 in Samba [SECURITY] 'Bronze
+     bit' S4U2Proxy Constrained Delegation bypass in Samba with
+     embedded Heimdal.
+   * BUG 14881: Backport bronze bit fixes, tests, and selftest improvements.
 
 o  Stefan Metzmacher <metze@samba.org>
-   * BUG 14153: Prevent azure ad connect from reporting discovery errors:
-     reference-value-not-ldap-conformant.
+   * BUG 14881: Backport bronze bit fixes, tests, and selftest improvements.
 
-o  Christof Schmitt <cs@samba.org>
-   * BUG 14179: krb5_plugin: Fix developer build with newer heimdal system
-     library.
+o  David Mulder <dmulder@suse.com>
+   * BUG 14881: Backport bronze bit fixes, tests, and selftest improvements.
 
 o  Andreas Schneider <asn@samba.org>
-   * BUG 14168: replace: Only link libnsl and libsocket if requrired.
+   * BUG 14870: Prepare to operate with MIT krb5 >= 1.20.
+   * BUG 14881: Backport bronze bit fixes, tests, and selftest improvements.
 
-o  Martin Schwenke <martin@meltin.net>
-   * BUG 14175: ctdb: Incoming queue can be orphaned causing communication
-     breakdown.
+o  Joseph Sutton <josephsutton@catalyst.net.nz>
+   * BUG 14642: Provide a fix for MS CVE-2020-17049 in Samba [SECURITY] 'Bronze
+     bit' S4U2Proxy Constrained Delegation bypass in Samba with
+     embedded Heimdal.
+   * BUG 14645: rpcclient NetFileEnum and net rpc file both cause lock order
+     violation: brlock.tdb, share_entries.tdb.
+   * BUG 14836: Python ldb.msg_diff() memory handling failure.
+   * BUG 14845: "in" operator on ldb.Message is case sensitive.
+   * BUG 14848: Release LDB 2.3.1 for Samba 4.14.9.
+   * BUG 14868: rodc_rwdc test flaps.
+   * BUG 14871: Fix Samba support for UF_NO_AUTH_DATA_REQUIRED.
+   * BUG 14874: Allow special chars like "@" in samAccountName when generating
+     the salt.
+   * BUG 14881: Backport bronze bit fixes, tests, and selftest improvements.
 
-o  Uri Simchoni <uri@samba.org>
-   * BUG 13846: ldb: Release ldb 2.0.8. Cross-compile will not take
-     cross-answers or cross-execute.
-   * BUG 13856: heimdal-build: Avoid hard-coded /usr/include/heimdal in
-     asn1_compile-generated code.
-
-
-#######################################
-Reporting bugs & Development Discussion
-#######################################
-
-Please discuss this release on the samba-technical mailing list or by
-joining the #samba-technical IRC channel on irc.freenode.net.
-
-If you do report problems then please try to send high quality
-feedback. If you don't provide vital information to help us track down
-the problem then you will probably be ignored.  All bug reports should
-be filed under the "Samba 4.1 and newer" product in the project's Bugzilla
-database (https://bugzilla.samba.org/).
-
-
-======================================================================
-== Our Code, Our Bugs, Our Responsibility.
-== The Samba Team
-======================================================================
-
-
-----------------------------------------------------------------------
-
-
-                   ==============================
-                   Release Notes for Samba 4.11.3
-                          December 10, 2019
-		   ==============================
-
-
-This is a security release in order to address the following defects:
-
-o CVE-2019-14861: Samba AD DC zone-named record Denial of Service in DNS
-		  management server (dnsserver).
-o CVE-2019-14870: DelegationNotAllowed not being enforced in protocol transition
-		  on Samba AD DC.
-
-
-=======
-Details
-=======
-
-o  CVE-2019-14861:
-   An authenticated user can crash the DCE/RPC DNS management server by creating
-   records with matching the zone name.
-
-o  CVE-2019-14870:
-   The DelegationNotAllowed Kerberos feature restriction was not being applied
-   when processing protocol transition requests (S4U2Self), in the AD DC KDC.
-
-For more details and workarounds, please refer to the security advisories.
-
-
-Changes since 4.11.2:
----------------------
-
-o  Andrew Bartlett <abartlet@samba.org>
-   * BUG 14138: CVE-2019-14861: Fix DNSServer RPC server crash.
-
-o  Isaac Boukris <iboukris@gmail.com>
-   * BUG 14187: CVE-2019-14870: DelegationNotAllowed not being enforced.
+o  Nicolas Williams <nico@twosigma.com>
+   * BUG 14642: Provide a fix for MS CVE-2020-17049 in Samba [SECURITY] 'Bronze
+     bit' S4U2Proxy Constrained Delegation bypass in Samba with
+     embedded Heimdal.
+   * BUG 14881: Backport bronze bit fixes, tests, and selftest improvements.
 
 
 #######################################
@@ -272,7 +193,7 @@ joining the #samba-technical IRC channel on irc.freenode.net.
 If you do report problems then please try to send high quality
 feedback. If you don't provide vital information to help us track down
 the problem then you will probably be ignored.  All bug reports should
-be filed under the "Samba 4.1 and newer" product in the project's Bugzilla
+be filed under the Samba 4.1 and newer product in the project's Bugzilla
 database (https://bugzilla.samba.org/).
 
 
@@ -284,142 +205,58 @@ database (https://bugzilla.samba.org/).
 
 ----------------------------------------------------------------------
 
-
-                   ==============================
-                   Release Notes for Samba 4.11.2
-                          October 29, 2019
-		   ==============================
-
-
-This is a security release in order to address the following defects:
-
-o CVE-2019-10218: Client code can return filenames containing path separators.          
-o CVE-2019-14833: Samba AD DC check password script does not receive the full
-		  password.
-o CVE-2019-14847: User with "get changes" permission can crash AD DC LDAP server
-		  via dirsync.
-
-=======
-Details
-=======
-
-o  CVE-2019-10218:
-   Malicious servers can cause Samba client code to return filenames containing
-   path separators to calling code.
-
-o  CVE-2019-14833:
-   When the password contains multi-byte (non-ASCII) characters, the check
-   password script does not receive the full password string.
-
-o  CVE-2019-14847:
-   Users with the "get changes" extended access right can crash the AD DC LDAP
-   server by requesting an attribute using the range= syntax.
-
-For more details and workarounds, please refer to the security advisories.
+                   ===============================
+                   Release Notes for Samba 4.13.12
+                         September 22, 2021
+                   ===============================
 
 
-Changes since 4.11.1:
+This is the latest stable release of the Samba 4.13 release series.
+
+
+Changes since 4.13.11
 ---------------------
 
-o  Jeremy Allison <jra@samba.org>
-   * BUG 14071: CVE-2019-10218 - s3: libsmb: Protect SMB1 and SMB2 client code
-     from evil server returned names.
-
 o  Andrew Bartlett <abartlet@samba.org>
-   * BUG 12438: CVE-2019-14833: Use utf8 characters in the unacceptable
-     password.
-   * BUG 14040: CVE-2019-14847 dsdb: Correct behaviour of ranged_results when
-     combined with dirsync.
+   * BUG 14806: Address a signifcant performance regression in database access
+     in the AD DC since Samba 4.12.
+   * BUG 14807: Fix performance regression in lsa_LookupSids3/LookupNames4 since
+     Samba 4.9 by using an explicit database handle cache.
+   * BUG 14817: An unuthenticated user can crash the AD DC KDC by omitting the
+     server name in a TGS-REQ.
+   * BUG 14818: Address flapping samba_tool_drs_showrepl test.
+   * BUG 14819: Address flapping dsdb_schema_attributes test.
 
 o  Björn Baumbach <bb@sernet.de>
-   * BUG 12438: CVE-2019-14833 dsdb: Send full password to check password
-     script.
+   * BUG 14817: An unuthenticated user can crash the AD DC KDC by omitting the
+     server name in a TGS-REQ
 
+o  Luke Howard <lukeh@padl.com>
+   * BUG 14817: An unuthenticated user can crash the AD DC KDC by omitting the
+     server name in a TGS-REQ.
 
-#######################################
-Reporting bugs & Development Discussion
-#######################################
+o  Volker Lendecke <vl@samba.org>
+   * BUG 14817: An unuthenticated user can crash the AD DC KDC by omitting the
+     server name in a TGS-REQ.
 
-Please discuss this release on the samba-technical mailing list or by
-joining the #samba-technical IRC channel on irc.freenode.net.
-
-If you do report problems then please try to send high quality
-feedback. If you don't provide vital information to help us track down
-the problem then you will probably be ignored.  All bug reports should
-be filed under the "Samba 4.1 and newer" product in the project's Bugzilla
-database (https://bugzilla.samba.org/).
-
-
-======================================================================
-== Our Code, Our Bugs, Our Responsibility.
-== The Samba Team
-======================================================================
-
-
-----------------------------------------------------------------------
-
-
-                   ==============================
-                   Release Notes for Samba 4.11.1
-                          October 18, 2019
-		   ==============================
-
-
-This is the latest stable release of the Samba 4.11 release series.
-
-
-Changes since 4.11.0:
----------------------
-
-o  Michael Adam <obnox@samba.org>
-   * BUG 14141: getpwnam and getpwuid need to return data for ID_TYPE_BOTH
-     group.
-
-o  Jeremy Allison <jra@samba.org>
-   * BUG 14094: smbc_readdirplus() is incompatible with smbc_telldir() and
-     smbc_lseekdir().
-   * BUG 14152: s3: smbclient: Stop an SMB2-connection from blundering into
-     SMB1-specific calls.
-
-o  Ralph Boehme <slow@samba.org>
-   * BUG 14137: Fix stale file handle error when using mkstemp on a share.
-
-o  Isaac Boukris <iboukris@gmail.com>
-   * BUG 14106: Fix spnego fallback from kerberos to ntlmssp in smbd server.
-   * BUG 14140: Overlinking libreplace against librt and pthread against every
-     binary or library causes issues.
-
-o  Günther Deschner <gd@samba.org>
-   * BUG 14130: s3-winbindd: Fix forest trusts with additional trust attributes.
-   * BUG 14134: auth/gensec: Fix non-AES schannel seal.
-
-o  Amitay Isaacs <amitay@gmail.com>
-   * BUG 14147: Deleted records can be resurrected during recovery.
-
-o  Björn Jacke <bj@sernet.de>
-   * BUG 14136: Fix uncaught exception in classicupgrade.
-   * BUG 14139: fault.c: Improve fault_report message text pointing to our wiki.
-
-o  Bryan Mason <bmason@redhat.com>
-   * BUG 14128: s3:client: Use DEVICE_URI, instead of argv[0], for Device URI.
+o  Gary Lockyer <gary@catalyst.net.nz>
+   * BUG 14817: An unuthenticated user can crash the AD DC KDC by omitting the
+     server name in a TGS-REQ.
 
 o  Stefan Metzmacher <metze@samba.org>
-   * BUG 14124: pam_winbind with krb5_auth or wbinfo -K doesn't work for users
-     of trusted domains/forests.
-
-o  Mathieu Parent <math.parent@gmail.com>
-   * BUG 14131: Remove 'pod2man' as it is no longer needed.
+   * BUG 14817: An unuthenticated user can crash the AD DC KDC by omitting the
+     server name in a TGS-REQ.
 
 o  Andreas Schneider <asn@samba.org>
-   * BUG 13884: Joining Active Directory should not use SAMR to set the
-     password.
-   * BUG 14140: Overlinking libreplace against librt and pthread against every
-     binary or library causes issues.
-   * BUG 14155: 'kpasswd' fails when built with MIT Kerberos.
+   * BUG 14817: An unuthenticated user can crash the AD DC KDC by omitting the
+     server name in a TGS-REQ.
 
 o  Martin Schwenke <martin@meltin.net>
-   * BUG 14129: Exit code of ctdb nodestatus should not be influenced by deleted
-     nodes.
+   * BUG 14784: Fix CTDB flag/status update race conditions.
+
+o  Joseph Sutton <josephsutton@catalyst.net.nz>
+   * BUG 14817: An unuthenticated user can crash the AD DC KDC by omitting the
+     server name in a TGS-REQ.
 
 
 #######################################
@@ -432,7 +269,127 @@ joining the #samba-technical IRC channel on irc.freenode.net.
 If you do report problems then please try to send high quality
 feedback. If you don't provide vital information to help us track down
 the problem then you will probably be ignored.  All bug reports should
-be filed under the "Samba 4.1 and newer" product in the project's Bugzilla
+be filed under the Samba 4.1 and newer product in the project's Bugzilla
+database (https://bugzilla.samba.org/).
+
+
+======================================================================
+== Our Code, Our Bugs, Our Responsibility.
+== The Samba Team
+======================================================================
+
+
+----------------------------------------------------------------------
+
+
+                   ===============================
+                   Release Notes for Samba 4.13.11
+                         September 07, 2021
+                   ===============================
+
+
+This is the latest stable release of the Samba 4.13 release series.
+
+
+Changes since 4.13.10
+---------------------
+
+o  Jeremy Allison <jra@samba.org>
+   * BUG 14769: smbd panic on force-close share during offload write.
+
+o  Ralph Boehme <slow@samba.org>
+   * BUG 14731: Fix returned attributes on fake quota file handle and avoid
+     hitting the VFS.
+   * BUG 14783: smbd "deadtime" parameter doesn't work anymore.
+   * BUG 14787: net conf list crashes when run as normal user.
+
+o  Stefan Metzmacher <metze@samba.org>
+   * BUG 14607: Work around special SMB2 READ response behavior of NetApp Ontap
+     7.3.7.
+   * BUG 14793: Start the SMB encryption as soon as possible.
+
+o  Andreas Schneider <asn@samba.org>
+   * BUG 14792: Winbind should not start if the socket path for the privileged
+     pipe is too long.
+
+
+#######################################
+Reporting bugs & Development Discussion
+#######################################
+
+Please discuss this release on the samba-technical mailing list or by
+joining the #samba-technical IRC channel on irc.freenode.net.
+
+If you do report problems then please try to send high quality
+feedback. If you don't provide vital information to help us track down
+the problem then you will probably be ignored.  All bug reports should
+be filed under the Samba 4.1 and newer product in the project's Bugzilla
+database (https://bugzilla.samba.org/).
+
+
+======================================================================
+== Our Code, Our Bugs, Our Responsibility.
+== The Samba Team
+======================================================================
+
+
+----------------------------------------------------------------------
+
+
+                   ===============================
+                   Release Notes for Samba 4.13.10
+                            July 14, 2021
+                   ===============================
+
+
+This is the latest stable release of the Samba 4.13 release series.
+
+
+Changes since 4.13.9
+--------------------
+
+o  Jeremy Allison <jra@samba.org>
+   * BUG 14708: s3: smbd: Ensure POSIX default ACL is mapped into returned
+     Windows ACL for directory handles.
+   * BUG 14721: Take a copy to make sure we don't reference free'd memory.
+   * BUG 14722: s3: lib: Fix talloc heirarcy error in parent_smb_fname().
+   * BUG 14736: s3: smbd: Remove erroneous TALLOC_FREE(smb_fname_parent) in
+     change_file_owner_to_parent() error path.
+
+o  Andrew Bartlett <abartlet@samba.org>
+   * BUG 14575: samba-tool: Give better error information when the
+     'domain backup restore' fails with a duplicate SID.
+
+o  Ralph Boehme <slow@samba.org>
+   * BUG 14714: smbd: Correctly initialize close timestamp fields.
+   * BUG 14740: Spotlight RPC service doesn't work with vfs_glusterfs.
+
+o  Volker Lendecke <vl@samba.org>
+   * BUG 14475: ctdb: Fix a crash in run_proc_signal_handler().
+
+o  Stefan Metzmacher <metze@samba.org>
+   * BUG 14750: gensec_krb5: Restore ipv6 support for kpasswd.
+   * BUG 14752: smbXsrv_{open,session,tcon}: Protect
+     smbXsrv_{open,session,tcon}_global_traverse_fn against invalid records.
+
+o  Joseph Sutton <josephsutton@catalyst.net.nz>
+   * BUG 14027: samba-tool domain backup offline doesn't work against bind DLZ
+     backend.
+   * BUG 14669: netcmd: Use next_free_rid() function to calculate a SID for
+     restoring a backup.
+
+
+#######################################
+Reporting bugs & Development Discussion
+#######################################
+
+Please discuss this release on the samba-technical mailing list or by
+joining the #samba-technical IRC channel on irc.freenode.net.
+
+If you do report problems then please try to send high quality
+feedback. If you don't provide vital information to help us track down
+the problem then you will probably be ignored.  All bug reports should
+be filed under the Samba 4.1 and newer product in the project's Bugzilla
 database (https://bugzilla.samba.org/).
 
 
@@ -446,466 +403,873 @@ database (https://bugzilla.samba.org/).
 
 
                    ==============================
-                   Release Notes for Samba 4.11.0
-                         September 17, 2019
-		   ==============================
+                   Release Notes for Samba 4.13.9
+                            May 11, 2021
+                   ==============================
 
 
-This is the first stable release of the Samba 4.11 release series.
+This is the latest stable release of the Samba 4.13 release series.
+
+
+Changes since 4.13.8
+--------------------
+
+o  Jeremy Allison <jra@samba.org>
+   * BUG 14696: s3: smbd: SMB1 SMBsplwr doesn't send a reply packet on success.
+
+o  Andrew Bartlett <abartlet@samba.org>
+   * BUG 14689: Add documentation for dsdb_group_audit and dsdb_group_json_audit
+     to "log level", synchronise "log level" in smb.conf with the code.
+
+o  Ralph Boehme <slow@samba.org>
+   * BUG 14672: Fix smbd panic when two clients open same file.
+   * BUG 14675: Fix memory leak in the RPC server. 
+   * BUG 14679: s3: smbd: Fix deferred renames.
+
+o  Samuel Cabrero <scabrero@samba.org>
+   * BUG 14675: s3-iremotewinspool: Set the per-request memory context.
+
+o  Volker Lendecke <vl@samba.org>
+   * BUG 14675: rpc_server3: Fix a memleak for internal pipes.
+
+o  Stefan Metzmacher <metze@samba.org>
+   * BUG 11899: third_party: Update socket_wrapper to version 1.3.2.
+   * BUG 14640: third_party: Update socket_wrapper to version 1.3.3.
+
+
+o  Christof Schmitt <cs@samba.org>
+   * BUG 14663: idmap_rfc2307 and idmap_nss return wrong mapping for uid/gid
+     conflict.
+
+o  Martin Schwenke <martin@meltin.net
+   * BUG 14288: Fix the build on OmniOS.
+
+
+#######################################
+Reporting bugs & Development Discussion
+#######################################
+
+Please discuss this release on the samba-technical mailing list or by
+joining the #samba-technical IRC channel on irc.freenode.net.
+
+If you do report problems then please try to send high quality
+feedback. If you don't provide vital information to help us track down
+the problem then you will probably be ignored.  All bug reports should
+be filed under the Samba 4.1 and newer product in the project's Bugzilla
+database (https://bugzilla.samba.org/).
+
+
+======================================================================
+== Our Code, Our Bugs, Our Responsibility.
+== The Samba Team
+======================================================================
+
+
+----------------------------------------------------------------------
+
+
+                   ==============================
+                   Release Notes for Samba 4.13.8
+                           April 29, 2021
+                   ==============================
+
+
+This is a security release in order to address the following defect:
+
+o CVE-2021-20254: Negative idmap cache entries can cause incorrect group entries
+  in the Samba file server process token.
+
+
+=======
+Details
+=======
+
+o  CVE-2021-20254:
+   The Samba smbd file server must map Windows group identities (SIDs) into unix
+   group ids (gids). The code that performs this had a flaw that could allow it
+   to read data beyond the end of the array in the case where a negative cache
+   entry had been added to the mapping cache. This could cause the calling code
+   to return those values into the process token that stores the group
+   membership for a user.
+
+   Most commonly this flaw caused the calling code to crash, but an alert user
+   (Peter Eriksson, IT Department, Linköping University) found this flaw by
+   noticing an unprivileged user was able to delete a file within a network
+   share that they should have been disallowed access to.
+
+   Analysis of the code paths has not allowed us to discover a way for a
+   remote user to be able to trigger this flaw reproducibly or on demand,
+   but this CVE has been issued out of an abundance of caution.
+
+
+Changes since 4.13.7
+--------------------
+
+o  Volker Lendecke <vl@samba.org>
+   * BUG 14571: CVE-2021-20254: Fix buffer overrun in sids_to_unixids().
+
+
+#######################################
+Reporting bugs & Development Discussion
+#######################################
+
+Please discuss this release on the samba-technical mailing list or by
+joining the #samba-technical IRC channel on irc.freenode.net.
+
+If you do report problems then please try to send high quality
+feedback. If you don't provide vital information to help us track down
+the problem then you will probably be ignored.  All bug reports should
+be filed under the Samba 4.1 and newer product in the project's Bugzilla
+database (https://bugzilla.samba.org/).
+
+
+======================================================================
+== Our Code, Our Bugs, Our Responsibility.
+== The Samba Team
+======================================================================
+
+
+----------------------------------------------------------------------
+
+
+                   ==============================
+                   Release Notes for Samba 4.13.7
+                           March 24, 2021
+                   ==============================
+
+
+This is a follow-up release to depend on the correct ldb version. This is only
+needed when building against a system ldb library.
+
+This is a security release in order to address the following defects:
+
+o CVE-2020-27840: Heap corruption via crafted DN strings.
+o CVE-2021-20277: Out of bounds read in AD DC LDAP server.
+
+
+=======
+Details
+=======
+
+o  CVE-2020-27840:
+   An anonymous attacker can crash the Samba AD DC LDAP server by sending easily
+   crafted DNs as part of a bind request. More serious heap corruption is likely
+   also possible.
+
+o  CVE-2021-20277:
+   User-controlled LDAP filter strings against the AD DC LDAP server may crash
+   the LDAP server.
+
+For more details, please refer to the security advisories.
+
+
+Changes since 4.13.6
+--------------------
+
+o  Release with dependency on ldb version 2.2.1.
+
+
+#######################################
+Reporting bugs & Development Discussion
+#######################################
+
+Please discuss this release on the samba-technical mailing list or by
+joining the #samba-technical IRC channel on irc.freenode.net.
+
+If you do report problems then please try to send high quality
+feedback. If you don't provide vital information to help us track down
+the problem then you will probably be ignored.  All bug reports should
+be filed under the Samba 4.1 and newer product in the project's Bugzilla
+database (https://bugzilla.samba.org/).
+
+
+======================================================================
+== Our Code, Our Bugs, Our Responsibility.
+== The Samba Team
+======================================================================
+
+
+----------------------------------------------------------------------
+
+
+                   ==============================
+                   Release Notes for Samba 4.13.6
+                           March 24, 2021
+                   ==============================
+
+
+This is a security release in order to address the following defects:
+
+o CVE-2020-27840: Heap corruption via crafted DN strings.
+o CVE-2021-20277: Out of bounds read in AD DC LDAP server.
+
+
+=======
+Details
+=======
+
+o  CVE-2020-27840:
+   An anonymous attacker can crash the Samba AD DC LDAP server by sending easily
+   crafted DNs as part of a bind request. More serious heap corruption is likely
+   also possible.
+
+o  CVE-2021-20277:
+   User-controlled LDAP filter strings against the AD DC LDAP server may crash
+   the LDAP server.
+
+For more details, please refer to the security advisories.
+
+
+Changes since 4.13.5
+--------------------
+
+o  Andrew Bartlett <abartlet@samba.org>
+   * BUG 14655: CVE-2021-20277: Fix out of bounds read in ldb_handler_fold.
+
+o  Douglas Bagnall <douglas.bagnall@catalyst.net.nz>
+   * BUG 14595: CVE-2020-27840: Fix unauthenticated remote heap corruption via
+     bad DNs.
+   * BUG 14655: CVE-2021-20277: Fix out of bounds read in ldb_handler_fold.
+
+
+#######################################
+Reporting bugs & Development Discussion
+#######################################
+
+Please discuss this release on the samba-technical mailing list or by
+joining the #samba-technical IRC channel on irc.freenode.net.
+
+If you do report problems then please try to send high quality
+feedback. If you don't provide vital information to help us track down
+the problem then you will probably be ignored.  All bug reports should
+be filed under the Samba 4.1 and newer product in the project's Bugzilla
+database (https://bugzilla.samba.org/).
+
+
+======================================================================
+== Our Code, Our Bugs, Our Responsibility.
+== The Samba Team
+======================================================================
+
+
+----------------------------------------------------------------------
+
+
+                   ==============================
+                   Release Notes for Samba 4.13.5
+                           March 09, 2021
+                   ==============================
+
+
+This is the latest stable release of the Samba 4.13 release series.
+
+
+Changes since 4.13.4
+--------------------
+
+o  Trever L. Adams <trever.adams@gmail.com>
+   * BUG 14634: s3:modules:vfs_virusfilter: Recent talloc changes cause infinite
+     start-up failure.
+
+o  Jeremy Allison <jra@samba.org>
+   * BUG 13992: s3: libsmb: Add missing cli_tdis() in error path if encryption
+     setup failed on temp proxy connection.
+   * BUG 14604: smbd: In conn_force_tdis_done() when forcing a connection closed
+     force a full reload of services.
+
+o  Andrew Bartlett <abartlet@samba.org>
+   * BUG 14593: dbcheck: Check Deleted Objects and reduce noise in reports about
+     expired tombstones.
+
+o  Ralph Boehme <slow@samba.org
+   * BUG 14503: s3: Fix fcntl waf configure check.
+   * BUG 14602: s3/auth: Implement "winbind:ignore domains".
+   * BUG 14617: smbd: Use fsp->conn->session_info for the initial
+     delete-on-close token.
+
+o  Peter Eriksson <pen@lysator.liu.se>
+   * BUG 14648: s3: VFS: nfs4_acls. Add missing TALLOC_FREE(frame) in error
+     path.
+
+o  Björn Jacke <bj@sernet.de>
+   * BUG 14624: classicupgrade: Treat old never expires value right.
+
+o  Volker Lendecke <vl@samba.org>
+   * BUG 14636: g_lock: Fix uninitalized variable reads.
+
+o  Stefan Metzmacher <metze@samba.org>
+   * BUG 13898: s3:pysmbd: Fix fd leak in py_smbd_create_file().
+
+o  Andreas Schneider <asn@samba.org>
+   * BUG 14625: lib:util: Avoid free'ing our own pointer.
+
+o  Paul Wise <pabs3@bonedaddy.net>
+   * BUG 12505: HEIMDAL: krb5_storage_free(NULL) should work.
+
+
+#######################################
+Reporting bugs & Development Discussion
+#######################################
+
+Please discuss this release on the samba-technical mailing list or by
+joining the #samba-technical IRC channel on irc.freenode.net.
+
+If you do report problems then please try to send high quality
+feedback. If you don't provide vital information to help us track down
+the problem then you will probably be ignored.  All bug reports should
+be filed under the Samba 4.1 and newer product in the project's Bugzilla
+database (https://bugzilla.samba.org/).
+
+
+======================================================================
+== Our Code, Our Bugs, Our Responsibility.
+== The Samba Team
+======================================================================
+
+
+----------------------------------------------------------------------
+
+
+                   ==============================
+                   Release Notes for Samba 4.13.4
+                          January 26, 2021
+                   ==============================
+
+
+This is the latest stable release of the Samba 4.13 release series.
+
+
+Changes since 4.13.3
+--------------------
+
+o  Jeremy Allison <jra@samba.org>
+   * BUG 14607: Work around special SMB2 IOCTL response behavior of NetApp Ontap
+     7.3.7.
+   * BUG 14612: Temporary DFS share setup doesn't set case parameters in the
+     same way as a regular share definition does.
+
+o  Dimitry Andric <dimitry@andric.com>
+   * BUG 14605: lib: Avoid declaring zero-length VLAs in various messaging
+     functions.
+
+o  Andrew Bartlett <abartlet@samba.org>
+   * BUG 14579: Do not create an empty DB when accessing a sam.ldb.
+
+o  Ralph Boehme <slow@samba.org>
+   * BUG 14596: vfs_fruit may close wrong backend fd.
+   * BUG 14612: Temporary DFS share setup doesn't set case parameters in the
+     same way as a regular share definition does.
+
+o  Arne Kreddig <arne@kreddig.net>
+   * BUG 14606: vfs_virusfilter: Allocate separate memory for config char*.
+
+o  Stefan Metzmacher <metze@samba.org>
+   * BUG 14596: vfs_fruit may close wrong backend fd.
+   * BUG 14607: Work around special SMB2 IOCTL response behavior of NetApp Ontap
+     7.3.7.
+
+o  Andreas Schneider <asn@samba.org>
+   * BUG 14601: The cache directory for the user gencache should be created
+     recursively.
+
+o  Martin Schwenke <martin@meltin.net>
+   * BUG 14594: Be more flexible with repository names in CentOS 8 test
+     environments.
+
+
+#######################################
+Reporting bugs & Development Discussion
+#######################################
+
+Please discuss this release on the samba-technical mailing list or by
+joining the #samba-technical IRC channel on irc.freenode.net.
+
+If you do report problems then please try to send high quality
+feedback. If you don't provide vital information to help us track down
+the problem then you will probably be ignored.  All bug reports should
+be filed under the Samba 4.1 and newer product in the project's Bugzilla
+database (https://bugzilla.samba.org/).
+
+
+======================================================================
+== Our Code, Our Bugs, Our Responsibility.
+== The Samba Team
+======================================================================
+
+
+----------------------------------------------------------------------
+
+
+                   ==============================
+                   Release Notes for Samba 4.13.3
+                          December 15, 2020
+                   ==============================
+
+
+This is the latest stable release of the Samba 4.13 release series.
+
+
+Changes since 4.13.2
+--------------------
+
+o  Jeremy Allison <jra@samba.org>
+   * BUG 14210: libcli: smb2: Never print length if smb2_signing_key_valid()
+     fails for crypto blob.
+   * BUG 14486: s3: modules: gluster. Fix the error I made in preventing talloc
+     leaks from a function. 
+   * BUG 14515: s3: smbd: Don't overwrite contents of fsp->aio_requests[0] with
+     NULL via TALLOC_FREE().
+   * BUG 14568: s3: spoolss: Make parameters in call to user_ok_token() match
+     all other uses.
+   * BUG 14590: s3: smbd: Quiet log messages from usershares for an unknown
+     share.
+
+o  Ralph Boehme <slow@samba.org>
+   * BUG 14248: samba process does not honor max log size.
+   * BUG 14587: vfs_zfsacl: Add missing inherited flag on hidden "magic"
+     everyone@ ACE.
+
+o  Isaac Boukris <iboukris@gmail.com>
+   * BUG 13124: s3-libads: Pass timeout to open_socket_out in ms.
+
+o  Günther Deschner <gd@samba.org>
+   * BUG 14486: s3-vfs_glusterfs: Always disable write-behind translator.
+
+o  Volker Lendecke <vl@samba.org>
+   * BUG 14517: smbclient: Fix recursive mget.
+   * BUG 14581: clitar: Use do_list()'s recursion in clitar.c.
+
+o  Anoop C S <anoopcs@samba.org>
+   * BUG 14486: manpages/vfs_glusterfs: Mention silent skipping of write-behind
+     translator.
+   * BUG 14573: vfs_shadow_copy2: Preserve all open flags assuming ROFS.
+
+o  Jones Syue <jonessyue@qnap.com>
+   * BUG 14514: interface: Fix if_index is not parsed correctly.
+
+
+#######################################
+Reporting bugs & Development Discussion
+#######################################
+
+Please discuss this release on the samba-technical mailing list or by
+joining the #samba-technical IRC channel on irc.freenode.net.
+
+If you do report problems then please try to send high quality
+feedback. If you don't provide vital information to help us track down
+the problem then you will probably be ignored.  All bug reports should
+be filed under the Samba 4.1 and newer product in the project's Bugzilla
+database (https://bugzilla.samba.org/).
+
+
+======================================================================
+== Our Code, Our Bugs, Our Responsibility.
+== The Samba Team
+======================================================================
+
+
+----------------------------------------------------------------------                   ==============================
+                   Release Notes for Samba 4.13.2
+                          November 03, 2020
+                   ==============================
+
+
+This is the latest stable release of the Samba 4.13 release series.
+
+Major enhancements include:
+  o BUG 14537: ctdb-common: Avoid aliasing errors during code optimization.
+  o BUG 14486: vfs_glusterfs: Avoid data corruption with the write-behind
+               translator.
+
+
+=======
+Details
+=======
+
+The GlusterFS write-behind performance translator, when used with Samba, could
+be a source of data corruption. The translator, while processing a write call,
+immediately returns success but continues writing the data to the server in the
+background. This can cause data corruption when two clients relying on Samba to
+provide data consistency are operating on the same file.
+
+The write-behind translator is enabled by default on GlusterFS.
+The vfs_glusterfs plugin will check for the presence of the translator and
+refuse to connect if detected. Please disable the write-behind translator for
+the GlusterFS volume to allow the plugin to connect to the volume.
+
+
+Changes since 4.13.1
+--------------------
+
+o  Jeremy Allison <jra@samba.org>
+   * BUG 14486: s3: modules: vfs_glusterfs: Fix leak of char 
+     **lines onto mem_ctx on return.
+
+o  Ralph Boehme <slow@samba.org>
+   * BUG 14471: RN: vfs_zfsacl: Only grant DELETE_CHILD if ACL tag is special.
+
+o  Alexander Bokovoy <ab@samba.org>
+   * BUG 14538: smb.conf.5: Add clarification how configuration changes
+     reflected by Samba.
+   * BUG 14552: daemons: Report status to systemd even when running in
+     foreground.
+   * BUG 14553: DNS Resolver: Support both dnspython before and after 2.0.0.
+ 
+o  Günther Deschner <gd@samba.org>
+   * BUG 14486: s3-vfs_glusterfs: Refuse connection when write-behind xlator is
+     present.
+
+o  Amitay Isaacs <amitay@gmail.com>
+   * BUG 14487: provision: Add support for BIND 9.16.x.
+   * BUG 14537: ctdb-common: Avoid aliasing errors during code optimization.
+   * BUG 14541: libndr: Avoid assigning duplicate versions to symbols.
+
+o  Björn Jacke <bjacke@samba.org>
+   * BUG 14522: docs: Fix default value of spoolss:architecture.
+
+o  Laurent Menase <laurent.menase@hpe.com>
+   * BUG 14388: winbind: Fix a memleak.
+
+o  Stefan Metzmacher <metze@samba.org>
+   * BUG 14531: s4:dsdb:acl_read: Implement "List Object" mode feature.
+
+o  Sachin Prabhu <sprabhu@redhat.com>
+   * BUG 14486: docs-xml/manpages: Add warning about write-behind translator for
+     vfs_glusterfs.
+
+o  Khem Raj <raj.khem@gmail.com>
+   * nsswitch/nsstest.c: Avoid nss function conflicts with glibc nss.h.
+
+o  Anoop C S <anoopcs@samba.org>
+   * BUG 14530: vfs_shadow_copy2: Avoid closing snapsdir twice.
+
+o  Andreas Schneider <asn@samba.org>
+   * BUG 14547: third_party: Update resolv_wrapper to version 1.1.7.
+   * BUG 14550: examples:auth: Do not install example plugin.
+
+o  Martin Schwenke <martin@meltin.net>
+   * BUG 14513: ctdb-recoverd: Drop unnecessary and broken code.
+
+o  Andrew Walker <awalker@ixsystems.com>
+   * BUG 14471: RN: vfs_zfsacl: Only grant DELETE_CHILD if ACL tag is special.
+
+
+#######################################
+Reporting bugs & Development Discussion
+#######################################
+
+Please discuss this release on the samba-technical mailing list or by
+joining the #samba-technical IRC channel on irc.freenode.net.
+
+If you do report problems then please try to send high quality
+feedback. If you don't provide vital information to help us track down
+the problem then you will probably be ignored.  All bug reports should
+be filed under the Samba 4.1 and newer product in the project's Bugzilla
+database (https://bugzilla.samba.org/).
+
+
+======================================================================
+== Our Code, Our Bugs, Our Responsibility.
+== The Samba Team
+======================================================================
+
+
+----------------------------------------------------------------------
+
+
+                   ==============================
+                   Release Notes for Samba 4.13.1
+                          October 29, 2020
+                   ==============================
+
+
+This is a security release in order to address the following defects:
+
+o CVE-2020-14318: Missing handle permissions check in SMB1/2/3 ChangeNotify.
+o CVE-2020-14323: Unprivileged user can crash winbind.
+o CVE-2020-14383: An authenticated user can crash the DCE/RPC DNS with easily
+		  crafted records.
+
+
+=======
+Details
+=======
+
+o  CVE-2020-14318:
+   The SMB1/2/3 protocols have a concept of "ChangeNotify", where a client can
+   request file name notification on a directory handle when a condition such as
+   "new file creation" or "file size change" or "file timestamp update" occurs.
+
+   A missing permissions check on a directory handle requesting ChangeNotify
+   meant that a client with a directory handle open only for
+   FILE_READ_ATTRIBUTES (minimal access rights) could be used to obtain change
+   notify replies from the server. These replies contain information that should
+   not be available to directory handles open for FILE_READ_ATTRIBUTE only.
+
+o  CVE-2020-14323:
+   winbind in version 3.6 and later implements a request to translate multiple
+   Windows SIDs into names in one request. This was done for performance
+   reasons: The Microsoft RPC call domain controllers offer to do this
+   translation, so it was an obvious extension to also offer this batch
+   operation on the winbind unix domain stream socket that is available to local
+   processes on the Samba server.
+
+   Due to improper input validation a hand-crafted packet can make winbind
+   perform a NULL pointer dereference and thus crash.
+
+o  CVE-2020-14383:
+   Some DNS records (such as MX and NS records) usually contain data in the
+   additional section. Samba's dnsserver RPC pipe (which is an administrative
+   interface not used in the DNS server itself) made an error in handling the
+   case where there are no records present: instead of noticing the lack of
+   records, it dereferenced uninitialised memory, causing the RPC server to
+   crash. This RPC server, which also serves protocols other than dnsserver,
+   will be restarted after a short delay, but it is easy for an authenticated
+   non-admin attacker to crash it again as soon as it returns. The Samba DNS
+   server itself will continue to operate, but many RPC services will not.
+
+For more details, please refer to the security advisories.
+
+
+Changes since 4.13.0
+--------------------
+
+o  Jeremy Allison <jra@samba.org>
+   * BUG 14434: CVE-2020-14318: s3: smbd: Ensure change notifies can't get set
+     unless the directory handle is open for SEC_DIR_LIST.
+
+o  Douglas Bagnall <douglas.bagnall@catalyst.net.nz>
+   * BUG 12795: CVE-2020-14383: Remote crash after adding NS or MX records using
+     'samba-tool'.
+   * BUG 14472: CVE-2020-14383: Remote crash after adding MX records.
+
+o  Volker Lendecke <vl@samba.org>
+   * BUG 14436: CVE-2020-14323: winbind: Fix invalid lookupsids DoS.
+
+
+#######################################
+Reporting bugs & Development Discussion
+#######################################
+
+Please discuss this release on the samba-technical mailing list or by
+joining the #samba-technical IRC channel on irc.freenode.net.
+
+If you do report problems then please try to send high quality
+feedback. If you don't provide vital information to help us track down
+the problem then you will probably be ignored.  All bug reports should
+be filed under the Samba 4.1 and newer product in the project's Bugzilla
+database (https://bugzilla.samba.org/).
+
+
+======================================================================
+== Our Code, Our Bugs, Our Responsibility.
+== The Samba Team
+======================================================================
+
+
+----------------------------------------------------------------------
+
+
+                   ==============================
+                   Release Notes for Samba 4.13.0
+                          September 22, 2020
+                   ==============================
+
+
+This is the first stable release of the Samba 4.13 release series.
 Please read the release notes carefully before upgrading.
 
 
-UPGRADING
+ZeroLogon
 =========
 
-AD Database compatibility
--------------------------
+Please avoid to set "server schannel = no" and "server schannel= auto" on all
+Samba domain controllers due to the wellknown ZeroLogon issue.
 
-Samba 4.11 has changed how the AD database is stored on disk. AD users should
-not really be affected by this change when upgrading to 4.11. However, AD
-users should be extremely careful if they need to downgrade from Samba 4.11 to
-an older release.
-
-Samba 4.11 maintains database compatibility with older Samba releases. The
-database will automatically get rewritten in the new 4.11 format when you
-first start the upgraded samba executable.
-
-However, when downgrading from 4.11 you will need to manually downgrade the AD
-database yourself. Note that you will need to do this step before you install
-the downgraded Samba packages. For more details, see:
-https://wiki.samba.org/index.php/Downgrading_an_Active_Directory_DC
-
-When either upgrading or downgrading, users should also avoid making any
-database modifications between installing the new Samba packages and starting
-the samba executable.
-
-SMB1 is disabled by default
----------------------------
-
-The defaults of 'client min protocol' and 'server min protocol'
-have been changed to SMB2_02.
-
-This means clients without support for SMB2 or SMB3 are no longer
-able to connect to smbd (by default).
-
-It also means client tools like smbclient and other,
-as well as applications making use of libsmbclient are no longer
-able to connect to servers without SMB2 or SMB3 support (by default).
-
-It's still possible to allow SMB1 dialects, e.g. NT1, LANMAN2
-and LANMAN1 for client and server, as well as CORE and COREPLUS on
-the client.
-
-Note that most commandline tools e.g. smbclient, smbcacls and others
-also support the '--option' argument to overwrite smb.conf options,
-e.g. --option='client min protocol=NT1' might be useful.
-
-As Microsoft no longer installs SMB1 support in recent releases
-or uninstalls it after 30 days without usage, the Samba Team
-tries to get remove the SMB1 usage as much as possible.
-
-SMB1 is officially deprecated and might be removed step by step
-in the following years. If you have a strong requirement for SMB1
-(except for supporting old Linux Kernels), please file a bug
-at https://bugzilla.samba.org and let us know about the details.
-
-LanMan and plaintext authentication deprecated
-----------------------------------------------
-
-The "lanman auth" and "encrypt passwords" parameters are deprecated
-with this release as both are only applicable to SMB1 and are quite
-insecure.  NTLM, NTLMv2 and Kerberos authentication are unaffected, as
-"encrypt passwords = yes" has been the default since Samba 3.0.0.
-
-If you have a strong requirement for these authentication protocols,
-please file a bug at https://bugzilla.samba.org and let us know about
-the details.
-
-BIND9_FLATFILE deprecated
--------------------------
-
-The BIND9_FLATFILE DNS backend is deprecated in this release and will
-be removed in the future.  This was only practically useful on a single
-domain controller or under expert care and supervision.
-
-This release therefore deprecates the "rndc command" smb.conf
-parameter, which is used to support this configuration.  After writing
-out a list of DCs permitted to make changes to the DNS Zone "rndc
-command" is called with reload to tell the 'named' server if a DC was
-added/removed to to the domain.
+For details please see
+https://www.samba.org/samba/security/CVE-2020-1472.html.
 
 
 NEW FEATURES/CHANGES
 ====================
 
-Default samba process model
----------------------------
+Python 3.6 or later required
+----------------------------
 
-The default for the '--model' argument passed to the samba executable has changed
-from 'standard' to 'prefork'. This means a difference in the number of samba
-child processes that are created to handle client connections. The previous
-default would create a separate process for every LDAP or NETLOGON client
-connection. For a network with a lot of persistent client connections, this
-could result in significant memory overhead.  Now, with the new default of
-'prefork', the LDAP, NETLOGON, and KDC services will create a fixed number of
-worker processes at startup and share the client connections amongst these
-workers. The number of worker processes can be configured by the 'prefork
-children' setting in the smb.conf (the default is 4).
+Samba's minimum runtime requirement for python was raised to Python
+3.5 with samba 4.12.  Samba 4.13 raises this minimum version to Python
+3.6 both to access new features and because this is the oldest version
+we test with in our CI infrastructure.
 
-Authentication Logging
-----------------------
+This is also the last release where it will be possible to build Samba
+(just the file server) with Python versions 2.6 and 2.7.
 
-Winbind now logs PAM_AUTH and NTLM_AUTH events, a new attribute "logonId" has
-been added to the Authentication JSON log messages.  This contains a random
-logon id that is generated for each PAM_AUTH and NTLM_AUTH request and is passed
-to SamLogon, linking the windbind and SamLogon requests.
+As Python 2.7 has been End Of Life upstream since April 2020, Samba
+is dropping ALL Python 2.x support in the NEXT release.
 
-The serviceDescription of the messages is set to "winbind", the authDescription
-is set to one of:
-   "PASSDB, <command>, <pid>"
-   "PAM_AUTH, <command>, <pid>"
-   "NTLM_AUTH, <command>, <pid>"
-where:
-   <command> is the name of the command makinmg the winbind request i.e. wbinfo
-   <pid>     is the process id of the requesting process.
+Samba 4.14 to be released in March 2021 will require Python 3.6 or
+later to build.
 
-The version of the JSON Authentication messages has been changed from 1.1 to
-1.2.
+wide links functionality
+------------------------
 
-LDAP referrals
---------------
+For this release, the code implementing the insecure "wide links = yes"
+functionality has been moved out of the core smbd code and into a separate
+VFS module, vfs_widelinks. Currently this vfs module is implicitly loaded
+by smbd as the last but one module before vfs_default if "wide links = yes"
+is enabled on the share (note, the existing restrictions on enabling wide
+links around the SMB1 "unix extensions" and the "allow insecure wide links"
+parameters are still in force). The implicit loading was done to allow
+existing users of "wide links = yes" to keep this functionality without
+having to make a change to existing working smb.conf files.
 
-The scheme of returned LDAP referrals now reflects the scheme of the original
-request, i.e. referrals received via ldap are prefixed with "ldap://"
-and those over ldaps are prefixed with "ldaps://".
+Please note that the Samba developers recommend changing any Samba
+installations that currently use "wide links = yes" to use bind mounts
+as soon as possible, as "wide links = yes" is an inherently insecure
+configuration which we would like to remove from Samba. Moving the
+feature into a VFS module allows this to be done in a cleaner way
+in future.
 
-Previously all referrals were prefixed with "ldap://".
+A future release to be determined will remove this implicit linkage,
+causing administrators who need this functionality to have to explicitly
+add the vfs_widelinks module into the "vfs objects =" parameter lists.
+The release notes will be updated to note this change when it occurs.
 
-Bind9 logging
--------------
+NT4-like 'classic' Samba domain controllers
+-------------------------------------------
 
-It is now possible to log the duration of DNS operations performed by Bind9.
-This should aid future diagnosis of performance issues and could be used to
-monitor DNS performance. The logging is enabled by setting log level to
-"dns:10" in smb.conf.
+Samba 4.13 deprecates Samba's original domain controller mode.
 
-The logs are currently human readable text only, i.e. no JSON formatted output.
+Sites using Samba as a Domain Controller should upgrade from the
+NT4-like 'classic' Domain Controller to a Samba Active Directory DC
+to ensure full operation with modern windows clients.
 
-Log lines are of the form:
-
-    <function>: DNS timing: result: [<result>] duration: (<duration>)
-    zone: [<zone>] name: [<name>] data: [<data>]
-
-    durations are in microseconds.
-
-Default schema updated to 2012_R2
----------------------------------
-
-Default AD schema changed from 2008_R2 to 2012_R2.  2012_R2 functional level
-is not yet available.  Older schemas can be used by provisioning with the
-'--base-schema' argument.  Existing installations can be updated with the
-samba-tool command "domain schemaupgrade".
-
-Samba's replication code has also been improved to handle replication
-with the 2012 schema (the core of this replication fix has also been
-backported to 4.9.11 and will be in a 4.10.x release).
-
-For more about how the AD schema relates to overall Windows compatibility,
-please read:
-https://wiki.samba.org/index.php/Windows_2012_Server_compatibility
-
-GnuTLS 3.2 required
--------------------
-
-Samba is making efforts to remove in-tree cryptographic functionality,
-and to instead rely on externally maintained libraries.  To this end,
-Samba has chosen GnuTLS as our standard cryptographic provider.
-
-Samba now requires GnuTLS 3.2 to be installed (including development
-headers at build time) for all configurations, not just the Samba AD
-DC.
-
-NOTE WELL: The use of GnuTLS means that Samba will honour the
-system-wide 'FIPS mode' (a reference to the US FIPS-140 cryptographic
-standard) and so will not operate in many still common situations if
-this system-wide parameter is in effect, as many of our protocols rely
-on outdated cryptography.
-
-A future Samba version will mitigate this to some extent where good
-cryptography effectively wraps bad cryptography, but for now that above
-applies.
-
-samba-tool improvements
------------------------
-
-A new "samba-tool contact" command has been added to allow the
-command-line manipulation of contacts, as used for address book
-lookups in LDAP.
-
-The "samba-tool [user|group|computer|group|contact] edit" command has been
-improved to operate more pleasantly on international character sets.
-
-100,000 USER and LARGER Samba AD DOMAINS
-========================================
-
-Extensive efforts have been made to optimise Samba for use in
-organisations (for example) targeting 100,000 users, plus 120,000
-computer objects, as well as large number of group memberships.
-
-Many of the specific efforts are detailed below, but the net results
-is to remove barriers to significantly larger Samba deployments
-compared to previous releases.
-
-Reindex performance improvements
---------------------------------
-
-The performance of samba-tool dbcheck --reindex has been improved,
-especially for large domains.
-
-join performance improvements
------------------------------
-
-The performance of samba-tool domain join has been improved,
-especially for large domains.
-
-LDAP Server memory improvements
--------------------------------
-
-The LDAP server has improved memory efficiency, ensuring that large
-LDAP responses (for example a search for all objects) is not copied
-multiple times into memory.
-
-Setting lmdb map size
----------------------
-
-It is now possible to set the lmdb map size (the maximum permitted
-size for the database).  "samba-tool" now accepts the
-"--backend-store-size" i.e. --backend-store-size=4Gb.  If not
-specified it defaults to 8Gb.
-
-This option is avaiable for the following sub commands:
- * domain provision
- * domain join
- * domain dcpromo
- * drs clone-dc-database
-
-LDB "batch_mode"
-----------------
-
-To improve performance during batch operations i.e. joins, ldb now
-accepts a "batch_mode" option.  However to prevent any index or
-database inconsistencies if an operation fails, the entire transaction
-will be aborted at commit.
-
-New LDB pack format
--------------------
-
-On first use (startup of 'samba' or the first transaction write)
-Samba's sam.ldb will be updated to a new more efficient pack format.
-This will take a few moments.
-
-New LDB <= and >= index mode to improve replication performance
----------------------------------------------------------------
-
-As well as a new pack format, Samba's sam.ldb uses a new index format
-allowing Samba to efficiently select objects changed since the last
-replication cycle.  This in turn improves performance during
-replication of large domains.
-
-https://wiki.samba.org/index.php/LDB_Greater_than_and_Less_than_indexing
-
-Improvements to ldb search performance
+SMBv1 only protocol options deprecated
 --------------------------------------
 
-Search performance on large LDB databases has been improved by
-reducing memory allocations made on each object.
-
-Improvements to subtree rename performance
-------------------------------------------
-
-Improvements have been made to Samba's handling of subtree renames,
-for example of containers and organisational units, however large
-renames are still not recommended.
-
-CTDB changes
-============
-
-* nfs-linux-kernel-callout now defaults to using systemd service names
-
-  The Red Hat service names continue to be the default.
-
-  Other distributions should patch this file when packaging it.
-
-* The onnode -o option has been removed
-
-* ctdbd logs when it is using more than 90% of a CPU thread
-
-  ctdbd is single threaded, so can become saturated if it uses the
-  full capacity of a CPU thread.  To help detect this situation, ctdbd
-  now logs messages when CPU utilisation exceeds 90%.  Each change in
-  CPU utilisation over 90% is logged.  A message is also logged when
-  CPU utilisation drops below the 90% threshold.
-
-* Script configuration variable CTDB_MONITOR_SWAP_USAGE has been removed
-
-  05.system.script now monitors total memory (i.e. physical memory +
-  swap) utilisation using the existing CTDB_MONITOR_MEMORY_USAGE
-  script configuration variable.
-
-CephFS Snapshot Integration
----------------------------
-
-CephFS snapshots can now be exposed as previous file versions using the new
-ceph_snapshots VFS module. See the vfs_ceph_snapshots(8) man page for details.
+A number of smb.conf parameters for less-secure authentication methods
+which are only possible over SMBv1 are deprecated in this release.
 
 
 REMOVED FEATURES
 ================
 
-Web server
-----------
+The deprecated "ldap ssl ads" smb.conf option has been removed.
 
-As a leftover from work related to the Samba Web Administration Tool (SWAT),
-Samba still supported a Python WSGI web server (which could still be turned on
-from the 'server services' smb.conf parameter). This service was unused and has
-now been removed from Samba.
-
-samba-tool join subdomain
--------------------------
-
-The subdomain role has been removed from the join command.  This option did
-not work and has no tests.
-
-Python2 support
----------------
-
-Samba 4.11 will not have any runtime support for Python 2.
-
-If you are building Samba using the '--disable-python' option
-(i.e. you're excluding all the run-time Python support), then this
-will continue to work on a system that supports either python2 or
-python3.
-
-To build Samba with python2 you *must* set the 'PYTHON' environment
-variable for both the 'configure' and 'make' steps, i.e.
-   'PYTHON=python2 ./configure'
-   'PYTHON=python2 make'
-This will override the python3 default.
-
-Except for this specific build-time use of python2, Samba now requires
-Python 3.4 as a minimum.
 
 smb.conf changes
 ================
 
-  Parameter Name                     Description                Default
-  --------------                     -----------                -------
-
-  allocation roundup size            Default changed/           0
-                                     Deprecated
-  client min protocol                Changed default            SMB2_02
-  server min protocol                Changed default            SMB2_02
-  mangled names                      Changed default            illegal
-  web port                           Removed
-  fruit:zero_file_id                 Changed default            False
-  debug encryption                   New: dump encryption keys  False
-  rndc command                       Deprecated
-  lanman auth                        Deprecated
-  encrypt passwords                  Deprecated
+  Parameter Name                      Description                Default
+  --------------                      -----------                -------
+  ldap ssl ads                        Removed
+  smb2 disable lock sequence checking Added                      No
+  smb2 disable oplock break retry     Added                      No
+  domain logons                       Deprecated                 no
+  raw NTLMv2 auth                     Deprecated                 no
+  client plaintext auth               Deprecated                 no
+  client NTLMv2 auth                  Deprecated                 yes
+  client lanman auth                  Deprecated                 no
+  client use spnego                   Deprecated                 yes
+  server require schannel:COMPUTER    Added
 
 
-CHANGES SINCE 4.11.0rc4
+CHANGES SINCE 4.13.0rc5
 =======================
-
-
-CHANGES SINCE 4.11.0rc3
-=======================
-
-o  Douglas Bagnall <douglas.bagnall@catalyst.net.nz>
-   * BUG 14049: ldb: Don't try to save a value that isn't there.
-   * ldb_dn: Free dn components on explode failure.
-   * ldb: Do not allow adding a DN as a base to itself.
-
-o  Andrew Bartlett <abartlet@samba.org>
-   * ldb: Release ldb 2.0.7.
-   * BUG 13695: ldb: Correct Pigeonhole principle validation in
-     ldb_filter_attrs().
-   * BUG 14049: Fix ldb dn crash.
-   * BUG 14117: Deprecate "lanman auth = yes" and "encrypt passwords = no".
-
-o  Ralph Boehme <slow@samba.org>
-   * BUG 14038: Fix compiling ctdb on older systems lacking POSIX robust
-     mutexes.
-   * BUG 14121: smbd returns bad File-ID on filehandle used to create a file or
-     directory.
-
-o  Poornima G <pgurusid@redhat.com>
-   * BUG 14098: vfs_glusterfs: Use pthreadpool for scheduling aio operations.
-
-o  Stefan Metzmacher <metze@samba.org>
-   * BUG 14055: Add the target server name of SMB 3.1.1 connections as a hint to
-     load balancers or servers with "multi-tenancy" support.
-   * BUG 14113: Fix byte range locking bugs/regressions.
-
-o  Swen Schillig <swen@linux.ibm.com>
-   * ldb: Fix mem-leak if talloc_realloc fails.
-
-o  Evgeny Sinelnikov <sin@altlinux.org>
-   * BUG 14007: Fix join with don't exists machine account.
-
-o  Martin Schwenke <martin@meltin.net>
-   * BUG 14085: ctdb-recoverd: Only check for LMASTER nodes in the VNN map.
-
-
-CHANGES SINCE 4.11.0rc2
-=======================
-
-o  Michael Adam <obnox@samba.org>
-   * BUG 13972: Different Device Id for GlusterFS FUSE mount is causing data
-     loss in CTDB cluster.
 
 o  Jeremy Allison <jra@samba.org>
-   * BUG 14035: CVE-2019-10197: Permissions check deny can allow user to escape
-     from the share.
+   * BUG 14497: CVE-2020-1472(ZeroLogon): s3:rpc_server/netlogon: Protect
+     netr_ServerPasswordSet2 against unencrypted passwords.
 
-o  Andrew Bartlett <abartlet@samba.org>
-   * BUG 14059: ldb: Release ldb 2.0.6 (log database repack so users know what
-     is happening).
-   * BUG 14092: docs: Deprecate "rndc command" for Samba 4.11.
+o  Günther Deschner <gd@samba.org>
+   * BUG 14497: CVE-2020-1472(ZeroLogon): s3:rpc_server/netlogon: Support
+     "server require schannel:WORKSTATION$ = no" about unsecure configurations.
 
-o  Tim Beale <timbeale@catalyst.net.nz>
-   * BUG 14059: ldb: Free memory when repacking database.
-
-o  Ralph Boehme <slow@samba.org>
-   * BUG 14089: vfs_default: Use correct flag in vfswrap_fs_file_id.
-   * BUG 14090: vfs_glusterfs: Initialize st_ex_file_id, st_ex_itime and
-     st_ex_iflags.
-
-o  Anoop C S <anoopcs@redhat.com>
-   * BUG 14093: vfs_glusterfs: Enable profiling for file system operations.
-
-o  Aaron Haslett <aaronhaslett@catalyst.net.nz>
-   * BUG 14059: Backport sambadowngradedatabase for v4.11.
+o  Gary Lockyer <gary@catalyst.net.nz>
+   * BUG 14497: CVE-2020-1472(ZeroLogon): s4 torture rpc: repeated bytes in
+     client challenge.
 
 o  Stefan Metzmacher <metze@samba.org>
-   * BUG 14035: CVE-2019-10197: Permissions check deny can allow user to escape
-     from the share.
+   * BUG 14497: CVE-2020-1472(ZeroLogon): libcli/auth: Reject weak client
+     challenges in netlogon_creds_server_init()
+     "server require schannel:WORKSTATION$ = no".
+
+
+CHANGES SINCE 4.13.0rc4
+=======================
+
+o  Andreas Schneider <asn@samba.org>
+   * BUG 14399: waf: Only use gnutls_aead_cipher_encryptv2() for GnuTLS >
+     3.6.14.
+   * BUG 14467: s3:smbd: Fix %U substitutions if it contains a domain name.
+   * BUG 14479: The created krb5.conf for 'net ads join' doesn't have a domain
+     entry.
+
+o  Stefan Metzmacher <metze@samba.org>
+   * BUG 14482: Fix build problem if libbsd-dev is not installed.
+
+
+CHANGES SINCE 4.13.0rc3
+=======================
+
+o  David Disseldorp <ddiss@samba.org>
+   * BUG 14437: build: Toggle vfs_snapper using "--with-shared-modules".
+
+o  Volker Lendecke <vl@samba.org>
+   * BUG 14465: idmap_ad does not deal properly with a RFC4511 section 4.4.1
+     response.
+
+o  Stefan Metzmacher <metze@samba.org>
+   * BUG 14428: PANIC: Assert failed in get_lease_type().
+   * BUG 14465: idmap_ad does not deal properly with a RFC4511 section 4.4.1
+     response.
+
+
+CHANGES SINCE 4.13.0rc2
+=======================
+
+o  Andrew Bartlett <abartlet@samba.org>
+   * BUG 14460: Deprecate domain logons, SMBv1 things.
+
+o  Günther Deschner <gd@samba.org>
+   * BUG 14318: docs: Add missing winexe manpage.
 
 o  Christof Schmitt <cs@samba.org>
-   * BUG 14032: vfs_gpfs: Implement special case for denying owner access to
-     ACL.
+   * BUG 14166: util: Allow symlinks in directory_create_or_exist.
 
 o  Martin Schwenke <martin@meltin.net>
-   * BUG 14084: Avoid marking a node as connected before it can receive packets.
-   * BUG 14086: Fix onnode test failure with ShellCheck >= 0.4.7.
-   * BUG 14087: ctdb-daemon: Stop "ctdb stop" from completing before freezing
-     databases.
+   * BUG 14466: ctdb disable/enable can fail due to race condition.
+
+
+CHANGES SINCE 4.13.0rc1
+=======================
+
+o  Andrew Bartlett <abartlet@samba.org>
+   * BUG 14450: dbcheck: Allow a dangling forward link outside our known NCs.
+
+o  Isaac Boukris <iboukris@gmail.com>
+   * BUG 14462: Remove deprecated "ldap ssl ads" smb.conf option.
+
+o  Volker Lendecke <vl@samba.org>
+   * BUG 14435: winbind: Fix lookuprids cache problem.
+
+o  Stefan Metzmacher <metze@samba.org>
+   * BUG 14354: kdc:db-glue: Ignore KRB5_PROG_ETYPE_NOSUPP also for
+     Primary:Kerberos.
+
+o  Andreas Schneider <asn@samba.org>
+   * BUG 14358: docs: Fix documentation for require_membership_of of
+     pam_winbind.conf.
+
+o  Martin Schwenke <martin@meltin.net>
+   * BUG 14444: ctdb-scripts: Use nfsconf as a last resort get nfsd thread
+     count.
 
 
 KNOWN ISSUES
 ============
 
-https://wiki.samba.org/index.php/Release_Planning_for_Samba_4.11#Release_blocking_bugs
+https://wiki.samba.org/index.php/Release_Planning_for_Samba_4.13#Release_blocking_bugs
 
 
 #######################################

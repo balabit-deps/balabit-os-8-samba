@@ -417,14 +417,14 @@ def data_to_dns_record(record_type, data):
     elif record_type == dnsp.DNS_TYPE_NS:
         rec = NSRecord(data)
     elif record_type == dnsp.DNS_TYPE_MX:
-        tmp = data.split(' ')
+        tmp = data.split()
         if len(tmp) != 2:
             raise CommandError('Data requires 2 elements - mail_server, preference')
         mail_server = tmp[0]
         preference = int(tmp[1])
         rec = MXRecord(mail_server, preference)
     elif record_type == dnsp.DNS_TYPE_SRV:
-        tmp = data.split(' ')
+        tmp = data.split()
         if len(tmp) != 4:
             raise CommandError('Data requires 4 elements - server, port, priority, weight')
         server = tmp[0]
@@ -433,7 +433,7 @@ def data_to_dns_record(record_type, data):
         weight = int(tmp[3])
         rec = SRVRecord(server, port, priority=priority, weight=weight)
     elif record_type == dnsp.DNS_TYPE_SOA:
-        tmp = data.split(' ')
+        tmp = data.split()
         if len(tmp) != 7:
             raise CommandError('Data requires 7 elements - nameserver, email, serial, '
                                'refresh, retry, expire, minimumttl')
@@ -790,7 +790,8 @@ class cmd_zonedelete(Command):
 class cmd_query(Command):
     """Query a name."""
 
-    synopsis = '%prog <server> <zone> <name> <A|AAAA|CNAME|MX|NS|SOA|SRV|TXT|ALL> [options]'
+    synopsis = ('%prog <server> <zone> <name> '
+                '<A|AAAA|PTR|CNAME|MX|NS|SOA|SRV|TXT|ALL> [options]')
 
     takes_args = ['server', 'zone', 'name', 'rtype']
 
@@ -941,7 +942,9 @@ class cmd_add_record(Command):
                                          0, server, zone, name, add_rec_buf, None)
         except WERRORError as e:
             if e.args[0] == werror.WERR_DNS_ERROR_NAME_DOES_NOT_EXIST:
-                raise CommandError('Zone does not exist; record could not be added.')
+                raise CommandError('Zone does not exist; record could not be added. zone[%s] name[%s]' % (zone, name))
+            if e.args[0] == werror.WERR_DNS_ERROR_RECORD_ALREADY_EXISTS:
+                raise CommandError('Record already exist; record could not be added. zone[%s] name[%s]' % (zone, name))
             raise e
 
         self.outf.write('Record added successfully\n')
@@ -1067,7 +1070,9 @@ class cmd_delete_record(Command):
                                          del_rec_buf)
         except WERRORError as e:
             if e.args[0] == werror.WERR_DNS_ERROR_NAME_DOES_NOT_EXIST:
-                raise CommandError('Zone does not exist; record could not be deleted.')
+                raise CommandError('Zone does not exist; record could not be deleted. zone[%s] name[%s]' % (zone, name))
+            if e.args[0] == werror.WERR_DNS_ERROR_RECORD_DOES_NOT_EXIST:
+                raise CommandError('Record does not exist; record could not be deleted. zone[%s] name[%s]' % (zone, name))
             raise e
 
         self.outf.write('Record deleted successfully\n')

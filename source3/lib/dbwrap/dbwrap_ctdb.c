@@ -92,22 +92,16 @@ static int ctdb_async_ctx_init_internal(TALLOC_CTX *mem_ctx,
 	}
 
 	become_root();
-	ret = ctdbd_init_connection(mem_ctx,
-				    lp_ctdbd_socket(),
-				    lp_ctdb_timeout(),
-				    &ctdb_async_ctx.async_conn);
+	ret = ctdbd_init_async_connection(
+		mem_ctx,
+		lp_ctdbd_socket(),
+		lp_ctdb_timeout(),
+		&ctdb_async_ctx.async_conn);
 	unbecome_root();
 
-	if (ctdb_async_ctx.async_conn == NULL) {
+	if (ret != 0 || ctdb_async_ctx.async_conn == NULL) {
 		DBG_ERR("ctdbd_init_connection failed\n");
 		return EIO;
-	}
-
-	ret = ctdbd_setup_fde(ctdb_async_ctx.async_conn, ev);
-	if (ret != 0) {
-		DBG_ERR("ctdbd_setup_fde failed\n");
-		TALLOC_FREE(ctdb_async_ctx.async_conn);
-		return ret;
 	}
 
 	ctdb_async_ctx.initialized = true;
@@ -527,8 +521,14 @@ static struct db_record *db_ctdb_fetch_locked_transaction(struct db_ctdb_ctx *ct
 	result->storev = db_ctdb_storev_transaction;
 	result->delete_rec = db_ctdb_delete_transaction;
 
+	if (ctx->transaction == NULL) {
+		DEBUG(0, ("no transaction available\n"));
+		TALLOC_FREE(result);
+		return NULL;
+	}
 	if (pull_newest_from_marshall_buffer(ctx->transaction->m_write, key,
 					     NULL, result, &result->value)) {
+		result->value_valid = true;
 		return result;
 	}
 
@@ -536,6 +536,7 @@ static struct db_record *db_ctdb_fetch_locked_transaction(struct db_ctdb_ctx *ct
 	if (ctdb_data.dptr == NULL) {
 		/* create the record */
 		result->value = tdb_null;
+		result->value_valid = true;
 		return result;
 	}
 
@@ -548,7 +549,9 @@ static struct db_record *db_ctdb_fetch_locked_transaction(struct db_ctdb_ctx *ct
 			 result->value.dsize))) {
 		DEBUG(0, ("talloc failed\n"));
 		TALLOC_FREE(result);
+		return NULL;
 	}
+	result->value_valid = true;
 
 	SAFE_FREE(ctdb_data.dptr);
 
@@ -740,14 +743,8 @@ static NTSTATUS db_ctdb_store_db_seqnum(struct db_ctdb_transaction_handle *h,
 					uint64_t seqnum)
 {
 	NTSTATUS status;
-	const char *keyname = CTDB_DB_SEQNUM_KEY;
-	TDB_DATA key;
-	TDB_DATA data;
-
-	key = string_term_tdb_data(keyname);
-
-	data.dptr = (uint8_t *)&seqnum;
-	data.dsize = sizeof(uint64_t);
+	TDB_DATA key = string_term_tdb_data(CTDB_DB_SEQNUM_KEY);
+	TDB_DATA data = { .dptr=(uint8_t *)&seqnum, .dsize=sizeof(seqnum) };
 
 	status = db_ctdb_transaction_store(h, key, data);
 
@@ -944,8 +941,8 @@ static NTSTATUS db_ctdb_send_schedule_for_deletion(struct db_record *rec)
 				  crec->ctdb_ctx->db_id,
 				  CTDB_CTRL_FLAG_NOREPLY, /* flags */
 				  indata,
+				  NULL, /* mem_ctx */
 				  NULL, /* outdata */
-				  NULL, /* errmsg */
 				  &cstatus);
 	talloc_free(indata.dptr);
 
@@ -1239,8 +1236,10 @@ again:
 		if (result->value.dptr == NULL) {
 			DBG_ERR("talloc failed\n");
 			TALLOC_FREE(result);
+			return NULL;
 		}
 	}
+	result->value_valid = true;
 
 	SAFE_FREE(ctdb_data.dptr);
 
@@ -1710,6 +1709,7 @@ static void traverse_read_callback(TDB_DATA key, TDB_DATA data, void *private_da
 	rec.storev = db_ctdb_storev_deny;
 	rec.delete_rec = db_ctdb_delete_deny;
 	rec.private_data = NULL;
+	rec.value_valid = true;
 	state->fn(&rec, state->private_data);
 	state->count++;
 }
@@ -1734,6 +1734,7 @@ static int traverse_persistent_callback_read(TDB_CONTEXT *tdb, TDB_DATA kbuf, TD
 	rec.db = state->db;
 	rec.key = kbuf;
 	rec.value = dbuf;
+	rec.value_valid = true;
 	rec.storev = db_ctdb_storev_deny;
 	rec.delete_rec = db_ctdb_delete_deny;
 	rec.private_data = NULL;
@@ -1818,6 +1819,7 @@ struct db_context *db_open_ctdb(TALLOC_CTX *mem_ctx,
 	char *db_path;
 	struct loadparm_context *lp_ctx;
 	TDB_DATA data;
+	TDB_DATA outdata = {0};
 	bool persistent = (tdb_flags & TDB_CLEAR_IF_FIRST) == 0;
 	int32_t cstatus;
 	int ret;
@@ -1890,7 +1892,7 @@ struct db_context *db_open_ctdb(TALLOC_CTX *mem_ctx,
 
 	ret = ctdbd_control_local(messaging_ctdb_connection(),
 				  CTDB_CONTROL_DB_OPEN_FLAGS,
-				  0, 0, data, NULL, &data, &cstatus);
+				  0, 0, data, NULL, &outdata, &cstatus);
 	if (ret != 0) {
 		DBG_ERR(" ctdb control for db_open_flags "
 			 "failed: %s\n", strerror(ret));
@@ -1898,13 +1900,15 @@ struct db_context *db_open_ctdb(TALLOC_CTX *mem_ctx,
 		return NULL;
 	}
 
-	if (cstatus != 0 || data.dsize != sizeof(int)) {
+	if (cstatus != 0 || outdata.dsize != sizeof(int)) {
 		DBG_ERR("ctdb_control for db_open_flags failed\n");
+		TALLOC_FREE(outdata.dptr);
 		TALLOC_FREE(result);
 		return NULL;
 	}
 
-	tdb_flags = *(int *)data.dptr;
+	tdb_flags = *(int *)outdata.dptr;
+	TALLOC_FREE(outdata.dptr);
 
 	if (!result->persistent) {
 		ret = ctdb_async_ctx_init(NULL, messaging_tevent_context(msg_ctx));

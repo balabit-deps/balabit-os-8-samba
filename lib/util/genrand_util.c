@@ -47,7 +47,30 @@ _PUBLIC_ uint64_t generate_random_u64(void)
 	return BVAL(v, 0);
 }
 
+static struct generate_unique_u64_state {
+	uint64_t next_value;
+	int pid;
+} generate_unique_u64_state;
 
+_PUBLIC_ uint64_t generate_unique_u64(uint64_t veto_value)
+{
+	int pid = getpid();
+
+	if (unlikely(pid != generate_unique_u64_state.pid)) {
+		generate_unique_u64_state = (struct generate_unique_u64_state) {
+			.pid = pid,
+			.next_value = veto_value,
+		};
+	}
+
+	while (unlikely(generate_unique_u64_state.next_value == veto_value)) {
+		generate_nonce_buffer(
+				(void *)&generate_unique_u64_state.next_value,
+				sizeof(generate_unique_u64_state.next_value));
+	}
+
+	return generate_unique_u64_state.next_value++;
+}
 
 /**
   Microsoft composed the following rules (among others) for quality
@@ -185,7 +208,7 @@ _PUBLIC_ char *generate_random_str_list(TALLOC_CTX *mem_ctx, size_t len, const c
 	char *retstr = talloc_array(mem_ctx, char, len + 1);
 	if (!retstr) return NULL;
 
-	generate_random_buffer((uint8_t *)retstr, len);
+	generate_secret_buffer((uint8_t *)retstr, len);
 	for (i = 0; i < len; i++) {
 		retstr[i] = list[retstr[i] % list_len];
 	}
@@ -247,7 +270,7 @@ _PUBLIC_ char *generate_random_password(TALLOC_CTX *mem_ctx, size_t min, size_t 
 	if (diff > 0 ) {
 		size_t tmp;
 
-		generate_random_buffer((uint8_t *)&tmp, sizeof(tmp));
+		generate_secret_buffer((uint8_t *)&tmp, sizeof(tmp));
 
 		tmp %= diff;
 
@@ -317,7 +340,7 @@ _PUBLIC_ char *generate_random_machine_password(TALLOC_CTX *mem_ctx, size_t min,
 	if (diff > 0) {
 		size_t tmp;
 
-		generate_random_buffer((uint8_t *)&tmp, sizeof(tmp));
+		generate_secret_buffer((uint8_t *)&tmp, sizeof(tmp));
 
 		tmp %= diff;
 

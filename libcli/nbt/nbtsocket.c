@@ -62,7 +62,7 @@ static int nbt_name_request_destructor(struct nbt_name_request *req)
 */
 static void nbt_name_socket_send(struct nbt_name_socket *nbtsock)
 {
-	struct nbt_name_request *req = nbtsock->send_queue;
+	struct nbt_name_request *req;
 	TALLOC_CTX *tmp_ctx = talloc_new(nbtsock);
 	NTSTATUS status;
 
@@ -167,8 +167,23 @@ static void nbt_name_socket_recv(struct nbt_name_socket *nbtsock)
 		return;
 	}
 
+	/*
+	 * Given a zero length, data_blob_talloc() returns the
+	 * NULL blob {NULL, 0}.
+	 *
+	 * We only want to error return here on a real out of memory condition
+	 * (i.e. dsize != 0, so the UDP packet has data, but the return of the
+	 * allocation failed, so blob.data==NULL).
+	 *
+	 * Given an actual zero length UDP packet having blob.data == NULL
+	 * isn't an out of memory error condition, that's the defined semantics
+	 * of data_blob_talloc() when asked for zero bytes.
+	 *
+	 * We still need to continue to do the zero-length socket_recvfrom()
+	 * read in order to clear the "read pending" condition on the socket.
+	 */
 	blob = data_blob_talloc(tmp_ctx, NULL, dsize);
-	if (blob.data == NULL) {
+	if (blob.data == NULL && dsize != 0) {
 		talloc_free(tmp_ctx);
 		return;
 	}
@@ -387,8 +402,8 @@ struct nbt_name_request *nbt_name_request_send(TALLOC_CTX *mem_ctx,
 	req->is_reply               = false;
 	req->timeout                = timeout;
 	req->num_retries            = retries;
-	req->dest                   = dest;
-	if (talloc_reference(req, dest) == NULL) goto failed;
+	req->dest                   = socket_address_copy(req, dest);
+	if (req->dest == NULL) goto failed;
 
 	/* we select a random transaction id unless the user supplied one */
 	if (request->name_trn_id == 0) {
@@ -446,8 +461,8 @@ _PUBLIC_ NTSTATUS nbt_name_reply_send(struct nbt_name_socket *nbtsock,
 	NT_STATUS_HAVE_NO_MEMORY(req);
 
 	req->nbtsock   = nbtsock;
-	req->dest = dest;
-	if (talloc_reference(req, dest) == NULL) goto failed;
+	req->dest = socket_address_copy(req, dest);
+	if (req->dest == NULL) goto failed;
 	req->state     = NBT_REQUEST_SEND;
 	req->is_reply = true;
 

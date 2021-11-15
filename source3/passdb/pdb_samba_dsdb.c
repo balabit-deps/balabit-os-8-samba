@@ -791,7 +791,7 @@ static NTSTATUS pdb_samba_dsdb_delete_user(struct pdb_methods *m,
 
 /* This interface takes a fully populated struct samu and places it in
  * the database.  This is not implemented at this time as we need to
- * be careful around the creation of arbitary SIDs (ie, we must ensrue
+ * be careful around the creation of arbitrary SIDs (ie, we must ensure
  * they are not left in a RID pool */
 static NTSTATUS pdb_samba_dsdb_add_sam_account(struct pdb_methods *m,
 					struct samu *sampass)
@@ -880,8 +880,8 @@ static NTSTATUS pdb_samba_dsdb_rename_sam_account(struct pdb_methods *m,
 	return NT_STATUS_NOT_IMPLEMENTED;
 }
 
-/* This is not implemented, as this module is exptected to be used
- * with auth_samba_dsdb, and this is responible for login counters etc
+/* This is not implemented, as this module is expected to be used
+ * with auth_samba_dsdb, and this is responsible for login counters etc
  *
  */
 static NTSTATUS pdb_samba_dsdb_update_login_attempts(struct pdb_methods *m,
@@ -1752,9 +1752,8 @@ static NTSTATUS pdb_samba_dsdb_enum_aliasmem(struct pdb_methods *m,
 	}
 
 	status = dsdb_enum_group_mem(state->ldb, mem_ctx, dn, pmembers, &num_members);
-	*pnum_members = num_members;
 	if (NT_STATUS_IS_OK(status)) {
-		talloc_steal(mem_ctx, pmembers);
+		*pnum_members = num_members;
 	}
 	talloc_free(tmp_ctx);
 	return status;
@@ -2238,17 +2237,16 @@ static bool pdb_samba_dsdb_get_trusteddom_pw(struct pdb_methods *m,
 
 	trust_direction_flags = ldb_msg_find_attr_as_int(msg, "trustDirection", 0);
 	if (!(trust_direction_flags & LSA_TRUST_DIRECTION_OUTBOUND)) {
-		DEBUG(2, ("Trusted domain %s is is not an outbound trust.\n",
-			  domain));
+		DBG_WARNING("Trusted domain %s is not an outbound trust.\n",
+			    domain);
 		TALLOC_FREE(tmp_ctx);
 		return false;
 	}
 
 	trust_type = ldb_msg_find_attr_as_int(msg, "trustType", 0);
 	if (trust_type == LSA_TRUST_TYPE_MIT) {
-		DEBUG(1, ("Trusted domain %s is is not an AD trust "
-			  "(trustType == LSA_TRUST_TYPE_MIT).\n",
-			  domain));
+		DBG_WARNING("Trusted domain %s is not an AD trust "
+			    "(trustType == LSA_TRUST_TYPE_MIT).\n", domain);
 		TALLOC_FREE(tmp_ctx);
 		return false;
 	}
@@ -2393,17 +2391,16 @@ static NTSTATUS pdb_samba_dsdb_get_trusteddom_creds(struct pdb_methods *m,
 
 	trust_direction_flags = ldb_msg_find_attr_as_int(msg, "trustDirection", 0);
 	if (!(trust_direction_flags & LSA_TRUST_DIRECTION_OUTBOUND)) {
-		DEBUG(2, ("Trusted domain %s is is not an outbound trust.\n",
-			  domain));
+		DBG_WARNING("Trusted domain %s is not an outbound trust.\n",
+			    domain);
 		TALLOC_FREE(tmp_ctx);
 		return NT_STATUS_CANT_ACCESS_DOMAIN_INFO;
 	}
 
 	trust_type = ldb_msg_find_attr_as_int(msg, "trustType", 0);
 	if (trust_type == LSA_TRUST_TYPE_MIT) {
-		DEBUG(1, ("Trusted domain %s is is not an AD trust "
-			  "(trustType == LSA_TRUST_TYPE_MIT).\n",
-			  domain));
+		DBG_WARNING("Trusted domain %s is not an AD trust "
+			    "(trustType == LSA_TRUST_TYPE_MIT).\n", domain);
 		TALLOC_FREE(tmp_ctx);
 		return NT_STATUS_CANT_ACCESS_DOMAIN_INFO;
 	}
@@ -2680,8 +2677,8 @@ static bool pdb_samba_dsdb_set_trusteddom_pw(struct pdb_methods *m,
 
 	trust_direction_flags = ldb_msg_find_attr_as_int(msg, "trustDirection", 0);
 	if (!(trust_direction_flags & LSA_TRUST_DIRECTION_OUTBOUND)) {
-		DEBUG(2, ("Trusted domain %s is is not an outbound trust, can't set a password.\n",
-			  domain));
+		DBG_WARNING("Trusted domain %s is not an outbound trust, can't set a password.\n",
+			    domain);
 		TALLOC_FREE(tmp_ctx);
 		ldb_transaction_cancel(state->ldb);
 		return false;

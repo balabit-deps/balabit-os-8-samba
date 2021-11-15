@@ -35,7 +35,9 @@ from samba.common import normalise_int32
 from samba.compat import text_type
 from samba.compat import binary_type
 from samba.compat import get_bytes
+from samba.common import cmp
 from samba.dcerpc import security
+import binascii
 
 __docformat__ = "restructuredText"
 
@@ -251,8 +253,63 @@ pwdLastSet: 0
         else:
             self.transaction_commit()
 
+    def group_member_filter(self, member, member_types):
+        filter = ""
+
+        all_member_types = [ 'user',
+                             'group',
+                             'computer',
+                             'serviceaccount',
+                             'contact',
+                           ]
+
+        if 'all' in member_types:
+            member_types = all_member_types
+
+        for member_type in member_types:
+            if member_type not in all_member_types:
+                raise Exception('Invalid group member type "%s". '
+                                'Valid types are %s and all.' %
+                                (member_type, ", ".join(all_member_types)))
+
+        if 'user' in member_types:
+            filter += ('(&(sAMAccountName=%s)(samAccountType=%d))' %
+                       (ldb.binary_encode(member), dsdb.ATYPE_NORMAL_ACCOUNT))
+        if 'group' in member_types:
+            filter += ('(&(sAMAccountName=%s)'
+                       '(objectClass=group)'
+                       '(!(groupType:1.2.840.113556.1.4.803:=1)))' %
+                       ldb.binary_encode(member))
+        if 'computer' in member_types:
+            samaccountname = member
+            if member[-1] != '$':
+                samaccountname = "%s$" % member
+            filter += ('(&(samAccountType=%d)'
+                       '(!(objectCategory=msDS-ManagedServiceAccount))'
+                       '(sAMAccountName=%s))' %
+                       (dsdb.ATYPE_WORKSTATION_TRUST,
+                        ldb.binary_encode(samaccountname)))
+        if 'serviceaccount' in member_types:
+            samaccountname = member
+            if member[-1] != '$':
+                samaccountname = "%s$" % member
+            filter += ('(&(samAccountType=%d)'
+                       '(objectCategory=msDS-ManagedServiceAccount)'
+                       '(sAMAccountName=%s))' %
+                       (dsdb.ATYPE_WORKSTATION_TRUST,
+                        ldb.binary_encode(samaccountname)))
+        if 'contact' in member_types:
+            filter += ('(&(objectCategory=Person)(!(objectSid=*))(name=%s))' %
+                       ldb.binary_encode(member))
+
+        filter = "(|%s)" % filter
+
+        return filter
+
     def add_remove_group_members(self, groupname, members,
-                                 add_members_operation=True):
+                                 add_members_operation=True,
+                                 member_types=[ 'user', 'group', 'computer' ],
+                                 member_base_dn=None):
         """Adds or removes group members
 
         :param groupname: Name of the target group
@@ -280,30 +337,44 @@ changetype: modify
 """ % (str(targetgroup[0].dn))
 
             for member in members:
-                filter = ('(&(sAMAccountName=%s)(|(objectclass=user)'
-                          '(objectclass=group)))' % ldb.binary_encode(member))
-                foreign_msg = None
+                targetmember_dn = None
+                if member_base_dn is None:
+                    member_base_dn = self.domain_dn()
+
                 try:
                     membersid = security.dom_sid(member)
+                    targetmember_dn = "<SID=%s>" % str(membersid)
                 except TypeError as e:
-                    membersid = None
+                    pass
 
-                if membersid is not None:
-                    filter = '(objectSid=%s)' % str(membersid)
-                    dn_str = "<SID=%s>" % str(membersid)
-                    foreign_msg = ldb.Message()
-                    foreign_msg.dn = ldb.Dn(self, dn_str)
+                if targetmember_dn is None:
+                    try:
+                        member_dn = ldb.Dn(self, member)
+                        if member_dn.get_linearized() == member_dn.extended_str(1):
+                            full_member_dn = self.normalize_dn_in_domain(member_dn)
+                        else:
+                            full_member_dn = member_dn
+                        targetmember_dn = full_member_dn.extended_str(1)
+                    except ValueError as e:
+                        pass
 
-                targetmember = self.search(base=self.domain_dn(),
-                                           scope=ldb.SCOPE_SUBTREE,
-                                           expression="%s" % filter,
-                                           attrs=[])
+                if targetmember_dn is None:
+                    filter = self.group_member_filter(member, member_types)
+                    targetmember = self.search(base=member_base_dn,
+                                               scope=ldb.SCOPE_SUBTREE,
+                                               expression=filter,
+                                               attrs=[])
 
-                if len(targetmember) == 0 and foreign_msg is not None:
-                    targetmember = [foreign_msg]
-                if len(targetmember) != 1:
-                    raise Exception('Unable to find "%s". Operation cancelled.' % member)
-                targetmember_dn = targetmember[0].dn.extended_str(1)
+                    if len(targetmember) > 1:
+                        targetmemberlist_str = ""
+                        for msg in targetmember:
+                            targetmemberlist_str += "%s\n" % msg.get("dn")
+                        raise Exception('Found multiple results for "%s":\n%s' %
+                                        (member, targetmemberlist_str))
+                    if len(targetmember) != 1:
+                        raise Exception('Unable to find "%s". Operation cancelled.' % member)
+                    targetmember_dn = targetmember[0].dn.extended_str(1)
+
                 if add_members_operation is True and (targetgroup[0].get('member') is None or get_bytes(targetmember_dn) not in [str(x) for x in targetgroup[0]['member']]):
                     modified = True
                     addtargettogroup += """add: member
@@ -859,6 +930,21 @@ accountExpires: %u
         domain_dn = self.get_default_basedn()
         return domain_dn.canonical_str().split('/')[0]
 
+    def domain_netbios_name(self):
+        """return the NetBIOS name of the domain root"""
+        domain_dn = self.get_default_basedn()
+        dns_name = self.domain_dns_name()
+        filter = "(&(objectClass=crossRef)(nETBIOSName=*)(ncName=%s)(dnsroot=%s))" % (domain_dn, dns_name)
+        partitions_dn = self.get_partitions_dn()
+        res = self.search(partitions_dn,
+                          scope=ldb.SCOPE_ONELEVEL,
+                          expression=filter)
+        try:
+            netbios_domain = res[0]["nETBIOSName"][0].decode()
+        except IndexError:
+            return None
+        return netbios_domain
+
     def forest_dns_name(self):
         """return the DNS name of the forest root"""
         forest_dn = self.get_root_basedn()
@@ -1216,6 +1302,111 @@ schemaUpdateNow: 1
         '''return a new RID from the RID Pool on this DSA'''
         return dsdb._dsdb_allocate_rid(self)
 
+    def next_free_rid(self):
+        '''return the next free RID from the RID Pool on this DSA.
+
+        :note: This function is not intended for general use, and care must be
+            taken if it is used to generate objectSIDs. The returned RID is not
+            formally reserved for use, creating the possibility of duplicate
+            objectSIDs.
+        '''
+        rid, _ = self.free_rid_bounds()
+        return rid
+
+    def free_rid_bounds(self):
+        '''return the low and high bounds (inclusive) of RIDs that are
+            available for use in this DSA's current RID pool.
+
+        :note: This function is not intended for general use, and care must be
+            taken if it is used to generate objectSIDs. The returned range of
+            RIDs is not formally reserved for use, creating the possibility of
+            duplicate objectSIDs.
+        '''
+        # Get DN of this server's RID Set
+        server_name_dn = ldb.Dn(self, self.get_serverName())
+        res = self.search(base=server_name_dn,
+                          scope=ldb.SCOPE_BASE,
+                          attrs=["serverReference"])
+        try:
+            server_ref = res[0]["serverReference"]
+        except KeyError:
+            raise ldb.LdbError(
+                ldb.ERR_NO_SUCH_ATTRIBUTE,
+                "No RID Set DN - "
+                "Cannot find attribute serverReference of %s "
+                "to calculate reference dn" % server_name_dn) from None
+        server_ref_dn = ldb.Dn(self, server_ref[0].decode("utf-8"))
+
+        res = self.search(base=server_ref_dn,
+                          scope=ldb.SCOPE_BASE,
+                          attrs=["rIDSetReferences"])
+        try:
+            rid_set_refs = res[0]["rIDSetReferences"]
+        except KeyError:
+            raise ldb.LdbError(
+                ldb.ERR_NO_SUCH_ATTRIBUTE,
+                "No RID Set DN - "
+                "Cannot find attribute rIDSetReferences of %s "
+                "to calculate reference dn" % server_ref_dn) from None
+        rid_set_dn = ldb.Dn(self, rid_set_refs[0].decode("utf-8"))
+
+        # Get the alloc pools and next RID of this RID Set
+        res = self.search(base=rid_set_dn,
+                          scope=ldb.SCOPE_BASE,
+                          attrs=["rIDAllocationPool",
+                                 "rIDPreviousAllocationPool",
+                                 "rIDNextRID"])
+
+        uint32_max = 2**32 - 1
+        uint64_max = 2**64 - 1
+
+        try:
+            alloc_pool = int(res[0]["rIDAllocationPool"][0])
+        except KeyError:
+            alloc_pool = uint64_max
+        if alloc_pool == uint64_max:
+            raise ldb.LdbError(ldb.ERR_OPERATIONS_ERROR,
+                               "Bad RID Set %s" % rid_set_dn)
+
+        try:
+            prev_pool = int(res[0]["rIDPreviousAllocationPool"][0])
+        except KeyError:
+            prev_pool = uint64_max
+        try:
+            next_rid = int(res[0]["rIDNextRID"][0])
+        except KeyError:
+            next_rid = uint32_max
+
+        # If we never used a pool, set up our first pool
+        if prev_pool == uint64_max or next_rid == uint32_max:
+            prev_pool = alloc_pool
+            next_rid = prev_pool & uint32_max
+
+        next_rid += 1
+
+        # Now check if our current pool is still usable
+        prev_pool_lo = prev_pool & uint32_max
+        prev_pool_hi = prev_pool >> 32
+        if next_rid > prev_pool_hi:
+            # We need a new pool, check if we already have a new one
+            # Otherwise we return an error code.
+            if alloc_pool == prev_pool:
+                raise ldb.LdbError(ldb.ERR_OPERATIONS_ERROR,
+                                   "RID pools out of RIDs")
+
+            # Now use the new pool
+            prev_pool = alloc_pool
+            prev_pool_lo = prev_pool & uint32_max
+            prev_pool_hi = prev_pool >> 32
+            next_rid = prev_pool_lo
+
+        if next_rid < prev_pool_lo or next_rid > prev_pool_hi:
+            raise ldb.LdbError(ldb.ERR_OPERATIONS_ERROR,
+                               "Bad RID chosen %d from range %d-%d" %
+                               (next_rid, prev_pool_lo, prev_pool_hi))
+
+        return next_rid, prev_pool_hi
+
     def normalize_dn_in_domain(self, dn):
         '''return a new DN expanded by adding the domain DN
 
@@ -1233,3 +1424,76 @@ schemaUpdateNow: 1
         if not full_dn.is_child_of(domain_dn):
             full_dn.add_base(domain_dn)
         return full_dn
+
+class dsdb_Dn(object):
+    '''a class for binary DN'''
+
+    def __init__(self, samdb, dnstring, syntax_oid=None):
+        '''create a dsdb_Dn'''
+        if syntax_oid is None:
+            # auto-detect based on string
+            if dnstring.startswith("B:"):
+                syntax_oid = dsdb.DSDB_SYNTAX_BINARY_DN
+            elif dnstring.startswith("S:"):
+                syntax_oid = dsdb.DSDB_SYNTAX_STRING_DN
+            else:
+                syntax_oid = dsdb.DSDB_SYNTAX_OR_NAME
+        if syntax_oid in [dsdb.DSDB_SYNTAX_BINARY_DN, dsdb.DSDB_SYNTAX_STRING_DN]:
+            # it is a binary DN
+            colons = dnstring.split(':')
+            if len(colons) < 4:
+                raise RuntimeError("Invalid DN %s" % dnstring)
+            prefix_len = 4 + len(colons[1]) + int(colons[1])
+            self.prefix = dnstring[0:prefix_len]
+            self.binary = self.prefix[3 + len(colons[1]):-1]
+            self.dnstring = dnstring[prefix_len:]
+        else:
+            self.dnstring = dnstring
+            self.prefix = ''
+            self.binary = ''
+        self.dn = ldb.Dn(samdb, self.dnstring)
+
+    def __str__(self):
+        return self.prefix + str(self.dn.extended_str(mode=1))
+
+    def __cmp__(self, other):
+        ''' compare dsdb_Dn values similar to parsed_dn_compare()'''
+        dn1 = self
+        dn2 = other
+        guid1 = dn1.dn.get_extended_component("GUID")
+        guid2 = dn2.dn.get_extended_component("GUID")
+
+        v = cmp(guid1, guid2)
+        if v != 0:
+            return v
+        v = cmp(dn1.binary, dn2.binary)
+        return v
+
+    # In Python3, __cmp__ is replaced by these 6 methods
+    def __eq__(self, other):
+        return self.__cmp__(other) == 0
+
+    def __ne__(self, other):
+        return self.__cmp__(other) != 0
+
+    def __lt__(self, other):
+        return self.__cmp__(other) < 0
+
+    def __le__(self, other):
+        return self.__cmp__(other) <= 0
+
+    def __gt__(self, other):
+        return self.__cmp__(other) > 0
+
+    def __ge__(self, other):
+        return self.__cmp__(other) >= 0
+
+    def get_binary_integer(self):
+        '''return binary part of a dsdb_Dn as an integer, or None'''
+        if self.prefix == '':
+            return None
+        return int(self.binary, 16)
+
+    def get_bytes(self):
+        '''return binary as a byte string'''
+        return binascii.unhexlify(self.binary)

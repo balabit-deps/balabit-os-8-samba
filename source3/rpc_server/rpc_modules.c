@@ -22,6 +22,9 @@
 #include "includes.h"
 #include "rpc_server/rpc_modules.h"
 
+#undef DBGC_CLASS
+#define DBGC_CLASS DBGC_RPC_SRV
+
 static struct rpc_module *rpc_modules;
 
 struct rpc_module {
@@ -93,45 +96,6 @@ bool setup_rpc_modules(struct tevent_context *ev_ctx,
 		if (!ok) {
 			DBG_ERR("calling setup for %s failed\n", module->name);
 		}
-	}
-
-	return true;
-}
-
-bool init_rpc_module(const char *name,
-		     const struct rpc_srv_callbacks *rpc_srv_cb)
-{
-	struct rpc_module *module = find_rpc_module(name);
-	NTSTATUS status;
-
-	if (module == NULL) {
-		return false;
-	}
-
-	status = module->fns->init(rpc_srv_cb);
-	if (!NT_STATUS_IS_OK(status)) {
-		DBG_ERR("calling init for %s failed %s\n",
-			name, nt_errstr(status));
-		return false;
-	}
-
-	return true;
-}
-
-bool shutdown_rpc_module(const char *name)
-{
-	struct rpc_module *module = find_rpc_module(name);
-	NTSTATUS status;
-
-	if (module == NULL) {
-		return false;
-	}
-
-	status = module->fns->shutdown();
-	if (!NT_STATUS_IS_OK(status)) {
-		DBG_ERR("calling shutdown for %s failed %s\n",
-			name, nt_errstr(status));
-		return false;
 	}
 
 	return true;

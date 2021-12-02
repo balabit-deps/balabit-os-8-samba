@@ -1,3 +1,15 @@
+samba (2:4.13.14+dfsg-0ubuntu0.20.04.3) focal-security; urgency=medium
+
+  * SECURITY REGRESSION: undesired side effects for the local nt token
+    - debian/patches/bug14901-*.patch: upstream patches to fix some
+      mapping issues.
+  * SECURITY REGRESSION: backup command raises FileNotFoundError
+    (LP: #1952187)
+    - debian/patches/bug14918-*.patch: upstream patches to properly handle
+      dangling symlinks.
+
+ -- Marc Deslauriers <marc.deslauriers@ubuntu.com>  Thu, 02 Dec 2021 08:03:56 -0500
+
 samba (2:4.13.14+dfsg-0ubuntu0.20.04.2) focal; urgency=medium
 
   * samba.postinst: do not populate sambashare from the Ubuntu admin group

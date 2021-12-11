@@ -1,3 +1,9 @@
+samba (2:4.13.14+dfsg-0ubuntu0.20.04.3bb1) focal; urgency=medium
+
+  * Balabit patched version
+
+ -- Balabit Platform Team <devnull@dev.null>  Sat, 11 Dec 2021 16:25:01 +0100
+
 samba (2:4.13.14+dfsg-0ubuntu0.20.04.3) focal-security; urgency=medium
 
   * SECURITY REGRESSION: undesired side effects for the local nt token

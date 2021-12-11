@@ -1,0 +1,32 @@
+From 0a56d233bfdb48bb2222891f7abfe054769b2ef2 Mon Sep 17 00:00:00 2001
+From: Joseph Sutton <josephsutton@catalyst.net.nz>
+Date: Fri, 12 Nov 2021 20:53:30 +1300
+Subject: [PATCH] CVE-2020-25717: nsswitch/nsstest.c: Lower 'non existent uid'
+ to make room for new accounts
+
+BUG: https://bugzilla.samba.org/show_bug.cgi?id=14901
+
+Signed-off-by: Joseph Sutton <josephsutton@catalyst.net.nz>
+Reviewed-by: Stefan Metzmacher <metze@samba.org>
+Reviewed-by: Ralph Boehme <slow@samba.org>
+(cherry picked from commit fdbee5e074ebd76d659613b8b7114d70f938c38a)
+---
+ nsswitch/nsstest.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/nsswitch/nsstest.c b/nsswitch/nsstest.c
+index e2ee9fbf3af..45270cdc459 100644
+--- a/nsswitch/nsstest.c
++++ b/nsswitch/nsstest.c
+@@ -466,7 +466,7 @@ static void nss_test_errors(void)
+ 		printf("ERROR Non existent user gave error %d\n", last_error);
+ 	}
+ 
+-	pwd = getpwuid(0xFFF0);
++	pwd = getpwuid(0xFF00);
+ 	if (pwd || last_error != NSS_STATUS_NOTFOUND) {
+ 		total_errors++;
+ 		printf("ERROR Non existent uid gave error %d\n", last_error);
+-- 
+2.25.1
+

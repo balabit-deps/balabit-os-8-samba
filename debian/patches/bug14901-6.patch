@@ -1,0 +1,127 @@
+From 105c6a15effd118d7cfe9dfa7b1ad4faab9fe224 Mon Sep 17 00:00:00 2001
+From: Andrew Bartlett <abartlet@samba.org>
+Date: Fri, 12 Nov 2021 16:10:31 +1300
+Subject: [PATCH] CVE-2020-25717: s3:auth: Fallback to a SID/UID based mapping
+ if the named based lookup fails
+MIME-Version: 1.0
+Content-Type: text/plain; charset=utf8
+Content-Transfer-Encoding: 8bit
+
+Before the CVE-2020-25717 fixes we had a fallback from
+getpwnam('DOMAIN\user') to getpwnam('user') which was very dangerous and
+unpredictable.
+
+Now we do the fallback based on sid_to_uid() followed by
+getpwuid() on the returned uid.
+
+This obsoletes 'username map [script]' based workaround adviced
+for CVE-2020-25717, when nss_winbindd is not used or
+idmap_nss is actually used.
+
+In future we may decide to prefer or only do the SID/UID based
+lookup, but for now we want to keep this unchanged as much as possible.
+
+BUG: https://bugzilla.samba.org/show_bug.cgi?id=14901
+
+Pair-Programmed-With: Stefan Metzmacher <metze@samba.org>
+
+Signed-off-by: Andrew Bartlett <abartlet@samba.org>
+Signed-off-by: Stefan Metzmacher <metze@samba.org>
+
+[metze@samba.org moved the new logic into the fallback codepath only
+ in order to avoid behavior changes as much as possible]
+Reviewed-by: Ralph Boehme <slow@samba.org>
+
+Autobuild-User(master): Ralph BÃ¶hme <slow@samba.org>
+Autobuild-Date(master): Mon Nov 15 19:01:56 UTC 2021 on sn-devel-184
+
+(cherry picked from commit 0a546be05295a7e4a552f9f4f0c74aeb2e9a0d6e)
+
+Autobuild-User(v4-13-test): Jule Anger <janger@samba.org>
+Autobuild-Date(v4-13-test): Wed Nov 17 15:50:53 UTC 2021 on sn-devel-184
+---
+ selftest/knownfail.d/idmap_nss_sid_mapping |  2 --
+ source3/auth/auth_util.c                   | 34 +++++++++++++++++++++-
+ 2 files changed, 33 insertions(+), 3 deletions(-)
+ delete mode 100644 selftest/knownfail.d/idmap_nss_sid_mapping
+
+diff --git a/selftest/knownfail.d/idmap_nss_sid_mapping b/selftest/knownfail.d/idmap_nss_sid_mapping
+deleted file mode 100644
+index 7e1913f03fc..00000000000
+--- a/selftest/knownfail.d/idmap_nss_sid_mapping
++++ /dev/null
+@@ -1,2 +0,0 @@
+-^samba.tests.krb5.test_idmap_nss.samba.tests.krb5.test_idmap_nss.IdmapNssTests.test_unmapped_user_kerberos
+-^samba.tests.krb5.test_idmap_nss.samba.tests.krb5.test_idmap_nss.IdmapNssTests.test_unmapped_user_ntlm
+diff --git a/source3/auth/auth_util.c b/source3/auth/auth_util.c
+index 065b525500f..7a97dd45f11 100644
+--- a/source3/auth/auth_util.c
++++ b/source3/auth/auth_util.c
+@@ -1862,7 +1862,9 @@ const struct auth_session_info *get_session_info_system(void)
+ ***************************************************************************/
+ 
+ static NTSTATUS check_account(TALLOC_CTX *mem_ctx, const char *domain,
+-			      const char *username, char **found_username,
++			      const char *username,
++			      const struct dom_sid *sid,
++			      char **found_username,
+ 			      struct passwd **pwd,
+ 			      bool *username_was_mapped)
+ {
+@@ -1897,6 +1899,31 @@ static NTSTATUS check_account(TALLOC_CTX *mem_ctx, const char *domain,
+ 	}
+ 
+ 	passwd = smb_getpwnam(mem_ctx, dom_user, &real_username, false);
++	if (!passwd && !*username_was_mapped) {
++		struct dom_sid_buf buf;
++		uid_t uid;
++		bool ok;
++
++		DBG_DEBUG("Failed to find authenticated user %s via "
++			  "getpwnam(), fallback to sid_to_uid(%s).\n",
++			  dom_user, dom_sid_str_buf(sid, &buf));
++
++		ok = sid_to_uid(sid, &uid);
++		if (!ok) {
++			DBG_ERR("Failed to convert SID %s to a UID (dom_user[%s])\n",
++				dom_sid_str_buf(sid, &buf), dom_user);
++			return NT_STATUS_NO_SUCH_USER;
++		}
++		passwd = getpwuid_alloc(mem_ctx, uid);
++		if (!passwd) {
++			DBG_ERR("Failed to find local account with UID %lld for SID %s (dom_user[%s])\n",
++				(long long)uid,
++				dom_sid_str_buf(sid, &buf),
++				dom_user);
++			return NT_STATUS_NO_SUCH_USER;
++		}
++		real_username = talloc_strdup(mem_ctx, passwd->pw_name);
++	}
+ 	if (!passwd) {
+ 		DEBUG(3, ("Failed to find authenticated user %s via "
+ 			  "getpwnam(), denying access.\n", dom_user));
+@@ -2042,6 +2069,7 @@ NTSTATUS make_server_info_info3(TALLOC_CTX *mem_ctx,
+ 	bool username_was_mapped;
+ 	struct passwd *pwd;
+ 	struct auth_serversupplied_info *result;
++	struct dom_sid sid;
+ 	TALLOC_CTX *tmp_ctx = talloc_stackframe();
+ 
+ 	/* 
+@@ -2088,9 +2116,13 @@ NTSTATUS make_server_info_info3(TALLOC_CTX *mem_ctx,
+ 
+ 	/* this call will try to create the user if necessary */
+ 
++	sid_copy(&sid, info3->base.domain_sid);
++	sid_append_rid(&sid, info3->base.rid);
++
+ 	nt_status = check_account(tmp_ctx,
+ 				  nt_domain,
+ 				  nt_username,
++				  &sid,
+ 				  &found_username,
+ 				  &pwd,
+ 				  &username_was_mapped);
+-- 
+2.25.1
+

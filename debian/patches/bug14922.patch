@@ -1,0 +1,62 @@
+From 1e27b820dff2ff9ef99b4d5dc8e85548a2ad92b4 Mon Sep 17 00:00:00 2001
+From: Ralph Boehme <slow@samba.org>
+Date: Fri, 26 Nov 2021 10:57:17 +0100
+Subject: [PATCH] CVE-2020-25717: s3-auth: fix MIT Realm regression
+
+This looks like a regression introduced by the recent security fixes. This
+commit should hopefully fixes it.
+
+As a quick solution it might be possible to use the username map script based on
+the example in https://bugzilla.samba.org/show_bug.cgi?id=14901#c0. We're not
+sure this behaves identical, but it might work in the standalone server case.
+
+BUG: https://bugzilla.samba.org/show_bug.cgi?id=14922
+
+Reported-at: https://lists.samba.org/archive/samba/2021-November/238720.html
+
+Pair-Programmed-With: Stefan Metzmacher <metze@samba.org>
+
+Signed-off-by: Ralph Boehme <slow@samba.org>
+Signed-off-by: Stefan Metzmacher <metze@samba.org>
+(cherry picked from commit 1e61de8306604a0d3858342df8a1d2412d8d418b)
+---
+ source3/auth/user_krb5.c | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/source3/auth/user_krb5.c b/source3/auth/user_krb5.c
+index b8f37cbeee0..169bf563368 100644
+--- a/source3/auth/user_krb5.c
++++ b/source3/auth/user_krb5.c
+@@ -46,6 +46,7 @@ NTSTATUS get_user_from_kerberos_info(TALLOC_CTX *mem_ctx,
+ 	char *fuser = NULL;
+ 	char *unixuser = NULL;
+ 	struct passwd *pw = NULL;
++	bool may_retry = false;
+ 
+ 	DEBUG(3, ("Kerberos ticket principal name is [%s]\n", princ_name));
+ 
+@@ -71,6 +72,7 @@ NTSTATUS get_user_from_kerberos_info(TALLOC_CTX *mem_ctx,
+ 		domain = realm;
+ 	} else {
+ 		domain = lp_workgroup();
++		may_retry = true;
+ 	}
+ 
+ 	fuser = talloc_asprintf(mem_ctx,
+@@ -89,6 +91,13 @@ NTSTATUS get_user_from_kerberos_info(TALLOC_CTX *mem_ctx,
+ 	*mapped_to_guest = false;
+ 
+ 	pw = smb_getpwnam(mem_ctx, fuser, &unixuser, true);
++	if (may_retry && pw == NULL && !*is_mapped) {
++		fuser = talloc_strdup(mem_ctx, user);
++		if (!fuser) {
++			return NT_STATUS_NO_MEMORY;
++		}
++		pw = smb_getpwnam(mem_ctx, fuser, &unixuser, true);
++	}
+ 	if (pw) {
+ 		if (!unixuser) {
+ 			return NT_STATUS_NO_MEMORY;
+-- 
+2.25.1
+

@@ -1,3 +1,12 @@
+samba (2:4.13.14+dfsg-0ubuntu0.20.04.4) focal-security; urgency=medium
+
+  * SECURITY REGRESSION: Kerberos authentication on standalone server in
+    MIT realm broken
+    - debian/patches/bug14922.patch: fix MIT Realm regression in
+      source3/auth/user_krb5.c.
+
+ -- Marc Deslauriers <marc.deslauriers@ubuntu.com>  Mon, 13 Dec 2021 07:12:25 -0500
+
 samba (2:4.13.14+dfsg-0ubuntu0.20.04.3) focal-security; urgency=medium
 
   * SECURITY REGRESSION: undesired side effects for the local nt token

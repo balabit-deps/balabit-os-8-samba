@@ -1,3 +1,9 @@
+samba (2:4.13.14+dfsg-0ubuntu0.20.04.4bb1) focal; urgency=medium
+
+  * Balabit patched version
+
+ -- Balabit Platform Team <devnull@dev.null>  Sat, 18 Dec 2021 16:33:02 +0100
+
 samba (2:4.13.14+dfsg-0ubuntu0.20.04.4) focal-security; urgency=medium
 
   * SECURITY REGRESSION: Kerberos authentication on standalone server in

@@ -10,13 +10,5 @@ smbd.service-Run-update-apparmor-samba-profile-befor.patch
 fix-nfs-service-name-to-nfs-kernel-server.patch
 Rename-mdfind-to-mdsearch.patch
 ctdb-config-enable-syslog-by-default.patch
-trusted_domain_regression_fix.patch
-bug14901-1.patch
-bug14901-2.patch
-bug14901-3.patch
-bug14901-4.patch
-bug14901-5.patch
-bug14901-6.patch
 bug14918-1.patch
 bug14918-2.patch
-bug14922.patch

@@ -854,12 +854,28 @@ planoldpythontestsuite("ad_dc_smb1", "samba.tests.krb5.test_smb",
                            'TKT_SIG_SUPPORT': tkt_sig_support,
                            'EXPECT_PAC': expect_pac
                        })
-planoldpythontestsuite("ad_member_no_nss_wb:local",
+planoldpythontestsuite("ad_member_idmap_nss:local",
                        "samba.tests.krb5.test_min_domain_uid",
                        environ={
                            'ADMIN_USERNAME': '$DC_USERNAME',
                            'ADMIN_PASSWORD': '$DC_PASSWORD',
                            'STRICT_CHECKING': '0'
+                       })
+planoldpythontestsuite("ad_member_idmap_nss:local",
+                       "samba.tests.krb5.test_idmap_nss",
+                       environ={
+                           'ADMIN_USERNAME': '$DC_USERNAME',
+                           'ADMIN_PASSWORD': '$DC_PASSWORD',
+                           'MAPPED_USERNAME': 'bob',
+                           'MAPPED_PASSWORD': 'Secret007',
+                           'UNMAPPED_USERNAME': 'jane',
+                           'UNMAPPED_PASSWORD': 'Secret007',
+                           'INVALID_USERNAME': 'joe',
+                           'INVALID_PASSWORD': 'Secret007',
+                           'STRICT_CHECKING': '0',
+                           'FAST_SUPPORT': have_fast_support,
+                           'TKT_SIG_SUPPORT': tkt_sig_support,
+                           'EXPECT_PAC': expect_pac
                        })
 
 for env in ["ad_dc", smbv1_disabled_testenv]:

@@ -12,3 +12,4 @@ Rename-mdfind-to-mdsearch.patch
 ctdb-config-enable-syslog-by-default.patch
 bug14918-1.patch
 bug14918-2.patch
+lp-1951490-fix-printing-KB5006743.patch

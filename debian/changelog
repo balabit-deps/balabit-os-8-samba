@@ -1,3 +1,9 @@
+samba (2:4.13.17~dfsg-0ubuntu0.21.04.2bb1) focal; urgency=medium
+
+  * Balabit patched version
+
+ -- Balabit Platform Team <devnull@dev.null>  Sat, 09 Apr 2022 16:23:27 +0200
+
 samba (2:4.13.17~dfsg-0ubuntu0.21.04.2) focal; urgency=medium
 
   * d/p/lp-1951490-fix-printing-KB5006743.patch: Fix printing after

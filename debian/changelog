@@ -1,3 +1,10 @@
+samba (2:4.13.17~dfsg-0ubuntu0.21.04.2) focal; urgency=medium
+
+  * d/p/lp-1951490-fix-printing-KB5006743.patch: Fix printing after
+    Windows 2021-10 Monthly Rollup patch (LP: #1951490)
+
+ -- Andreas Hasenack <andreas@canonical.com>  Thu, 10 Mar 2022 10:48:01 -0300
+
 samba (2:4.13.17~dfsg-0ubuntu0.21.04.1bb1) focal; urgency=medium
 
   * Balabit patched version

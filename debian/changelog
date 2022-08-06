@@ -1,3 +1,32 @@
+samba (2:4.13.17~dfsg-0ubuntu1.20.04.1) focal-security; urgency=medium
+
+  * SECURITY UPDATE: MaxQueryDuration not honoured in Samba AD DC LDAP
+    - debian/patches/CVE-2021-3670-*.patch
+    - CVE-2021-3670
+  * SECURITY UPDATE: Samba AD users can bypass certain restrictions
+    associated with changing passwords
+    - debian/patches/CVE-2022-2031-*.patch
+    - CVE-2022-2031
+  * SECURITY UPDATE: Server memory information leak via SMB1
+    - debian/patches/CVE-2022-32742-*.patch
+    - CVE-2022-32742
+  * SECURITY UPDATE: Samba AD users can forge password change requests for
+    any user
+    - debian/patches/CVE-2022-2031-*.patch
+    - CVE-2022-32744
+  * SECURITY UPDATE: Samba AD users can crash the server process with an
+    LDAP add or modify request
+    - debian/patches/CVE-2022-32745_6-*.patch
+    - CVE-2022-32745
+  * SECURITY UPDATE: Samba AD users can induce a use-after-free in the
+    server process with an LDAP add or modify request
+    - debian/patches/CVE-2022-32745_6-*.patch
+    - CVE-2022-32746
+  * debian/control: Build-Depends on ldb security update.
+  * Fix version string to match focal.
+
+ -- Marc Deslauriers <marc.deslauriers@ubuntu.com>  Mon, 18 Jul 2022 08:52:26 -0400
+
 samba (2:4.13.17~dfsg-0ubuntu0.21.04.2bb1) focal; urgency=medium
 
   * Balabit patched version

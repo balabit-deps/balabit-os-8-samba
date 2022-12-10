@@ -1,3 +1,10 @@
+samba (2:4.13.17~dfsg-0ubuntu1.20.04.2) focal; urgency=medium
+
+  * d/p/win-22H2-fix.patch: fix interoperability with Windows 22H2
+    clients (LP: #1993934)
+
+ -- Andreas Hasenack <andreas@canonical.com>  Tue, 08 Nov 2022 11:35:28 -0300
+
 samba (2:4.13.17~dfsg-0ubuntu1.20.04.1bb1) focal; urgency=medium
 
   * Balabit patched version

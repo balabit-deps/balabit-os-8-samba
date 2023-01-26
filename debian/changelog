@@ -1,3 +1,43 @@
+samba (2:4.13.17~dfsg-0ubuntu1.20.04.5) focal-security; urgency=medium
+
+  * SECURITY UPDATE: Multiple regressions (LP: #2003867) (LP: #2003891)
+    - debian/patches/series: disable all security fixes from the previous
+      update pending further investigation. This reverts the following
+      CVEs: CVE-2022-3437, CVE-2022-42898, CVE-2022-45141, CVE-2022-38023,
+      CVE-2022-37966, CVE-2022-37967.
+
+ -- Marc Deslauriers <marc.deslauriers@ubuntu.com>  Thu, 26 Jan 2023 09:03:40 -0500
+
+samba (2:4.13.17~dfsg-0ubuntu1.20.04.4) focal-security; urgency=medium
+
+  * SECURITY UPDATE: Buffer overflow in Heimdal unwrap_des3()
+    - debian/patches/CVE-2022-3437-*.patch
+    - CVE-2022-3437
+  * SECURITY UPDATE: Buffer overflow vulnerabilities on 32-bit systems
+    - debian/patches/CVE-2022-42898-*.patch
+    - CVE-2022-42898
+  * SECURITY UPDATE: Samba AD DC can be forced to issue rc4-hmac encrypted
+    Kerberos tickets
+    - debian/patches/CVE-2022-45141-*.patch
+    - CVE-2022-45141
+  * SECURITY UPDATE: RC4/HMAC-MD5 NetLogon Secure Channel is weak and
+    should be avoided
+    - debian/patches/CVE-2022-38023-*.patch
+    - CVE-2022-38023
+  * SECURITY UPDATE: rc4-hmac Kerberos session keys issued to modern servers
+    - debian/patches/CVE-2022-3796x-*.patch
+    - CVE-2022-37966
+  * SECURITY UPDATE: Kerberos constrained delegation ticket forgery
+    possible against Samba AD DC
+    - debian/patches/CVE-2022-3796x-*.patch
+    - CVE-2022-37967
+  * debian/patches/win-22H2-fix.patch: split git-style patch into three
+    individual patches so that it can be manipulated properly with quilt.
+  * debian/patches/CVE-2022-44640-*.patch: Heimdal issue that did not
+    affect Samba, but patches included for completeness.
+
+ -- Marc Deslauriers <marc.deslauriers@ubuntu.com>  Wed, 11 Jan 2023 11:12:16 -0500
+
 samba (2:4.13.17~dfsg-0ubuntu1.20.04.2) focal; urgency=medium
 
   * d/p/win-22H2-fix.patch: fix interoperability with Windows 22H2

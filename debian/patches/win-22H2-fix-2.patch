@@ -1,0 +1,68 @@
+From e8a1c05847618c1c4b83d92757c928484dc172e9 Mon Sep 17 00:00:00 2001
+From: Joseph Sutton <josephsutton@catalyst.net.nz>
+Date: Thu, 20 Oct 2022 12:36:44 +1300
+Subject: [PATCH 2/3] tests/krb5: Add test requesting a TGT expiring post-2038
+
+This demonstrates the behaviour of Windows 11 22H2 over Kerberos,
+which changed to use a year 9999 date for a forever timetime in
+tickets.
+
+BUG: https://bugzilla.samba.org/show_bug.cgi?id=15197
+
+Signed-off-by: Joseph Sutton <josephsutton@catalyst.net.nz>
+Reviewed-by: Douglas Bagnall <douglas.bagnall@catalyst.net.nz>
+
+Autobuild-User(master): Andrew Bartlett <abartlet@samba.org>
+Autobuild-Date(master): Thu Oct 20 05:00:23 UTC 2022 on sn-devel-184
+
+(backported from commit 50cbdecf2e276e5f87b9c2d95fd3ca86d11a08e2)
+
+[abartlet@samba.org Adapted from 50cbdecf2e276e5f87b9c2d95fd3ca86d11a08e2
+ as the kerberos tests have changed parameters in newer versions
+ breaking the context]
+---
+ python/samba/tests/krb5/as_req_tests.py | 13 +++++++++++--
+ 1 file changed, 11 insertions(+), 2 deletions(-)
+
+diff --git a/python/samba/tests/krb5/as_req_tests.py b/python/samba/tests/krb5/as_req_tests.py
+index 054a49b64aa..aa4bc2370c4 100755
+--- a/python/samba/tests/krb5/as_req_tests.py
++++ b/python/samba/tests/krb5/as_req_tests.py
+@@ -42,7 +42,7 @@ global_hexdump = False
+ 
+ class AsReqBaseTest(KDCBaseTest):
+     def _run_as_req_enc_timestamp(self, client_creds, sname=None,
+-                                  expected_error=None):
++                                  expected_error=None, till=None):
+         client_account = client_creds.get_username()
+         client_as_etypes = self.get_default_enctypes()
+         client_kvno = client_creds.get_kvno()
+@@ -62,7 +62,8 @@ class AsReqBaseTest(KDCBaseTest):
+         expected_sname = sname
+         expected_salt = client_creds.get_salt()
+ 
+-        till = self.get_KerberosTime(offset=36000)
++        if till is None:
++            till = self.get_KerberosTime(offset=36000)
+ 
+         initial_etypes = client_as_etypes
+         initial_kdc_options = krb5_asn1.KDCOptions('forwardable')
+@@ -241,6 +242,14 @@ class AsReqKerberosTests(AsReqBaseTest):
+             sname=wrong_krbtgt_princ,
+             expected_error=KDC_ERR_S_PRINCIPAL_UNKNOWN)
+ 
++    # Test that we can make a request for a ticket expiring post-2038.
++    def test_future_till(self):
++        client_creds = self.get_client_creds()
++
++        self._run_as_req_enc_timestamp(
++            client_creds,
++            till='99990913024805Z')
++
+ 
+ if __name__ == "__main__":
+     global_asn1_print = False
+-- 
+2.25.1
+
+

@@ -17,7 +17,6 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-from __future__ import print_function
 import optparse
 import sys
 import time
@@ -53,7 +52,7 @@ from samba.dcerpc.security import DOMAIN_RID_DOMAIN_MEMBERS
 from samba.ndr import ndr_pack, ndr_unpack
 from samba.dcerpc import security, lsa
 from samba.tests import delete_force
-from samba.compat import get_string
+from samba.common import get_string
 
 parser = optparse.OptionParser("ldap.py [options] <host>")
 sambaopts = options.SambaOptions(parser)

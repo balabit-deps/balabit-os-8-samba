@@ -46,10 +46,12 @@
 #include "rpc_client/util_netlogon.h"
 #include "param/param.h"
 #include "messaging/messaging.h"
+#include "lib/util/string_wrappers.h"
 #include "lib/crypto/gnutls_helpers.h"
 
 #include "lib/crypto/gnutls_helpers.h"
 #include <gnutls/crypto.h>
+#include "lib/global_contexts.h"
 
 #undef DBGC_CLASS
 #define DBGC_CLASS DBGC_WINBIND
@@ -670,12 +672,10 @@ static NTSTATUS winbindd_raw_kerberos_login(TALLOC_CTX *mem_ctx,
 	krb5_error_code krb5_ret;
 	const char *cc = NULL;
 	const char *principal_s = NULL;
-	const char *service = NULL;
 	char *realm = NULL;
 	fstring name_namespace, name_domain, name_user;
 	time_t ticket_lifetime = 0;
 	time_t renewal_until = 0;
-	ADS_STRUCT *ads;
 	time_t time_offset = 0;
 	const char *user_ccache_file;
 	struct PAC_LOGON_INFO *logon_info = NULL;
@@ -685,6 +685,8 @@ static NTSTATUS winbindd_raw_kerberos_login(TALLOC_CTX *mem_ctx,
 	const char *local_service;
 	uint32_t i;
 	struct netr_SamInfo6 *info6_copy = NULL;
+	char *canon_principal = NULL;
+	char *canon_realm = NULL;
 	bool ok;
 
 	*info6 = NULL;
@@ -712,9 +714,8 @@ static NTSTATUS winbindd_raw_kerberos_login(TALLOC_CTX *mem_ctx,
 	/* 2nd step:
 	 * get kerberos properties */
 
-	if (domain->private_data) {
-		ads = (ADS_STRUCT *)domain->private_data;
-		time_offset = ads->auth.time_offset;
+	if (domain->backend_data.ads_conn != NULL) {
+		time_offset = domain->backend_data.ads_conn->auth.time_offset;
 	}
 
 
@@ -753,11 +754,6 @@ static NTSTATUS winbindd_raw_kerberos_login(TALLOC_CTX *mem_ctx,
 		return NT_STATUS_NO_MEMORY;
 	}
 
-	service = talloc_asprintf(mem_ctx, "%s/%s@%s", KRB5_TGS_NAME, realm, realm);
-	if (service == NULL) {
-		return NT_STATUS_NO_MEMORY;
-	}
-
 	local_service = talloc_asprintf(mem_ctx, "%s$@%s",
 					lp_netbios_name(), lp_realm());
 	if (local_service == NULL) {
@@ -787,6 +783,8 @@ static NTSTATUS winbindd_raw_kerberos_login(TALLOC_CTX *mem_ctx,
 				     WINBINDD_PAM_AUTH_KRB5_RENEW_TIME,
 				     NULL,
 				     local_service,
+				     &canon_principal,
+				     &canon_realm,
 				     &pac_data_ctr);
 	if (user_ccache_file != NULL) {
 		gain_root_privilege();
@@ -844,7 +842,6 @@ static NTSTATUS winbindd_raw_kerberos_login(TALLOC_CTX *mem_ctx,
 
 		result = add_ccache_to_list(principal_s,
 					    cc,
-					    service,
 					    user,
 					    pass,
 					    realm,
@@ -852,7 +849,9 @@ static NTSTATUS winbindd_raw_kerberos_login(TALLOC_CTX *mem_ctx,
 					    time(NULL),
 					    ticket_lifetime,
 					    renewal_until,
-					    false);
+					    false,
+					    canon_principal,
+					    canon_realm);
 
 		if (!NT_STATUS_IS_OK(result)) {
 			DEBUG(10,("winbindd_raw_kerberos_login: failed to add ccache to list: %s\n",
@@ -1174,7 +1173,6 @@ static NTSTATUS winbindd_dual_pam_auth_cached(struct winbindd_domain *domain,
 			const char *cc = NULL;
 			char *realm = NULL;
 			const char *principal_s = NULL;
-			const char *service = NULL;
 			const char *user_ccache_file;
 
 			if (domain->alt_name == NULL) {
@@ -1209,11 +1207,6 @@ static NTSTATUS winbindd_dual_pam_auth_cached(struct winbindd_domain *domain,
 				return NT_STATUS_NO_MEMORY;
 			}
 
-			service = talloc_asprintf(state->mem_ctx, "%s/%s@%s", KRB5_TGS_NAME, realm, realm);
-			if (service == NULL) {
-				return NT_STATUS_NO_MEMORY;
-			}
-
 			if (user_ccache_file != NULL) {
 
 				fstrcpy(state->response->data.auth.krb5ccname,
@@ -1221,7 +1214,6 @@ static NTSTATUS winbindd_dual_pam_auth_cached(struct winbindd_domain *domain,
 
 				result = add_ccache_to_list(principal_s,
 							    cc,
-							    service,
 							    state->request->data.auth.user,
 							    state->request->data.auth.pass,
 							    realm,
@@ -1229,7 +1221,9 @@ static NTSTATUS winbindd_dual_pam_auth_cached(struct winbindd_domain *domain,
 							    time(NULL),
 							    time(NULL) + lp_winbind_cache_time(),
 							    time(NULL) + WINBINDD_PAM_AUTH_KRB5_RENEW_TIME,
-							    true);
+							    true,
+							    principal_s,
+							    realm);
 
 				if (!NT_STATUS_IS_OK(result)) {
 					DEBUG(10,("winbindd_dual_pam_auth_cached: failed "
@@ -1420,9 +1414,6 @@ static NTSTATUS winbindd_dual_auth_passdb(TALLOC_CTX *mem_ctx,
 		return NT_STATUS_NO_MEMORY;
 	}
 
-	/* We don't want any more mapping of the username */
-	user_info->mapped_state = True;
-
 	/* We don't want to come back to winbindd or to do PAM account checks */
 	user_info->flags |= USER_INFO_INFO3_AND_NO_AUTHZ;
 
@@ -1471,8 +1462,10 @@ static NTSTATUS winbindd_dual_auth_passdb(TALLOC_CTX *mem_ctx,
 	}
 
 	*pinfo3 = info3;
-	DEBUG(10, ("Authenticaticating user %s\\%s returned %s\n", domain,
-		   user, nt_errstr(status)));
+	DBG_DEBUG("Authenticating user %s\\%s returned %s\n",
+		  domain,
+		  user,
+		  nt_errstr(status));
 	TALLOC_FREE(frame);
 	return status;
 }
@@ -1801,7 +1794,6 @@ static NTSTATUS winbindd_dual_pam_auth_samlogon(
 	uint32_t flags = 0;
 	uint16_t validation_level = 0;
 	union netr_Validation *validation = NULL;
-	struct netr_SamBaseInfo *base_info = NULL;
 	bool ok;
 
 	DEBUG(10,("winbindd_dual_pam_auth_samlogon\n"));
@@ -1835,16 +1827,16 @@ static NTSTATUS winbindd_dual_pam_auth_samlogon(
 		 * not authoritative (for example on the RODC).
 		 */
 		if (authoritative != 0) {
-			if (NT_STATUS_IS_OK(result)) {
-				result = map_info3_to_validation(
-						mem_ctx,
-						info3,
-						&validation_level,
-						&validation);
-				TALLOC_FREE(info3);
-				if (!NT_STATUS_IS_OK(result)) {
-					goto done;
-				}
+			if (!NT_STATUS_IS_OK(result)) {
+				return result;
+			}
+			result = map_info3_to_validation(mem_ctx,
+							 info3,
+							 &validation_level,
+							 &validation);
+			TALLOC_FREE(info3);
+			if (!NT_STATUS_IS_OK(result)) {
+				return result;
 			}
 
 			goto done;
@@ -1870,98 +1862,14 @@ static NTSTATUS winbindd_dual_pam_auth_samlogon(
 					     &validation_level,
 					     &validation);
 	if (!NT_STATUS_IS_OK(result)) {
-		goto done;
-	}
-
-	/* handle the case where a NT4 DC does not fill in the acct_flags in
-	 * the samlogon reply info3. When accurate info3 is required by the
-	 * caller, we look up the account flags ourselves - gd */
-
-	switch (validation_level) {
-	case 3:
-		base_info = &validation->sam3->base;
-		break;
-	case 6:
-		base_info = &validation->sam6->base;
-		break;
-	default:
-		DBG_ERR("Bad validation level %d", (int)validation_level);
-		result = NT_STATUS_INTERNAL_ERROR;
-		goto done;
-	}
-	if ((request_flags & WBFLAG_PAM_INFO3_TEXT) &&
-	    (base_info->acct_flags == 0))
-	{
-		struct rpc_pipe_client *samr_pipe;
-		struct policy_handle samr_domain_handle, user_pol;
-		union samr_UserInfo *info = NULL;
-		NTSTATUS status_tmp, result_tmp;
-		uint32_t acct_flags;
-		struct dcerpc_binding_handle *b;
-
-		status_tmp = cm_connect_sam(domain, mem_ctx, false,
-					    &samr_pipe, &samr_domain_handle);
-
-		if (!NT_STATUS_IS_OK(status_tmp)) {
-			DEBUG(3, ("could not open handle to SAMR pipe: %s\n",
-				nt_errstr(status_tmp)));
-			goto done;
-		}
-
-		b = samr_pipe->binding_handle;
-
-		status_tmp = dcerpc_samr_OpenUser(b, mem_ctx,
-						  &samr_domain_handle,
-						  MAXIMUM_ALLOWED_ACCESS,
-						  base_info->rid,
-						  &user_pol,
-						  &result_tmp);
-
-		if (!NT_STATUS_IS_OK(status_tmp)) {
-			DEBUG(3, ("could not open user handle on SAMR pipe: %s\n",
-				nt_errstr(status_tmp)));
-			goto done;
-		}
-		if (!NT_STATUS_IS_OK(result_tmp)) {
-			DEBUG(3, ("could not open user handle on SAMR pipe: %s\n",
-				nt_errstr(result_tmp)));
-			goto done;
-		}
-
-		status_tmp = dcerpc_samr_QueryUserInfo(b, mem_ctx,
-						       &user_pol,
-						       16,
-						       &info,
-						       &result_tmp);
-
-		if (any_nt_status_not_ok(status_tmp, result_tmp,
-					 &status_tmp)) {
-			DEBUG(3, ("could not query user info on SAMR pipe: %s\n",
-				nt_errstr(status_tmp)));
-			dcerpc_samr_Close(b, mem_ctx, &user_pol, &result_tmp);
-			goto done;
-		}
-
-		acct_flags = info->info16.acct_flags;
-
-		if (acct_flags == 0) {
-			dcerpc_samr_Close(b, mem_ctx, &user_pol, &result_tmp);
-			goto done;
-		}
-
-		base_info->acct_flags = acct_flags;
-
-		DEBUG(10,("successfully retrieved acct_flags 0x%x\n", acct_flags));
-
-		dcerpc_samr_Close(b, mem_ctx, &user_pol, &result_tmp);
+		return result;
 	}
 
 done:
-	if (NT_STATUS_IS_OK(result)) {
-		*_validation_level = validation_level;
-		*_validation = validation;
-	}
-	return result;
+	*_validation_level = validation_level;
+	*_validation = validation;
+
+	return NT_STATUS_OK;
 }
 
 /*

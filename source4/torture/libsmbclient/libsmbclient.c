@@ -21,12 +21,14 @@
 #include "system/dir.h"
 #include "torture/smbtorture.h"
 #include "auth/credentials/credentials.h"
-#include "lib/cmdline/popt_common.h"
+#include "lib/cmdline/cmdline.h"
 #include <libsmbclient.h>
 #include "torture/libsmbclient/proto.h"
 #include "lib/param/loadparm.h"
 #include "lib/param/param_global.h"
+#include "libcli/smb/smb_constants.h"
 #include "dynconfig.h"
+#include "lib/util/time.h"
 
 /* test string to compare with when debug_callback is called */
 #define TEST_STRING "smbc_setLogCallback test"
@@ -48,11 +50,11 @@ static void auth_callback(const char *srv,
 			  char *pw, int pwlen)
 {
 	const char *workgroup =
-		cli_credentials_get_domain(popt_get_cmdline_credentials());
+		cli_credentials_get_domain(samba_cmdline_get_creds());
 	const char *username =
-		cli_credentials_get_username(popt_get_cmdline_credentials());
+		cli_credentials_get_username(samba_cmdline_get_creds());
 	const char *password =
-		cli_credentials_get_password(popt_get_cmdline_credentials());
+		cli_credentials_get_password(samba_cmdline_get_creds());
 	ssize_t ret;
 
 	if (workgroup != NULL) {
@@ -81,9 +83,9 @@ bool torture_libsmbclient_init_context(struct torture_context *tctx,
 				       SMBCCTX **ctx_p)
 {
 	const char *workgroup =
-		cli_credentials_get_domain(popt_get_cmdline_credentials());
+		cli_credentials_get_domain(samba_cmdline_get_creds());
 	const char *username =
-		cli_credentials_get_username(popt_get_cmdline_credentials());
+		cli_credentials_get_username(samba_cmdline_get_creds());
 	const char *client_proto =
 		torture_setting_string(tctx, "clientprotocol", NULL);
 	SMBCCTX *ctx = NULL;
@@ -209,10 +211,10 @@ static bool torture_libsmbclient_setConfiguration(struct torture_context *tctx)
 			"NEW_WORKGROUP",
 			"smbc_setConfiguration failed, "
 			"'workgroup' not updated");
-	torture_assert_int_equal(tctx, global_config->client_min_protocol, 7,
+	torture_assert_int_equal(tctx, global_config->client_min_protocol, PROTOCOL_NT1,
 			"smbc_setConfiguration failed, 'client min protocol' "
 			"not updated");
-	torture_assert_int_equal(tctx, global_config->_client_max_protocol, 13,
+	torture_assert_int_equal(tctx, global_config->_client_max_protocol, PROTOCOL_SMB3_00,
 			"smbc_setConfiguration failed, 'client max protocol' "
 			"not updated");
 	torture_assert_int_equal(tctx, global_config->client_signing, 1,
@@ -1231,8 +1233,8 @@ static bool torture_libsmbclient_utimes(struct torture_context *tctx)
 	ret = smbc_fstat(fhandle, &st);
 	torture_assert_int_not_equal(tctx, ret, -1, "smbc_fstat failed");
 
-	tbuf[0] = convert_timespec_to_timeval(st.st_atim);
-	tbuf[1] = convert_timespec_to_timeval(st.st_mtim);
+	tbuf[0] = convert_timespec_to_timeval(get_atimespec(&st));
+	tbuf[1] = convert_timespec_to_timeval(get_mtimespec(&st));
 
 	tbuf[1] = timeval_add(&tbuf[1], 0, 100000); /* 100 msec */
 
@@ -1244,13 +1246,170 @@ static bool torture_libsmbclient_utimes(struct torture_context *tctx)
 
 	torture_assert_int_equal(
 		tctx,
-		st.st_mtim.tv_nsec / 1000,
+		get_mtimensec(&st) / 1000,
 		tbuf[1].tv_usec,
 		"smbc_utimes did not update msec");
 
 	smbc_close(fhandle);
 	smbc_unlink(smburl);
 	return true;
+}
+
+static bool torture_libsmbclient_noanon_list(struct torture_context *tctx)
+{
+	const char *smburl = torture_setting_string(tctx, "smburl", NULL);
+	struct smbc_dirent *dirent = NULL;
+	SMBCCTX *ctx = NULL;
+	int dhandle = -1;
+	bool ok = true;
+
+	if (smburl == NULL) {
+		torture_fail(tctx,
+			     "option --option=torture:smburl="
+			     "smb://user:password@server missing\n");
+	}
+
+	ok = torture_libsmbclient_init_context(tctx, &ctx);
+	torture_assert_goto(tctx,
+			    ok,
+			    ok,
+			    out,
+			    "Failed to init context");
+	torture_comment(tctx,
+			"Testing smbc_setOptionNoAutoAnonymousLogin\n");
+	smbc_setOptionNoAutoAnonymousLogin(ctx, true);
+	smbc_set_context(ctx);
+
+	torture_comment(tctx, "Listing: %s\n", smburl);
+	dhandle = smbc_opendir(smburl);
+	torture_assert_int_not_equal_goto(tctx,
+					  dhandle,
+					  -1,
+					  ok,
+					  out,
+					  "Failed to open smburl");
+
+	while((dirent = smbc_readdir(dhandle)) != NULL) {
+		torture_comment(tctx, "DIR: %s\n", dirent->name);
+		torture_assert_not_null_goto(tctx,
+					     dirent->name,
+					     ok,
+					     out,
+					     "Failed to read name");
+	}
+
+out:
+	smbc_closedir(dhandle);
+	return ok;
+}
+
+static bool torture_libsmbclient_rename(struct torture_context *tctx)
+{
+	SMBCCTX *ctx = NULL;
+	int fhandle = -1;
+	bool success = false;
+	const char *filename_src = NULL;
+	const char *filename_dst = NULL;
+	int ret;
+	const char *smburl = torture_setting_string(tctx, "smburl", NULL);
+
+	if (smburl == NULL) {
+		torture_fail(tctx,
+			"option --option=torture:smburl="
+			"smb://user:password@server/share missing\n");
+	}
+
+	torture_assert_goto(tctx,
+				torture_libsmbclient_init_context(tctx, &ctx),
+				success,
+				done,
+				"");
+
+	smbc_set_context(ctx);
+
+	filename_src = talloc_asprintf(tctx,
+			"%s/src",
+			smburl);
+	if (filename_src == NULL) {
+		torture_fail_goto(tctx, done, "talloc fail\n");
+	}
+
+	filename_dst = talloc_asprintf(tctx,
+			"%s/dst",
+			smburl);
+	if (filename_dst == NULL) {
+		torture_fail_goto(tctx, done, "talloc fail\n");
+	}
+
+	/* Ensure the files don't exist. */
+	smbc_unlink(filename_src);
+	smbc_unlink(filename_dst);
+
+	/* Create them. */
+	fhandle = smbc_creat(filename_src, 0666);
+	if (fhandle < 0) {
+		torture_fail_goto(tctx,
+			done,
+			talloc_asprintf(tctx,
+				"failed to create file '%s': %s",
+				filename_src,
+				strerror(errno)));
+	}
+	ret = smbc_close(fhandle);
+	torture_assert_int_equal_goto(tctx,
+		ret,
+		0,
+		success,
+		done,
+		talloc_asprintf(tctx,
+			"failed to close handle for '%s'",
+			filename_src));
+
+	fhandle = smbc_creat(filename_dst, 0666);
+	if (fhandle < 0) {
+		torture_fail_goto(tctx,
+			done,
+			talloc_asprintf(tctx,
+				"failed to create file '%s': %s",
+				filename_dst,
+				strerror(errno)));
+	}
+	ret = smbc_close(fhandle);
+	torture_assert_int_equal_goto(tctx,
+		ret,
+		0,
+		success,
+		done,
+		talloc_asprintf(tctx,
+			"failed to close handle for '%s'",
+			filename_dst));
+
+	ret = smbc_rename(filename_src, filename_dst);
+
+	/*
+	 * BUG: https://bugzilla.samba.org/show_bug.cgi?id=14938
+	 * gives ret == -1, but errno = 0 for overwrite renames
+	 * over SMB2.
+	 */
+	torture_assert_int_equal_goto(tctx,
+		ret,
+		0,
+		success,
+		done,
+		talloc_asprintf(tctx,
+			"smbc_rename '%s' -> '%s' failed with %s\n",
+			filename_src,
+			filename_dst,
+			strerror(errno)));
+
+	/* Remove them again. */
+	smbc_unlink(filename_src);
+	smbc_unlink(filename_dst);
+	success = true;
+
+  done:
+	smbc_free_context(ctx, 1);
+	return success;
 }
 
 NTSTATUS torture_libsmbclient_init(TALLOC_CTX *ctx)
@@ -1274,6 +1433,11 @@ NTSTATUS torture_libsmbclient_init(TALLOC_CTX *ctx)
 		torture_libsmbclient_readdirplus2);
 	torture_suite_add_simple_test(
 		suite, "utimes", torture_libsmbclient_utimes);
+	torture_suite_add_simple_test(
+		suite, "noanon_list", torture_libsmbclient_noanon_list);
+	torture_suite_add_simple_test(suite,
+					"rename",
+					torture_libsmbclient_rename);
 
 	suite->description = talloc_strdup(suite, "libsmbclient interface tests");
 

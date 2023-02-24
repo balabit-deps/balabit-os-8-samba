@@ -25,6 +25,7 @@
 #include "passdb.h"
 #include "cmdline_contexts.h"
 #include "passwd_proto.h"
+#include "lib/util/string_wrappers.h"
 
 /*
  * Next two lines needed for SunOS and don't
@@ -632,14 +633,6 @@ int main(int argc, char **argv)
 	local_flags = process_options(argc, argv, local_flags);
 
 	setup_logging("smbpasswd", DEBUG_STDERR);
-
-	/*
-	 * Set the machine NETBIOS name if not already
-	 * set from the config file. 
-	 */ 
-
-	if (!init_names())
-		return 1;
 
 	/* Check the effective uid - make sure we are not setuid */
 	if (is_setuid_root()) {

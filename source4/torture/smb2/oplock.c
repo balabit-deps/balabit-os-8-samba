@@ -28,7 +28,7 @@
 #include "libcli/resolve/resolve.h"
 #include "libcli/smb/smbXcli_base.h"
 
-#include "lib/cmdline/popt_common.h"
+#include "lib/cmdline/cmdline.h"
 #include "lib/events/events.h"
 
 #include "param/param.h"
@@ -294,7 +294,7 @@ static bool open_smb2_connection_no_level2_oplocks(struct torture_context *tctx,
 	status = smb2_connect(tctx, host,
 			      lpcfg_smb_ports(tctx->lp_ctx), share,
 			      lpcfg_resolve_context(tctx->lp_ctx),
-			      popt_get_cmdline_credentials(),
+			      samba_cmdline_get_creds(),
 			      tree, tctx->ev, &options,
 			      lpcfg_socket_options(tctx->lp_ctx),
 			      lpcfg_gensec_settings(tctx, tctx->lp_ctx));
@@ -2649,7 +2649,7 @@ static bool test_smb2_oplock_batch22b(struct torture_context *tctx,
 	NTSTATUS status;
 	bool ret = true;
 	union smb_open io;
-	struct smb2_handle h, h1, h2;
+	struct smb2_handle h, h1, h2 = {{0}};
 	struct timeval tv;
 	int timeout = torture_setting_int(tctx, "oplocktimeout", 35);
 	struct smb2_transport *transport1 = tree1->session->transport;
@@ -2727,7 +2727,9 @@ done:
 	test_cleanup_blocked_transports(tctx);
 
 	smb2_util_close(tree1, h1);
-	smb2_util_close(tree1, h2);
+	if (!smb2_util_handle_empty(h2)) {
+		smb2_util_close(tree1, h2);
+	}
 	smb2_util_close(tree1, h);
 
 	smb2_deltree(tree1, BASEDIR);
@@ -2955,15 +2957,9 @@ static bool test_smb2_oplock_batch25(struct torture_context *tctx,
 	h1 = io.smb2.out.file.handle;
 	CHECK_VAL(io.smb2.out.oplock_level, SMB2_OPLOCK_LEVEL_BATCH);
 
-	torture_comment(tctx, "changing the file attribute info should trigger "
-			"a break and a violation\n");
-
 	status = smb2_util_setatr(tree1, fname, FILE_ATTRIBUTE_HIDDEN);
-	torture_assert_ntstatus_equal(tctx, status, NT_STATUS_SHARING_VIOLATION,
-				      "Incorrect status");
-
-	torture_wait_for_oplock_break(tctx);
-	CHECK_VAL(break_info.count, 1);
+	torture_assert_ntstatus_ok(tctx, status, "Setting attributes "
+				   "shouldn't trigger an oplock break");
 
 	smb2_util_close(tree1, h1);
 	smb2_util_close(tree1, h);
@@ -5077,16 +5073,8 @@ done:
 
 #ifdef HAVE_KERNEL_OPLOCKS_LINUX
 
-#ifndef F_SETLEASE
-#define F_SETLEASE      1024
-#endif
-
 #ifndef RT_SIGNAL_LEASE
 #define RT_SIGNAL_LEASE (SIGRTMIN+1)
-#endif
-
-#ifndef F_SETSIG
-#define F_SETSIG 10
 #endif
 
 static int got_break;

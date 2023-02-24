@@ -18,7 +18,6 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
-from __future__ import print_function
 import os
 import samba.getopt as options
 import ldb
@@ -37,7 +36,8 @@ from samba.netcmd import (
 from samba.samdb import SamDB
 from samba import dsdb
 from samba.dcerpc import security
-from samba.ndr import ndr_unpack
+from samba.ndr import ndr_unpack, ndr_pack
+from samba.dcerpc import preg
 import samba.security
 import samba.auth
 from samba.auth import AUTH_SESSION_INFO_DEFAULT_GROUPS, AUTH_SESSION_INFO_AUTHENTICATED, AUTH_SESSION_INFO_SIMPLE_PRIVILEGES
@@ -62,13 +62,13 @@ from samba.gp_parse.gp_csv import GPAuditCsvParser
 from samba.gp_parse.gp_inf import GptTmplInfParser
 from samba.gp_parse.gp_aas import GPAasParser
 from samba import param
-
-
-def attr_default(msg, attrname, default):
-    '''get an attribute from a ldap msg with a default'''
-    if attrname in msg:
-        return msg[attrname][0]
-    return default
+from samba.credentials import SMB_SIGNING_REQUIRED
+from samba.netcmd.common import attr_default
+from samba.common import get_bytes, get_string
+from configparser import ConfigParser
+from io import StringIO, BytesIO
+from samba.vgp_files_ext import calc_mode, stat_from_mode
+import hashlib
 
 
 def gpo_flags_string(value):
@@ -382,15 +382,20 @@ def create_directory_hier(conn, remotedir):
         if not conn.chkpath(path):
             conn.mkdir(path)
 
-def smb_connection(dc_hostname, service, lp, creds, sign=False):
+def smb_connection(dc_hostname, service, lp, creds):
     # SMB connect to DC
+    # Force signing for the smb connection
+    saved_signing_state = creds.get_smb_signing()
+    creds.set_smb_signing(SMB_SIGNING_REQUIRED)
     try:
         # the SMB bindings rely on having a s3 loadparm
         s3_lp = s3param.get_context()
         s3_lp.load(lp.configfile)
-        conn = libsmb.Conn(dc_hostname, service, lp=s3_lp, creds=creds, sign=sign)
+        conn = libsmb.Conn(dc_hostname, service, lp=s3_lp, creds=creds)
     except Exception:
         raise CommandError("Error connecting to '%s' using SMB" % dc_hostname)
+    # Reset signing state
+    creds.set_smb_signing(saved_signing_state)
     return conn
 
 
@@ -998,7 +1003,7 @@ class cmd_fetch(GPOCommand):
 
         # SMB connect to DC
         conn = smb_connection(dc_hostname, service, lp=self.lp,
-                              creds=self.creds, sign=True)
+                              creds=self.creds)
 
         # Copy GPT
         tmpdir, gpodir = self.construct_tmpdir(tmpdir, gpo)
@@ -1629,8 +1634,7 @@ class cmd_admxload(Command):
         conn = smb_connection(dc_hostname,
                               'sysvol',
                               lp=self.lp,
-                              creds=self.creds,
-                              sign=True)
+                              creds=self.creds)
 
         smb_dir = '\\'.join([self.lp.get('realm').lower(),
                              'Policies', 'PolicyDefinitions'])
@@ -1650,7 +1654,7 @@ class cmd_admxload(Command):
                 sub_dir = '\\'.join([smb_dir, path_in_admx]).replace('/', '\\')
                 smb_path = '\\'.join([sub_dir, fname])
                 try:
-                    conn.mkdir(sub_dir)
+                    create_directory_hier(conn, sub_dir)
                 except NTSTATUSError as e:
                     if e.args[0] == 0xC0000022: # STATUS_ACCESS_DENIED
                         raise CommandError("The authenticated user does "
@@ -1664,6 +1668,2338 @@ class cmd_admxload(Command):
                         if e.args[0] == 0xC0000022: # STATUS_ACCESS_DENIED
                             raise CommandError("The authenticated user does "
                                                "not have sufficient privileges")
+        self.outf.write('Installing ADMX templates to the Central Store '
+                        'prevents Windows from displaying its own templates '
+                        'in the Group Policy Management Console. You will '
+                        'need to install these templates '
+                        'from https://www.microsoft.com/en-us/download/102157 '
+                        'to continue using Windows Administrative Templates.\n')
+
+class cmd_add_sudoers(Command):
+    """Adds a Samba Sudoers Group Policy to the sysvol
+
+This command adds a sudo rule to the sysvol for applying to winbind clients.
+
+The command argument indicates the final field in the sudo rule.
+The user argument indicates the user specified in the parentheses.
+The users and groups arguments are comma separated lists, which are combined to
+form the first field in the sudo rule.
+The --passwd argument specifies whether the sudo entry will require a password
+be specified. The default is False, meaning the NOPASSWD field will be
+specified in the sudo entry.
+
+Example:
+samba-tool gpo manage sudoers add {31B2F340-016D-11D2-945F-00C04FB984F9} ALL ALL fakeu fakeg
+
+The example command will generate the following sudoers entry:
+fakeu,fakeg% ALL=(ALL) NOPASSWD: ALL
+    """
+
+    synopsis = "%prog <gpo> <command> <user> <users> [groups] [options]"
+
+    takes_optiongroups = {
+        "sambaopts": options.SambaOptions,
+        "versionopts": options.VersionOptions,
+        "credopts": options.CredentialsOptions,
+    }
+
+    takes_options = [
+        Option("-H", "--URL", help="LDB URL for database or target server", type=str,
+                metavar="URL", dest="H"),
+        Option("--passwd", action='store_true', default=False,
+               help="Specify to indicate that sudo entry must provide a password")
+    ]
+
+    takes_args = ["gpo", "command", "user", "users", "groups?"]
+
+    def run(self, gpo, command, user, users, groups=None, passwd=None,
+            H=None, sambaopts=None, credopts=None, versionopts=None):
+        self.lp = sambaopts.get_loadparm()
+        self.creds = credopts.get_credentials(self.lp, fallback_machine=True)
+
+        # We need to know writable DC to setup SMB connection
+        if H and H.startswith('ldap://'):
+            dc_hostname = H[7:]
+            self.url = H
+        else:
+            dc_hostname = netcmd_finddc(self.lp, self.creds)
+            self.url = dc_url(self.lp, self.creds, dc=dc_hostname)
+
+        # SMB connect to DC
+        conn = smb_connection(dc_hostname,
+                              'sysvol',
+                              lp=self.lp,
+                              creds=self.creds)
+
+        realm = self.lp.get('realm')
+        vgp_dir = '\\'.join([realm.lower(), 'Policies', gpo,
+                             'MACHINE\\VGP\\VTLA\\Sudo',
+                             'SudoersConfiguration'])
+        vgp_xml = '\\'.join([vgp_dir, 'manifest.xml'])
+        try:
+            xml_data = ET.ElementTree(ET.fromstring(conn.loadfile(vgp_xml)))
+            policysetting = xml_data.getroot().find('policysetting')
+            data = policysetting.find('data')
+        except NTSTATUSError as e:
+            # STATUS_OBJECT_NAME_INVALID, STATUS_OBJECT_NAME_NOT_FOUND,
+            # STATUS_OBJECT_PATH_NOT_FOUND
+            if e.args[0] in [0xC0000033, 0xC0000034, 0xC000003A]:
+                # The file doesn't exist, so create the xml structure
+                xml_data = ET.ElementTree(ET.Element('vgppolicy'))
+                policysetting = ET.SubElement(xml_data.getroot(),
+                                              'policysetting')
+                pv = ET.SubElement(policysetting, 'version')
+                pv.text = '1'
+                name = ET.SubElement(policysetting, 'name')
+                name.text = 'Sudo Policy'
+                description = ET.SubElement(policysetting, 'description')
+                description.text = 'Sudoers File Configuration Policy'
+                apply_mode = ET.SubElement(policysetting, 'apply_mode')
+                apply_mode.text = 'merge'
+                data = ET.SubElement(policysetting, 'data')
+                load_plugin = ET.SubElement(data, 'load_plugin')
+                load_plugin.text = 'true'
+            elif e.args[0] == 0xC0000022: # STATUS_ACCESS_DENIED
+                raise CommandError("The authenticated user does "
+                                   "not have sufficient privileges")
+            else:
+                raise
+
+        sudoers_entry = ET.SubElement(data, 'sudoers_entry')
+        if passwd:
+            ET.SubElement(sudoers_entry, 'password')
+        command_elm = ET.SubElement(sudoers_entry, 'command')
+        command_elm.text = command
+        user_elm = ET.SubElement(sudoers_entry, 'user')
+        user_elm.text = user
+        listelement = ET.SubElement(sudoers_entry, 'listelement')
+        for u in users.split(','):
+            principal = ET.SubElement(listelement, 'principal')
+            principal.text = u
+            principal.attrib['type'] = 'user'
+        if groups is not None:
+            for g in groups.split():
+                principal = ET.SubElement(listelement, 'principal')
+                principal.text = g
+                principal.attrib['type'] = 'group'
+
+        out = BytesIO()
+        xml_data.write(out, encoding='UTF-8', xml_declaration=True)
+        out.seek(0)
+        try:
+            create_directory_hier(conn, vgp_dir)
+            conn.savefile(vgp_xml, out.read())
+        except NTSTATUSError as e:
+            if e.args[0] == 0xC0000022: # STATUS_ACCESS_DENIED
+                raise CommandError("The authenticated user does "
+                                   "not have sufficient privileges")
+            raise
+
+class cmd_list_sudoers(Command):
+    """List Samba Sudoers Group Policy from the sysvol
+
+This command lists sudo rules from the sysvol that will be applied to winbind clients.
+
+Example:
+samba-tool gpo manage sudoers list {31B2F340-016D-11D2-945F-00C04FB984F9}
+    """
+
+    synopsis = "%prog <gpo> [options]"
+
+    takes_optiongroups = {
+        "sambaopts": options.SambaOptions,
+        "versionopts": options.VersionOptions,
+        "credopts": options.CredentialsOptions,
+    }
+
+    takes_options = [
+        Option("-H", "--URL", help="LDB URL for database or target server", type=str,
+                metavar="URL", dest="H"),
+    ]
+
+    takes_args = ["gpo"]
+
+    def run(self, gpo, H=None, sambaopts=None, credopts=None, versionopts=None):
+        self.lp = sambaopts.get_loadparm()
+        self.creds = credopts.get_credentials(self.lp, fallback_machine=True)
+
+        # We need to know writable DC to setup SMB connection
+        if H and H.startswith('ldap://'):
+            dc_hostname = H[7:]
+            self.url = H
+        else:
+            dc_hostname = netcmd_finddc(self.lp, self.creds)
+            self.url = dc_url(self.lp, self.creds, dc=dc_hostname)
+
+        # SMB connect to DC
+        conn = smb_connection(dc_hostname,
+                              'sysvol',
+                              lp=self.lp,
+                              creds=self.creds)
+
+        realm = self.lp.get('realm')
+        vgp_xml = '\\'.join([realm.lower(), 'Policies', gpo,
+                                'MACHINE\\VGP\\VTLA\\Sudo',
+                                'SudoersConfiguration\\manifest.xml'])
+        try:
+            xml_data = ET.fromstring(conn.loadfile(vgp_xml))
+        except NTSTATUSError as e:
+            # STATUS_OBJECT_NAME_INVALID, STATUS_OBJECT_NAME_NOT_FOUND,
+            # STATUS_OBJECT_PATH_NOT_FOUND
+            if e.args[0] in [0xC0000033, 0xC0000034, 0xC000003A]:
+                return # The file doesn't exist, so there is nothing to list
+            if e.args[0] == 0xC0000022: # STATUS_ACCESS_DENIED
+                raise CommandError("The authenticated user does "
+                                   "not have sufficient privileges")
+            raise
+
+        policy = xml_data.find('policysetting')
+        data = policy.find('data')
+        for entry in data.findall('sudoers_entry'):
+            command = entry.find('command').text
+            user = entry.find('user').text
+            listelements = entry.findall('listelement')
+            principals = []
+            for listelement in listelements:
+                principals.extend(listelement.findall('principal'))
+            if len(principals) > 0:
+                uname = ','.join([u.text if u.attrib['type'] == 'user' \
+                    else '%s%%' % u.text for u in principals])
+            else:
+                uname = 'ALL'
+            nopassword = entry.find('password') == None
+            np_entry = ' NOPASSWD:' if nopassword else ''
+            p = '%s ALL=(%s)%s %s' % (uname, user, np_entry, command)
+            self.outf.write('%s\n' % p)
+
+class cmd_remove_sudoers(Command):
+    """Removes a Samba Sudoers Group Policy from the sysvol
+
+This command removes a sudo rule from the sysvol from applying to winbind clients.
+
+Example:
+samba-tool gpo manage sudoers remove {31B2F340-016D-11D2-945F-00C04FB984F9} 'fakeu ALL=(ALL) NOPASSWD: ALL'
+    """
+
+    synopsis = "%prog <gpo> <entry> [options]"
+
+    takes_optiongroups = {
+        "sambaopts": options.SambaOptions,
+        "versionopts": options.VersionOptions,
+        "credopts": options.CredentialsOptions,
+    }
+
+    takes_options = [
+        Option("-H", "--URL", help="LDB URL for database or target server", type=str,
+                metavar="URL", dest="H"),
+    ]
+
+    takes_args = ["gpo", "entry"]
+
+    def run(self, gpo, entry, H=None, sambaopts=None, credopts=None, versionopts=None):
+        self.lp = sambaopts.get_loadparm()
+        self.creds = credopts.get_credentials(self.lp, fallback_machine=True)
+
+        # We need to know writable DC to setup SMB connection
+        if H and H.startswith('ldap://'):
+            dc_hostname = H[7:]
+            self.url = H
+        else:
+            dc_hostname = netcmd_finddc(self.lp, self.creds)
+            self.url = dc_url(self.lp, self.creds, dc=dc_hostname)
+
+        # SMB connect to DC
+        conn = smb_connection(dc_hostname,
+                              'sysvol',
+                              lp=self.lp,
+                              creds=self.creds)
+
+        realm = self.lp.get('realm')
+        vgp_dir = '\\'.join([realm.lower(), 'Policies', gpo,
+                             'MACHINE\\VGP\\VTLA\\Sudo',
+                             'SudoersConfiguration'])
+        vgp_xml = '\\'.join([vgp_dir, 'manifest.xml'])
+        try:
+            xml_data = ET.ElementTree(ET.fromstring(conn.loadfile(vgp_xml)))
+            policysetting = xml_data.getroot().find('policysetting')
+            data = policysetting.find('data')
+        except NTSTATUSError as e:
+            # STATUS_OBJECT_NAME_INVALID, STATUS_OBJECT_NAME_NOT_FOUND,
+            # STATUS_OBJECT_PATH_NOT_FOUND
+            if e.args[0] in [0xC0000033, 0xC0000034, 0xC000003A]:
+                raise CommandError("The specified entry does not exist")
+            elif e.args[0] == 0xC0000022: # STATUS_ACCESS_DENIED
+                raise CommandError("The authenticated user does "
+                                   "not have sufficient privileges")
+            raise
+
+        entries = {}
+        for e in data.findall('sudoers_entry'):
+            command = e.find('command').text
+            user = e.find('user').text
+            listelements = e.findall('listelement')
+            principals = []
+            for listelement in listelements:
+                principals.extend(listelement.findall('principal'))
+            if len(principals) > 0:
+                uname = ','.join([u.text if u.attrib['type'] == 'user' \
+                    else '%s%%' % u.text for u in principals])
+            else:
+                uname = 'ALL'
+            nopassword = e.find('password') == None
+            np_entry = ' NOPASSWD:' if nopassword else ''
+            p = '%s ALL=(%s)%s %s' % (uname, user, np_entry, command)
+            entries[p] = e
+
+        if entry not in entries.keys():
+            raise CommandError("Cannot remove '%s' because it does not exist" %
+                                entry)
+
+        data.remove(entries[entry])
+
+        out = BytesIO()
+        xml_data.write(out, encoding='UTF-8', xml_declaration=True)
+        out.seek(0)
+        try:
+            create_directory_hier(conn, vgp_dir)
+            conn.savefile(vgp_xml, out.read())
+        except NTSTATUSError as e:
+            if e.args[0] == 0xC0000022: # STATUS_ACCESS_DENIED
+                raise CommandError("The authenticated user does "
+                                   "not have sufficient privileges")
+            raise
+
+class cmd_sudoers(SuperCommand):
+    """Manage Sudoers Group Policy Objects"""
+    subcommands = {}
+    subcommands["add"] = cmd_add_sudoers()
+    subcommands["list"] = cmd_list_sudoers()
+    subcommands["remove"] = cmd_remove_sudoers()
+
+class cmd_set_security(Command):
+    """Set Samba Security Group Policy to the sysvol
+
+This command sets a security setting to the sysvol for applying to winbind
+clients. Not providing a value will unset the policy.
+These settings only apply to the ADDC.
+
+Example:
+samba-tool gpo manage security set {31B2F340-016D-11D2-945F-00C04FB984F9} MaxTicketAge 10
+
+Possible policies:
+MaxTicketAge            Maximum lifetime for user ticket
+                        Defined in hours
+
+MaxServiceAge           Maximum lifetime for service ticket
+                        Defined in minutes
+
+MaxRenewAge             Maximum lifetime for user ticket renewal
+                        Defined in minutes
+
+MinimumPasswordAge      Minimum password age
+                        Defined in days
+
+MaximumPasswordAge      Maximum password age
+                        Defined in days
+
+MinimumPasswordLength   Minimum password length
+                        Defined in characters
+
+PasswordComplexity      Password must meet complexity requirements
+                        1 is Enabled, 0 is Disabled
+    """
+
+    synopsis = "%prog <gpo> [options]"
+
+    takes_optiongroups = {
+        "sambaopts": options.SambaOptions,
+        "versionopts": options.VersionOptions,
+        "credopts": options.CredentialsOptions,
+    }
+
+    takes_options = [
+        Option("-H", "--URL", help="LDB URL for database or target server", type=str,
+                metavar="URL", dest="H"),
+    ]
+
+    takes_args = ["gpo", "policy", "value?"]
+
+    def run(self, gpo, policy, value=None, H=None, sambaopts=None,
+            credopts=None, versionopts=None):
+        self.lp = sambaopts.get_loadparm()
+        self.creds = credopts.get_credentials(self.lp, fallback_machine=True)
+
+        # We need to know writable DC to setup SMB connection
+        if H and H.startswith('ldap://'):
+            dc_hostname = H[7:]
+            self.url = H
+        else:
+            dc_hostname = netcmd_finddc(self.lp, self.creds)
+            self.url = dc_url(self.lp, self.creds, dc=dc_hostname)
+
+        # SMB connect to DC
+        conn = smb_connection(dc_hostname,
+                              'sysvol',
+                              lp=self.lp,
+                              creds=self.creds)
+
+        realm = self.lp.get('realm')
+        inf_dir = '\\'.join([realm.lower(), 'Policies', gpo,
+            'MACHINE\\Microsoft\\Windows NT\\SecEdit'])
+        inf_file = '\\'.join([inf_dir, 'GptTmpl.inf'])
+        try:
+            inf_data = ConfigParser(interpolation=None)
+            inf_data.optionxform=str
+            raw = conn.loadfile(inf_file)
+            try:
+                inf_data.readfp(StringIO(raw.decode()))
+            except UnicodeDecodeError:
+                inf_data.readfp(StringIO(raw.decode('utf-16')))
+        except NTSTATUSError as e:
+            if e.args[0] == 0xC0000022: # STATUS_ACCESS_DENIED
+                raise CommandError("The authenticated user does "
+                                   "not have sufficient privileges")
+            # STATUS_OBJECT_NAME_INVALID, STATUS_OBJECT_PATH_NOT_FOUND
+            if e.args[0] not in [0xC0000033, 0xC000003A]:
+                raise
+
+        section_map = { 'MaxTicketAge' : 'Kerberos Policy',
+                        'MaxServiceAge' : 'Kerberos Policy',
+                        'MaxRenewAge' : 'Kerberos Policy',
+                        'MinimumPasswordAge' : 'System Access',
+                        'MaximumPasswordAge' : 'System Access',
+                        'MinimumPasswordLength' : 'System Access',
+                        'PasswordComplexity' : 'System Access'
+                    }
+
+        section = section_map[policy]
+        if not inf_data.has_section(section):
+            inf_data.add_section(section)
+        if value is not None:
+            inf_data.set(section, policy, value)
+        else:
+            inf_data.remove_option(section, policy)
+            if len(inf_data.options(section)) == 0:
+                inf_data.remove_section(section)
+
+        out = StringIO()
+        inf_data.write(out)
+        try:
+            create_directory_hier(conn, inf_dir)
+            conn.savefile(inf_file, get_bytes(out.getvalue()))
+        except NTSTATUSError as e:
+            if e.args[0] == 0xC0000022: # STATUS_ACCESS_DENIED
+                raise CommandError("The authenticated user does "
+                                   "not have sufficient privileges")
+            else:
+                raise
+
+class cmd_list_security(Command):
+    """List Samba Security Group Policy from the sysvol
+
+This command lists security settings from the sysvol that will be applied to winbind clients.
+These settings only apply to the ADDC.
+
+Example:
+samba-tool gpo manage security list {31B2F340-016D-11D2-945F-00C04FB984F9}
+    """
+
+    synopsis = "%prog <gpo> [options]"
+
+    takes_optiongroups = {
+        "sambaopts": options.SambaOptions,
+        "versionopts": options.VersionOptions,
+        "credopts": options.CredentialsOptions,
+    }
+
+    takes_options = [
+        Option("-H", "--URL", help="LDB URL for database or target server", type=str,
+                metavar="URL", dest="H"),
+    ]
+
+    takes_args = ["gpo"]
+
+    def run(self, gpo, H=None, sambaopts=None, credopts=None, versionopts=None):
+        self.lp = sambaopts.get_loadparm()
+        self.creds = credopts.get_credentials(self.lp, fallback_machine=True)
+
+        # We need to know writable DC to setup SMB connection
+        if H and H.startswith('ldap://'):
+            dc_hostname = H[7:]
+            self.url = H
+        else:
+            dc_hostname = netcmd_finddc(self.lp, self.creds)
+            self.url = dc_url(self.lp, self.creds, dc=dc_hostname)
+
+        # SMB connect to DC
+        conn = smb_connection(dc_hostname,
+                              'sysvol',
+                              lp=self.lp,
+                              creds=self.creds)
+
+        realm = self.lp.get('realm')
+        inf_file = '\\'.join([realm.lower(), 'Policies', gpo,
+            'MACHINE\\Microsoft\\Windows NT\\SecEdit\\GptTmpl.inf'])
+        try:
+            inf_data = ConfigParser(interpolation=None)
+            inf_data.optionxform=str
+            raw = conn.loadfile(inf_file)
+            try:
+                inf_data.readfp(StringIO(raw.decode()))
+            except UnicodeDecodeError:
+                inf_data.readfp(StringIO(raw.decode('utf-16')))
+        except NTSTATUSError as e:
+            if e.args[0] == 0xC0000033: # STATUS_OBJECT_NAME_INVALID
+                return # The file doesn't exist, so there is nothing to list
+            if e.args[0] == 0xC0000022: # STATUS_ACCESS_DENIED
+                raise CommandError("The authenticated user does "
+                                   "not have sufficient privileges")
+            raise
+
+        for section in inf_data.sections():
+            if section not in ['Kerberos Policy', 'System Access']:
+                continue
+            for key, value in inf_data.items(section):
+                self.outf.write('%s = %s\n' % (key, value))
+
+class cmd_security(SuperCommand):
+    """Manage Security Group Policy Objects"""
+    subcommands = {}
+    subcommands["set"] = cmd_set_security()
+    subcommands["list"] = cmd_list_security()
+
+class cmd_list_smb_conf(Command):
+    """List Samba smb.conf Group Policy from the sysvol
+
+This command lists smb.conf settings from the sysvol that will be applied to winbind clients.
+
+Example:
+samba-tool gpo manage smb_conf list {31B2F340-016D-11D2-945F-00C04FB984F9}
+    """
+
+    synopsis = "%prog <gpo> [options]"
+
+    takes_optiongroups = {
+        "sambaopts": options.SambaOptions,
+        "versionopts": options.VersionOptions,
+        "credopts": options.CredentialsOptions,
+    }
+
+    takes_options = [
+        Option("-H", "--URL", help="LDB URL for database or target server", type=str,
+                metavar="URL", dest="H"),
+    ]
+
+    takes_args = ["gpo"]
+
+    def run(self, gpo, H=None, sambaopts=None, credopts=None, versionopts=None):
+        self.lp = sambaopts.get_loadparm()
+        self.creds = credopts.get_credentials(self.lp, fallback_machine=True)
+
+        # We need to know writable DC to setup SMB connection
+        if H and H.startswith('ldap://'):
+            dc_hostname = H[7:]
+            self.url = H
+        else:
+            dc_hostname = netcmd_finddc(self.lp, self.creds)
+            self.url = dc_url(self.lp, self.creds, dc=dc_hostname)
+
+        # SMB connect to DC
+        conn = smb_connection(dc_hostname,
+                              'sysvol',
+                              lp=self.lp,
+                              creds=self.creds)
+
+        realm = self.lp.get('realm')
+        pol_file = '\\'.join([realm.lower(), 'Policies', gpo,
+                                'MACHINE\\Registry.pol'])
+        try:
+            pol_data = ndr_unpack(preg.file, conn.loadfile(pol_file))
+        except NTSTATUSError as e:
+            if e.args[0] == 0xC0000033: # STATUS_OBJECT_NAME_INVALID
+                return # The file doesn't exist, so there is nothing to list
+            if e.args[0] == 0xC0000022: # STATUS_ACCESS_DENIED
+                raise CommandError("The authenticated user does "
+                                   "not have sufficient privileges")
+            raise
+
+        keyname = b'Software\\Policies\\Samba\\smb_conf'
+        lp = param.LoadParm()
+        for entry in pol_data.entries:
+            if get_bytes(entry.keyname) == keyname:
+                lp.set(entry.valuename, str(entry.data))
+                val = lp.get(entry.valuename)
+                self.outf.write('%s = %s\n' % (entry.valuename, val))
+
+class cmd_set_smb_conf(Command):
+    """Sets a Samba smb.conf Group Policy to the sysvol
+
+This command sets an smb.conf setting to the sysvol for applying to winbind
+clients. Not providing a value will unset the policy.
+
+Example:
+samba-tool gpo manage smb_conf set {31B2F340-016D-11D2-945F-00C04FB984F9} 'apply gpo policies' yes
+    """
+
+    synopsis = "%prog <gpo> <entry> [options]"
+
+    takes_optiongroups = {
+        "sambaopts": options.SambaOptions,
+        "versionopts": options.VersionOptions,
+        "credopts": options.CredentialsOptions,
+    }
+
+    takes_options = [
+        Option("-H", "--URL", help="LDB URL for database or target server", type=str,
+                metavar="URL", dest="H"),
+    ]
+
+    takes_args = ["gpo", "setting", "value?"]
+
+    def run(self, gpo, setting, value=None, H=None, sambaopts=None, credopts=None,
+            versionopts=None):
+        self.lp = sambaopts.get_loadparm()
+        self.creds = credopts.get_credentials(self.lp, fallback_machine=True)
+
+        # We need to know writable DC to setup SMB connection
+        if H and H.startswith('ldap://'):
+            dc_hostname = H[7:]
+            self.url = H
+        else:
+            dc_hostname = netcmd_finddc(self.lp, self.creds)
+            self.url = dc_url(self.lp, self.creds, dc=dc_hostname)
+
+        # SMB connect to DC
+        conn = smb_connection(dc_hostname,
+                              'sysvol',
+                              lp=self.lp,
+                              creds=self.creds)
+
+        realm = self.lp.get('realm')
+        pol_dir = '\\'.join([realm.lower(), 'Policies', gpo, 'MACHINE'])
+        pol_file = '\\'.join([pol_dir, 'Registry.pol'])
+        try:
+            pol_data = ndr_unpack(preg.file, conn.loadfile(pol_file))
+        except NTSTATUSError as e:
+            # STATUS_OBJECT_NAME_INVALID, STATUS_OBJECT_NAME_NOT_FOUND
+            if e.args[0] in [0xC0000033, 0xC0000034]:
+                pol_data = preg.file() # The file doesn't exist
+            elif e.args[0] == 0xC0000022: # STATUS_ACCESS_DENIED
+                raise CommandError("The authenticated user does "
+                                   "not have sufficient privileges")
+            else:
+                raise
+
+        if value is None:
+            if setting not in [e.valuename for e in pol_data.entries]:
+                raise CommandError("Cannot remove '%s' because it does "
+                                    "not exist" % setting)
+            entries = [e for e in pol_data.entries \
+                if e.valuename != setting]
+            pol_data.entries = entries
+            pol_data.num_entries = len(entries)
+        else:
+            if get_string(value).lower() in ['yes', 'true', '1']:
+                etype = 4
+                val = 1
+            elif get_string(value).lower() in ['no', 'false', '0']:
+                etype = 4
+                val = 0
+            elif get_string(value).isnumeric():
+                etype = 4
+                val = int(get_string(value))
+            else:
+                etype = 1
+                val = get_bytes(value)
+            e = preg.entry()
+            e.keyname = b'Software\\Policies\\Samba\\smb_conf'
+            e.valuename = get_bytes(setting)
+            e.type = etype
+            e.data = val
+            entries = list(pol_data.entries)
+            entries.append(e)
+            pol_data.entries = entries
+            pol_data.num_entries = len(entries)
+
+        try:
+            create_directory_hier(conn, pol_dir)
+            conn.savefile(pol_file, ndr_pack(pol_data))
+        except NTSTATUSError as e:
+            if e.args[0] == 0xC0000022: # STATUS_ACCESS_DENIED
+                raise CommandError("The authenticated user does "
+                                   "not have sufficient privileges")
+            raise
+
+class cmd_smb_conf(SuperCommand):
+    """Manage smb.conf Group Policy Objects"""
+    subcommands = {}
+    subcommands["list"] = cmd_list_smb_conf()
+    subcommands["set"] = cmd_set_smb_conf()
+
+class cmd_list_symlink(Command):
+    """List VGP Symbolic Link Group Policy from the sysvol
+
+This command lists symlink settings from the sysvol that will be applied to winbind clients.
+
+Example:
+samba-tool gpo manage symlink list {31B2F340-016D-11D2-945F-00C04FB984F9}
+    """
+
+    synopsis = "%prog <gpo> [options]"
+
+    takes_optiongroups = {
+        "sambaopts": options.SambaOptions,
+        "versionopts": options.VersionOptions,
+        "credopts": options.CredentialsOptions,
+    }
+
+    takes_options = [
+        Option("-H", "--URL", help="LDB URL for database or target server", type=str,
+                metavar="URL", dest="H"),
+    ]
+
+    takes_args = ["gpo"]
+
+    def run(self, gpo, H=None, sambaopts=None, credopts=None, versionopts=None):
+        self.lp = sambaopts.get_loadparm()
+        self.creds = credopts.get_credentials(self.lp, fallback_machine=True)
+
+        # We need to know writable DC to setup SMB connection
+        if H and H.startswith('ldap://'):
+            dc_hostname = H[7:]
+            self.url = H
+        else:
+            dc_hostname = netcmd_finddc(self.lp, self.creds)
+            self.url = dc_url(self.lp, self.creds, dc=dc_hostname)
+
+        # SMB connect to DC
+        conn = smb_connection(dc_hostname,
+                              'sysvol',
+                              lp=self.lp,
+                              creds=self.creds)
+
+        realm = self.lp.get('realm')
+        vgp_xml = '\\'.join([realm.lower(), 'Policies', gpo,
+                                'MACHINE\\VGP\\VTLA\\Unix',
+                                'Symlink\\manifest.xml'])
+        try:
+            xml_data = ET.fromstring(conn.loadfile(vgp_xml))
+        except NTSTATUSError as e:
+            # STATUS_OBJECT_NAME_INVALID, STATUS_OBJECT_NAME_NOT_FOUND,
+            # STATUS_OBJECT_PATH_NOT_FOUND
+            if e.args[0] in [0xC0000033, 0xC0000034, 0xC000003A]:
+                return # The file doesn't exist, so there is nothing to list
+            if e.args[0] == 0xC0000022: # STATUS_ACCESS_DENIED
+                raise CommandError("The authenticated user does "
+                                   "not have sufficient privileges")
+            raise
+
+        policy = xml_data.find('policysetting')
+        data = policy.find('data')
+        for file_properties in data.findall('file_properties'):
+            source = file_properties.find('source')
+            target = file_properties.find('target')
+            self.outf.write('ln -s %s %s\n' % (source.text, target.text))
+
+class cmd_add_symlink(Command):
+    """Adds a VGP Symbolic Link Group Policy to the sysvol
+
+This command adds a symlink setting to the sysvol that will be applied to winbind clients.
+
+Example:
+samba-tool gpo manage symlink add {31B2F340-016D-11D2-945F-00C04FB984F9} /tmp/source /tmp/target
+    """
+
+    synopsis = "%prog <gpo> <source> <target> [options]"
+
+    takes_optiongroups = {
+        "sambaopts": options.SambaOptions,
+        "versionopts": options.VersionOptions,
+        "credopts": options.CredentialsOptions,
+    }
+
+    takes_options = [
+        Option("-H", "--URL", help="LDB URL for database or target server", type=str,
+                metavar="URL", dest="H"),
+    ]
+
+    takes_args = ["gpo", "source", "target"]
+
+    def run(self, gpo, source, target, H=None, sambaopts=None, credopts=None,
+            versionopts=None):
+        self.lp = sambaopts.get_loadparm()
+        self.creds = credopts.get_credentials(self.lp, fallback_machine=True)
+
+        # We need to know writable DC to setup SMB connection
+        if H and H.startswith('ldap://'):
+            dc_hostname = H[7:]
+            self.url = H
+        else:
+            dc_hostname = netcmd_finddc(self.lp, self.creds)
+            self.url = dc_url(self.lp, self.creds, dc=dc_hostname)
+
+        # SMB connect to DC
+        conn = smb_connection(dc_hostname,
+                              'sysvol',
+                              lp=self.lp,
+                              creds=self.creds)
+
+        realm = self.lp.get('realm')
+        vgp_dir = '\\'.join([realm.lower(), 'Policies', gpo,
+                             'MACHINE\\VGP\\VTLA\\Unix\\Symlink'])
+        vgp_xml = '\\'.join([vgp_dir, 'manifest.xml'])
+        try:
+            xml_data = ET.ElementTree(ET.fromstring(conn.loadfile(vgp_xml)))
+            policy = xml_data.getroot().find('policysetting')
+            data = policy.find('data')
+        except NTSTATUSError as e:
+            # STATUS_OBJECT_NAME_INVALID, STATUS_OBJECT_NAME_NOT_FOUND,
+            # STATUS_OBJECT_PATH_NOT_FOUND
+            if e.args[0] in [0xC0000033, 0xC0000034, 0xC000003A]:
+                # The file doesn't exist, so create the xml structure
+                xml_data = ET.ElementTree(ET.Element('vgppolicy'))
+                policysetting = ET.SubElement(xml_data.getroot(),
+                                              'policysetting')
+                pv = ET.SubElement(policysetting, 'version')
+                pv.text = '1'
+                name = ET.SubElement(policysetting, 'name')
+                name.text = 'Symlink Policy'
+                description = ET.SubElement(policysetting, 'description')
+                description.text = 'Specifies symbolic link data'
+                data = ET.SubElement(policysetting, 'data')
+            elif e.args[0] == 0xC0000022: # STATUS_ACCESS_DENIED
+                raise CommandError("The authenticated user does "
+                                   "not have sufficient privileges")
+            else:
+                raise
+
+        file_properties = ET.SubElement(data, 'file_properties')
+        source_elm = ET.SubElement(file_properties, 'source')
+        source_elm.text = source
+        target_elm = ET.SubElement(file_properties, 'target')
+        target_elm.text = target
+
+        out = BytesIO()
+        xml_data.write(out, encoding='UTF-8', xml_declaration=True)
+        out.seek(0)
+        try:
+            create_directory_hier(conn, vgp_dir)
+            conn.savefile(vgp_xml, out.read())
+        except NTSTATUSError as e:
+            if e.args[0] == 0xC0000022: # STATUS_ACCESS_DENIED
+                raise CommandError("The authenticated user does "
+                                   "not have sufficient privileges")
+            raise
+
+class cmd_remove_symlink(Command):
+    """Removes a VGP Symbolic Link Group Policy from the sysvol
+
+This command removes a symlink setting from the sysvol from appling to winbind clients.
+
+Example:
+samba-tool gpo manage symlink remove {31B2F340-016D-11D2-945F-00C04FB984F9} /tmp/source /tmp/target
+    """
+
+    synopsis = "%prog <gpo> <source> <target> [options]"
+
+    takes_optiongroups = {
+        "sambaopts": options.SambaOptions,
+        "versionopts": options.VersionOptions,
+        "credopts": options.CredentialsOptions,
+    }
+
+    takes_options = [
+        Option("-H", "--URL", help="LDB URL for database or target server", type=str,
+                metavar="URL", dest="H"),
+    ]
+
+    takes_args = ["gpo", "source", "target"]
+
+    def run(self, gpo, source, target, H=None, sambaopts=None, credopts=None,
+            versionopts=None):
+        self.lp = sambaopts.get_loadparm()
+        self.creds = credopts.get_credentials(self.lp, fallback_machine=True)
+
+        # We need to know writable DC to setup SMB connection
+        if H and H.startswith('ldap://'):
+            dc_hostname = H[7:]
+            self.url = H
+        else:
+            dc_hostname = netcmd_finddc(self.lp, self.creds)
+            self.url = dc_url(self.lp, self.creds, dc=dc_hostname)
+
+        # SMB connect to DC
+        conn = smb_connection(dc_hostname,
+                              'sysvol',
+                              lp=self.lp,
+                              creds=self.creds)
+
+        realm = self.lp.get('realm')
+        vgp_dir = '\\'.join([realm.lower(), 'Policies', gpo,
+                             'MACHINE\\VGP\\VTLA\\Unix\\Symlink'])
+        vgp_xml = '\\'.join([vgp_dir, 'manifest.xml'])
+        try:
+            xml_data = ET.ElementTree(ET.fromstring(conn.loadfile(vgp_xml)))
+            policy = xml_data.getroot().find('policysetting')
+            data = policy.find('data')
+        except NTSTATUSError as e:
+            # STATUS_OBJECT_NAME_INVALID, STATUS_OBJECT_NAME_NOT_FOUND,
+            # STATUS_OBJECT_PATH_NOT_FOUND
+            if e.args[0] in [0xC0000033, 0xC0000034, 0xC000003A]:
+                raise CommandError("Cannot remove link from '%s' to '%s' "
+                    "because it does not exist" % source, target)
+            elif e.args[0] == 0xC0000022: # STATUS_ACCESS_DENIED
+                raise CommandError("The authenticated user does "
+                                   "not have sufficient privileges")
+            else:
+                raise
+
+        for file_properties in data.findall('file_properties'):
+            source_elm = file_properties.find('source')
+            target_elm = file_properties.find('target')
+            if source_elm.text == source and target_elm.text == target:
+                data.remove(file_properties)
+                break
+        else:
+            raise CommandError("Cannot remove link from '%s' to '%s' "
+                               "because it does not exist" % source, target)
+
+
+        out = BytesIO()
+        xml_data.write(out, encoding='UTF-8', xml_declaration=True)
+        out.seek(0)
+        try:
+            create_directory_hier(conn, vgp_dir)
+            conn.savefile(vgp_xml, out.read())
+        except NTSTATUSError as e:
+            if e.args[0] == 0xC0000022: # STATUS_ACCESS_DENIED
+                raise CommandError("The authenticated user does "
+                                   "not have sufficient privileges")
+            raise
+
+class cmd_symlink(SuperCommand):
+    """Manage symlink Group Policy Objects"""
+    subcommands = {}
+    subcommands["list"] = cmd_list_symlink()
+    subcommands["add"] = cmd_add_symlink()
+    subcommands["remove"] = cmd_remove_symlink()
+
+class cmd_list_files(Command):
+    """List VGP Files Group Policy from the sysvol
+
+This command lists files which will be copied from the sysvol and applied to winbind clients.
+
+Example:
+samba-tool gpo manage files list {31B2F340-016D-11D2-945F-00C04FB984F9}
+    """
+
+    synopsis = "%prog <gpo> [options]"
+
+    takes_optiongroups = {
+        "sambaopts": options.SambaOptions,
+        "versionopts": options.VersionOptions,
+        "credopts": options.CredentialsOptions,
+    }
+
+    takes_options = [
+        Option("-H", "--URL", help="LDB URL for database or target server", type=str,
+                metavar="URL", dest="H"),
+    ]
+
+    takes_args = ["gpo"]
+
+    def run(self, gpo, H=None, sambaopts=None, credopts=None, versionopts=None):
+        self.lp = sambaopts.get_loadparm()
+        self.creds = credopts.get_credentials(self.lp, fallback_machine=True)
+
+        # We need to know writable DC to setup SMB connection
+        if H and H.startswith('ldap://'):
+            dc_hostname = H[7:]
+            self.url = H
+        else:
+            dc_hostname = netcmd_finddc(self.lp, self.creds)
+            self.url = dc_url(self.lp, self.creds, dc=dc_hostname)
+
+        # SMB connect to DC
+        conn = smb_connection(dc_hostname,
+                              'sysvol',
+                              lp=self.lp,
+                              creds=self.creds)
+
+        realm = self.lp.get('realm')
+        vgp_xml = '\\'.join([realm.lower(), 'Policies', gpo,
+                                'MACHINE\\VGP\\VTLA\\Unix',
+                                'Files\\manifest.xml'])
+        try:
+            xml_data = ET.fromstring(conn.loadfile(vgp_xml))
+        except NTSTATUSError as e:
+            # STATUS_OBJECT_NAME_INVALID, STATUS_OBJECT_NAME_NOT_FOUND,
+            # STATUS_OBJECT_PATH_NOT_FOUND
+            if e.args[0] in [0xC0000033, 0xC0000034, 0xC000003A]:
+                return # The file doesn't exist, so there is nothing to list
+            if e.args[0] == 0xC0000022: # STATUS_ACCESS_DENIED
+                raise CommandError("The authenticated user does "
+                                   "not have sufficient privileges")
+            raise
+
+        policy = xml_data.find('policysetting')
+        data = policy.find('data')
+        for entry in data.findall('file_properties'):
+            source = entry.find('source').text
+            target = entry.find('target').text
+            user = entry.find('user').text
+            group = entry.find('group').text
+            mode = calc_mode(entry)
+            p = '%s\t%s\t%s\t%s -> %s' % \
+                    (stat_from_mode(mode), user, group, target, source)
+            self.outf.write('%s\n' % p)
+
+class cmd_add_files(Command):
+    """Add VGP Files Group Policy to the sysvol
+
+This command adds files which will be copied from the sysvol and applied to winbind clients.
+
+Example:
+samba-tool gpo manage files add {31B2F340-016D-11D2-945F-00C04FB984F9} ./source.txt /usr/share/doc/target.txt root root 600
+    """
+
+    synopsis = "%prog <gpo> <source> <target> <user> <group> <mode> [options]"
+
+    takes_optiongroups = {
+        "sambaopts": options.SambaOptions,
+        "versionopts": options.VersionOptions,
+        "credopts": options.CredentialsOptions,
+    }
+
+    takes_options = [
+        Option("-H", "--URL", help="LDB URL for database or target server", type=str,
+                metavar="URL", dest="H"),
+    ]
+
+    takes_args = ["gpo", "source", "target", "user", "group", "mode"]
+
+    def run(self, gpo, source, target, user, group, mode, H=None,
+            sambaopts=None, credopts=None, versionopts=None):
+        self.lp = sambaopts.get_loadparm()
+        self.creds = credopts.get_credentials(self.lp, fallback_machine=True)
+
+        if not os.path.exists(source):
+            raise CommandError("Source '%s' does not exist" % source)
+
+        # We need to know writable DC to setup SMB connection
+        if H and H.startswith('ldap://'):
+            dc_hostname = H[7:]
+            self.url = H
+        else:
+            dc_hostname = netcmd_finddc(self.lp, self.creds)
+            self.url = dc_url(self.lp, self.creds, dc=dc_hostname)
+
+        # SMB connect to DC
+        conn = smb_connection(dc_hostname,
+                              'sysvol',
+                              lp=self.lp,
+                              creds=self.creds)
+
+        realm = self.lp.get('realm')
+        vgp_dir = '\\'.join([realm.lower(), 'Policies', gpo,
+                             'MACHINE\\VGP\\VTLA\\Unix\\Files'])
+        vgp_xml = '\\'.join([vgp_dir, 'manifest.xml'])
+        try:
+            xml_data = ET.ElementTree(ET.fromstring(conn.loadfile(vgp_xml)))
+            policy = xml_data.getroot().find('policysetting')
+            data = policy.find('data')
+        except NTSTATUSError as e:
+            # STATUS_OBJECT_NAME_INVALID, STATUS_OBJECT_NAME_NOT_FOUND,
+            # STATUS_OBJECT_PATH_NOT_FOUND
+            if e.args[0] in [0xC0000033, 0xC0000034, 0xC000003A]:
+                # The file doesn't exist, so create the xml structure
+                xml_data = ET.ElementTree(ET.Element('vgppolicy'))
+                policysetting = ET.SubElement(xml_data.getroot(),
+                                              'policysetting')
+                pv = ET.SubElement(policysetting, 'version')
+                pv.text = '1'
+                name = ET.SubElement(policysetting, 'name')
+                name.text = 'Files'
+                description = ET.SubElement(policysetting, 'description')
+                description.text = 'Represents file data to set/copy on clients'
+                data = ET.SubElement(policysetting, 'data')
+            elif e.args[0] == 0xC0000022: # STATUS_ACCESS_DENIED
+                raise CommandError("The authenticated user does "
+                                   "not have sufficient privileges")
+            else:
+                raise
+
+        file_properties = ET.SubElement(data, 'file_properties')
+        source_elm = ET.SubElement(file_properties, 'source')
+        source_elm.text = os.path.basename(source)
+        target_elm = ET.SubElement(file_properties, 'target')
+        target_elm.text = target
+        user_elm = ET.SubElement(file_properties, 'user')
+        user_elm.text = user
+        group_elm = ET.SubElement(file_properties, 'group')
+        group_elm.text = group
+        for ptype, shift in [('user', 6), ('group', 3), ('other', 0)]:
+            permissions = ET.SubElement(file_properties, 'permissions')
+            permissions.set('type', ptype)
+            if int(mode, 8) & (0o4 << shift):
+                ET.SubElement(permissions, 'read')
+            if int(mode, 8) & (0o2 << shift):
+                ET.SubElement(permissions, 'write')
+            if int(mode, 8) & (0o1 << shift):
+                ET.SubElement(permissions, 'execute')
+
+        out = BytesIO()
+        xml_data.write(out, encoding='UTF-8', xml_declaration=True)
+        out.seek(0)
+        source_data = open(source, 'rb').read()
+        sysvol_source = '\\'.join([vgp_dir, os.path.basename(source)])
+        try:
+            create_directory_hier(conn, vgp_dir)
+            conn.savefile(vgp_xml, out.read())
+            conn.savefile(sysvol_source, source_data)
+        except NTSTATUSError as e:
+            if e.args[0] == 0xC0000022: # STATUS_ACCESS_DENIED
+                raise CommandError("The authenticated user does "
+                                   "not have sufficient privileges")
+            raise
+
+class cmd_remove_files(Command):
+    """Remove VGP Files Group Policy from the sysvol
+
+This command removes files which would be copied from the sysvol and applied to winbind clients.
+
+Example:
+samba-tool gpo manage files remove {31B2F340-016D-11D2-945F-00C04FB984F9} /usr/share/doc/target.txt
+    """
+
+    synopsis = "%prog <gpo> <target> [options]"
+
+    takes_optiongroups = {
+        "sambaopts": options.SambaOptions,
+        "versionopts": options.VersionOptions,
+        "credopts": options.CredentialsOptions,
+    }
+
+    takes_options = [
+        Option("-H", "--URL", help="LDB URL for database or target server", type=str,
+                metavar="URL", dest="H"),
+    ]
+
+    takes_args = ["gpo", "target"]
+
+    def run(self, gpo, target, H=None, sambaopts=None, credopts=None,
+            versionopts=None):
+        self.lp = sambaopts.get_loadparm()
+        self.creds = credopts.get_credentials(self.lp, fallback_machine=True)
+
+        # We need to know writable DC to setup SMB connection
+        if H and H.startswith('ldap://'):
+            dc_hostname = H[7:]
+            self.url = H
+        else:
+            dc_hostname = netcmd_finddc(self.lp, self.creds)
+            self.url = dc_url(self.lp, self.creds, dc=dc_hostname)
+
+        # SMB connect to DC
+        conn = smb_connection(dc_hostname,
+                              'sysvol',
+                              lp=self.lp,
+                              creds=self.creds)
+
+        realm = self.lp.get('realm')
+        vgp_dir = '\\'.join([realm.lower(), 'Policies', gpo,
+                             'MACHINE\\VGP\\VTLA\\Unix\\Files'])
+        vgp_xml = '\\'.join([vgp_dir, 'manifest.xml'])
+        try:
+            xml_data = ET.ElementTree(ET.fromstring(conn.loadfile(vgp_xml)))
+            policy = xml_data.getroot().find('policysetting')
+            data = policy.find('data')
+        except NTSTATUSError as e:
+            # STATUS_OBJECT_NAME_INVALID, STATUS_OBJECT_NAME_NOT_FOUND,
+            # STATUS_OBJECT_PATH_NOT_FOUND
+            if e.args[0] in [0xC0000033, 0xC0000034, 0xC000003A]:
+                raise CommandError("Cannot remove file '%s' "
+                    "because it does not exist" % target)
+            elif e.args[0] == 0xC0000022: # STATUS_ACCESS_DENIED
+                raise CommandError("The authenticated user does "
+                                   "not have sufficient privileges")
+            else:
+                raise
+
+        for file_properties in data.findall('file_properties'):
+            source_elm = file_properties.find('source')
+            target_elm = file_properties.find('target')
+            if target_elm.text == target:
+                source = '\\'.join([vgp_dir, source_elm.text])
+                conn.unlink(source)
+                data.remove(file_properties)
+                break
+        else:
+            raise CommandError("Cannot remove file '%s' "
+                               "because it does not exist" % target)
+
+
+        out = BytesIO()
+        xml_data.write(out, encoding='UTF-8', xml_declaration=True)
+        out.seek(0)
+        try:
+            create_directory_hier(conn, vgp_dir)
+            conn.savefile(vgp_xml, out.read())
+        except NTSTATUSError as e:
+            if e.args[0] == 0xC0000022: # STATUS_ACCESS_DENIED
+                raise CommandError("The authenticated user does "
+                                   "not have sufficient privileges")
+            raise
+
+class cmd_files(SuperCommand):
+    """Manage Files Group Policy Objects"""
+    subcommands = {}
+    subcommands["list"] = cmd_list_files()
+    subcommands["add"] = cmd_add_files()
+    subcommands["remove"] = cmd_remove_files()
+
+class cmd_list_openssh(Command):
+    """List VGP OpenSSH Group Policy from the sysvol
+
+This command lists openssh options from the sysvol that will be applied to winbind clients.
+
+Example:
+samba-tool gpo manage openssh list {31B2F340-016D-11D2-945F-00C04FB984F9}
+    """
+
+    synopsis = "%prog <gpo> [options]"
+
+    takes_optiongroups = {
+        "sambaopts": options.SambaOptions,
+        "versionopts": options.VersionOptions,
+        "credopts": options.CredentialsOptions,
+    }
+
+    takes_options = [
+        Option("-H", "--URL", help="LDB URL for database or target server", type=str,
+                metavar="URL", dest="H"),
+    ]
+
+    takes_args = ["gpo"]
+
+    def run(self, gpo, H=None, sambaopts=None, credopts=None, versionopts=None):
+        self.lp = sambaopts.get_loadparm()
+        self.creds = credopts.get_credentials(self.lp, fallback_machine=True)
+
+        # We need to know writable DC to setup SMB connection
+        if H and H.startswith('ldap://'):
+            dc_hostname = H[7:]
+            self.url = H
+        else:
+            dc_hostname = netcmd_finddc(self.lp, self.creds)
+            self.url = dc_url(self.lp, self.creds, dc=dc_hostname)
+
+        # SMB connect to DC
+        conn = smb_connection(dc_hostname,
+                              'sysvol',
+                              lp=self.lp,
+                              creds=self.creds)
+
+        realm = self.lp.get('realm')
+        vgp_xml = '\\'.join([realm.lower(), 'Policies', gpo,
+                                'MACHINE\\VGP\\VTLA\\SshCfg',
+                                'SshD\\manifest.xml'])
+        try:
+            xml_data = ET.fromstring(conn.loadfile(vgp_xml))
+        except NTSTATUSError as e:
+            # STATUS_OBJECT_NAME_INVALID, STATUS_OBJECT_NAME_NOT_FOUND,
+            # STATUS_OBJECT_PATH_NOT_FOUND
+            if e.args[0] in [0xC0000033, 0xC0000034, 0xC000003A]:
+                return # The file doesn't exist, so there is nothing to list
+            if e.args[0] == 0xC0000022: # STATUS_ACCESS_DENIED
+                raise CommandError("The authenticated user does "
+                                   "not have sufficient privileges")
+            raise
+
+        policy = xml_data.find('policysetting')
+        data = policy.find('data')
+        configfile = data.find('configfile')
+        for configsection in configfile.findall('configsection'):
+            if configsection.find('sectionname').text:
+                continue
+            for kv in configsection.findall('keyvaluepair'):
+                self.outf.write('%s %s\n' % (kv.find('key').text,
+                                             kv.find('value').text))
+
+class cmd_set_openssh(Command):
+    """Sets a VGP OpenSSH Group Policy to the sysvol
+
+This command sets an openssh setting to the sysvol for applying to winbind
+clients. Not providing a value will unset the policy.
+
+Example:
+samba-tool gpo manage openssh set {31B2F340-016D-11D2-945F-00C04FB984F9} KerberosAuthentication Yes
+    """
+
+    synopsis = "%prog <gpo> <setting> [value] [options]"
+
+    takes_optiongroups = {
+        "sambaopts": options.SambaOptions,
+        "versionopts": options.VersionOptions,
+        "credopts": options.CredentialsOptions,
+    }
+
+    takes_options = [
+        Option("-H", "--URL", help="LDB URL for database or target server", type=str,
+                metavar="URL", dest="H"),
+    ]
+
+    takes_args = ["gpo", "setting", "value?"]
+
+    def run(self, gpo, setting, value=None, H=None, sambaopts=None,
+            credopts=None, versionopts=None):
+        self.lp = sambaopts.get_loadparm()
+        self.creds = credopts.get_credentials(self.lp, fallback_machine=True)
+
+        # We need to know writable DC to setup SMB connection
+        if H and H.startswith('ldap://'):
+            dc_hostname = H[7:]
+            self.url = H
+        else:
+            dc_hostname = netcmd_finddc(self.lp, self.creds)
+            self.url = dc_url(self.lp, self.creds, dc=dc_hostname)
+
+        # SMB connect to DC
+        conn = smb_connection(dc_hostname,
+                              'sysvol',
+                              lp=self.lp,
+                              creds=self.creds)
+
+        realm = self.lp.get('realm')
+        vgp_dir = '\\'.join([realm.lower(), 'Policies', gpo,
+                             'MACHINE\\VGP\\VTLA\\SshCfg\\SshD'])
+        vgp_xml = '\\'.join([vgp_dir, 'manifest.xml'])
+        try:
+            xml_data = ET.ElementTree(ET.fromstring(conn.loadfile(vgp_xml)))
+            policy = xml_data.getroot().find('policysetting')
+            data = policy.find('data')
+            configfile = data.find('configfile')
+        except NTSTATUSError as e:
+            # STATUS_OBJECT_NAME_INVALID, STATUS_OBJECT_NAME_NOT_FOUND,
+            # STATUS_OBJECT_PATH_NOT_FOUND
+            if e.args[0] in [0xC0000033, 0xC0000034, 0xC000003A]:
+                # The file doesn't exist, so create the xml structure
+                xml_data = ET.ElementTree(ET.Element('vgppolicy'))
+                policysetting = ET.SubElement(xml_data.getroot(),
+                                              'policysetting')
+                pv = ET.SubElement(policysetting, 'version')
+                pv.text = '1'
+                name = ET.SubElement(policysetting, 'name')
+                name.text = 'Configuration File'
+                description = ET.SubElement(policysetting, 'description')
+                description.text = 'Represents Unix configuration file settings'
+                apply_mode = ET.SubElement(policysetting, 'apply_mode')
+                apply_mode.text = 'merge'
+                data = ET.SubElement(policysetting, 'data')
+                configfile = ET.SubElement(data, 'configfile')
+                configsection = ET.SubElement(configfile, 'configsection')
+                ET.SubElement(configsection, 'sectionname')
+            elif e.args[0] == 0xC0000022: # STATUS_ACCESS_DENIED
+                raise CommandError("The authenticated user does "
+                                   "not have sufficient privileges")
+            else:
+                raise
+
+        if value is not None:
+            for configsection in configfile.findall('configsection'):
+                if configsection.find('sectionname').text:
+                    continue # Ignore Quest SSH settings
+                settings = {}
+                for kv in configsection.findall('keyvaluepair'):
+                    settings[kv.find('key')] = kv
+                if setting in settings.keys():
+                    settings[setting].text = value
+                else:
+                    keyvaluepair = ET.SubElement(configsection, 'keyvaluepair')
+                    key = ET.SubElement(keyvaluepair, 'key')
+                    key.text = setting
+                    dvalue = ET.SubElement(keyvaluepair, 'value')
+                    dvalue.text = value
+        else:
+            for configsection in configfile.findall('configsection'):
+                if configsection.find('sectionname').text:
+                    continue # Ignore Quest SSH settings
+                settings = {}
+                for kv in configsection.findall('keyvaluepair'):
+                    settings[kv.find('key').text] = kv
+                if setting in settings.keys():
+                    configsection.remove(settings[setting])
+                else:
+                    raise CommandError("Cannot remove '%s' because it does " \
+                                       "not exist" % setting)
+
+        out = BytesIO()
+        xml_data.write(out, encoding='UTF-8', xml_declaration=True)
+        out.seek(0)
+        try:
+            create_directory_hier(conn, vgp_dir)
+            conn.savefile(vgp_xml, out.read())
+        except NTSTATUSError as e:
+            if e.args[0] == 0xC0000022: # STATUS_ACCESS_DENIED
+                raise CommandError("The authenticated user does "
+                                   "not have sufficient privileges")
+            raise
+
+class cmd_openssh(SuperCommand):
+    """Manage OpenSSH Group Policy Objects"""
+    subcommands = {}
+    subcommands["list"] = cmd_list_openssh()
+    subcommands["set"] = cmd_set_openssh()
+
+class cmd_list_startup(Command):
+    """List VGP Startup Script Group Policy from the sysvol
+
+This command lists the startup script policies currently set on the sysvol.
+
+Example:
+samba-tool gpo manage scripts startup list {31B2F340-016D-11D2-945F-00C04FB984F9}
+    """
+
+    synopsis = "%prog <gpo> [options]"
+
+    takes_optiongroups = {
+        "sambaopts": options.SambaOptions,
+        "versionopts": options.VersionOptions,
+        "credopts": options.CredentialsOptions,
+    }
+
+    takes_options = [
+        Option("-H", "--URL", help="LDB URL for database or target server", type=str,
+                metavar="URL", dest="H"),
+    ]
+
+    takes_args = ["gpo"]
+
+    def run(self, gpo, H=None, sambaopts=None, credopts=None, versionopts=None):
+        self.lp = sambaopts.get_loadparm()
+        self.creds = credopts.get_credentials(self.lp, fallback_machine=True)
+
+        # We need to know writable DC to setup SMB connection
+        if H and H.startswith('ldap://'):
+            dc_hostname = H[7:]
+            self.url = H
+        else:
+            dc_hostname = netcmd_finddc(self.lp, self.creds)
+            self.url = dc_url(self.lp, self.creds, dc=dc_hostname)
+
+        # SMB connect to DC
+        conn = smb_connection(dc_hostname,
+                              'sysvol',
+                              lp=self.lp,
+                              creds=self.creds)
+
+        realm = self.lp.get('realm')
+        vgp_xml = '\\'.join([realm.lower(), 'Policies', gpo,
+                                'MACHINE\\VGP\\VTLA\\Unix',
+                                'Scripts\\Startup\\manifest.xml'])
+        try:
+            xml_data = ET.fromstring(conn.loadfile(vgp_xml))
+        except NTSTATUSError as e:
+            # STATUS_OBJECT_NAME_INVALID, STATUS_OBJECT_NAME_NOT_FOUND,
+            # STATUS_OBJECT_PATH_NOT_FOUND
+            if e.args[0] in [0xC0000033, 0xC0000034, 0xC000003A]:
+                return # The file doesn't exist, so there is nothing to list
+            if e.args[0] == 0xC0000022: # STATUS_ACCESS_DENIED
+                raise CommandError("The authenticated user does "
+                                   "not have sufficient privileges")
+            raise
+
+        policy = xml_data.find('policysetting')
+        data = policy.find('data')
+        for listelement in data.findall('listelement'):
+            script = listelement.find('script')
+            script_path = '\\'.join(['\\', realm.lower(), 'Policies', gpo,
+                                     'MACHINE\\VGP\\VTLA\\Unix\\Scripts',
+                                     'Startup', script.text])
+            parameters = listelement.find('parameters')
+            run_as = listelement.find('run_as')
+            if run_as is not None:
+                run_as = run_as.text
+            else:
+                run_as = 'root'
+            self.outf.write('@reboot %s %s %s' % (run_as, script_path,
+                                                  parameters.text))
+
+class cmd_add_startup(Command):
+    """Adds VGP Startup Script Group Policy to the sysvol
+
+This command adds a startup script policy to the sysvol.
+
+Example:
+samba-tool gpo manage scripts startup add {31B2F340-016D-11D2-945F-00C04FB984F9} test_script.sh '-n'
+    """
+
+    synopsis = "%prog <gpo> <script> [args] [run_as] [options]"
+
+    takes_optiongroups = {
+        "sambaopts": options.SambaOptions,
+        "versionopts": options.VersionOptions,
+        "credopts": options.CredentialsOptions,
+    }
+
+    takes_options = [
+        Option("-H", "--URL", help="LDB URL for database or target server", type=str,
+                metavar="URL", dest="H"),
+        Option("--run-once", dest="run_once", default=False, action='store_true',
+               help="Whether to run the script only once"),
+    ]
+
+    takes_args = ["gpo", "script", "args?", "run_as?"]
+
+    def run(self, gpo, script, args=None, run_as=None, run_once=None,
+            H=None, sambaopts=None, credopts=None, versionopts=None):
+        self.lp = sambaopts.get_loadparm()
+        self.creds = credopts.get_credentials(self.lp, fallback_machine=True)
+
+        if not os.path.exists(script):
+            raise CommandError("Script '%s' does not exist" % script)
+
+        # We need to know writable DC to setup SMB connection
+        if H and H.startswith('ldap://'):
+            dc_hostname = H[7:]
+            self.url = H
+        else:
+            dc_hostname = netcmd_finddc(self.lp, self.creds)
+            self.url = dc_url(self.lp, self.creds, dc=dc_hostname)
+
+        # SMB connect to DC
+        conn = smb_connection(dc_hostname,
+                              'sysvol',
+                              lp=self.lp,
+                              creds=self.creds)
+
+        realm = self.lp.get('realm')
+        vgp_dir = '\\'.join([realm.lower(), 'Policies', gpo,
+                             'MACHINE\\VGP\\VTLA\\Unix\\Scripts\\Startup'])
+        vgp_xml = '\\'.join([vgp_dir, 'manifest.xml'])
+        try:
+            xml_data = ET.ElementTree(ET.fromstring(conn.loadfile(vgp_xml)))
+            policy = xml_data.getroot().find('policysetting')
+            data = policy.find('data')
+        except NTSTATUSError as e:
+            # STATUS_OBJECT_NAME_INVALID, STATUS_OBJECT_NAME_NOT_FOUND,
+            # STATUS_OBJECT_PATH_NOT_FOUND
+            if e.args[0] in [0xC0000033, 0xC0000034, 0xC000003A]:
+                # The file doesn't exist, so create the xml structure
+                xml_data = ET.ElementTree(ET.Element('vgppolicy'))
+                policysetting = ET.SubElement(xml_data.getroot(),
+                                              'policysetting')
+                pv = ET.SubElement(policysetting, 'version')
+                pv.text = '1'
+                name = ET.SubElement(policysetting, 'name')
+                name.text = 'Unix Scripts'
+                description = ET.SubElement(policysetting, 'description')
+                description.text = \
+                    'Represents Unix scripts to run on Group Policy clients'
+                data = ET.SubElement(policysetting, 'data')
+            elif e.args[0] == 0xC0000022: # STATUS_ACCESS_DENIED
+                raise CommandError("The authenticated user does "
+                                   "not have sufficient privileges")
+            else:
+                raise
+
+        script_data = open(script, 'rb').read()
+        listelement = ET.SubElement(data, 'listelement')
+        script_elm = ET.SubElement(listelement, 'script')
+        script_elm.text = os.path.basename(script)
+        hash = ET.SubElement(listelement, 'hash')
+        hash.text = hashlib.md5(script_data).hexdigest().upper()
+        if args is not None:
+            parameters = ET.SubElement(listelement, 'parameters')
+            parameters.text = args.strip('"').strip("'")
+        if run_as is not None:
+            run_as_elm = ET.SubElement(listelement, 'run_as')
+            run_as_elm.text = run_as
+        if run_once is not None:
+            ET.SubElement(listelement, 'run_once')
+
+        out = BytesIO()
+        xml_data.write(out, encoding='UTF-8', xml_declaration=True)
+        out.seek(0)
+        sysvol_script = '\\'.join([vgp_dir, os.path.basename(script)])
+        try:
+            create_directory_hier(conn, vgp_dir)
+            conn.savefile(vgp_xml, out.read())
+            conn.savefile(sysvol_script, script_data)
+        except NTSTATUSError as e:
+            if e.args[0] == 0xC0000022: # STATUS_ACCESS_DENIED
+                raise CommandError("The authenticated user does "
+                                   "not have sufficient privileges")
+            raise
+
+class cmd_remove_startup(Command):
+    """Removes VGP Startup Script Group Policy from the sysvol
+
+This command removes a startup script policy from the sysvol.
+
+Example:
+samba-tool gpo manage scripts startup remove {31B2F340-016D-11D2-945F-00C04FB984F9} test_script.sh
+    """
+
+    synopsis = "%prog <gpo> <script> [options]"
+
+    takes_optiongroups = {
+        "sambaopts": options.SambaOptions,
+        "versionopts": options.VersionOptions,
+        "credopts": options.CredentialsOptions,
+    }
+
+    takes_options = [
+        Option("-H", "--URL", help="LDB URL for database or target server", type=str,
+                metavar="URL", dest="H"),
+    ]
+
+    takes_args = ["gpo", "script"]
+
+    def run(self, gpo, script, H=None, sambaopts=None, credopts=None,
+            versionopts=None):
+        self.lp = sambaopts.get_loadparm()
+        self.creds = credopts.get_credentials(self.lp, fallback_machine=True)
+
+        # We need to know writable DC to setup SMB connection
+        if H and H.startswith('ldap://'):
+            dc_hostname = H[7:]
+            self.url = H
+        else:
+            dc_hostname = netcmd_finddc(self.lp, self.creds)
+            self.url = dc_url(self.lp, self.creds, dc=dc_hostname)
+
+        # SMB connect to DC
+        conn = smb_connection(dc_hostname,
+                              'sysvol',
+                              lp=self.lp,
+                              creds=self.creds)
+
+        realm = self.lp.get('realm')
+        vgp_dir = '\\'.join([realm.lower(), 'Policies', gpo,
+                             'MACHINE\\VGP\\VTLA\\Unix\\Scripts\\Startup'])
+        vgp_xml = '\\'.join([vgp_dir, 'manifest.xml'])
+        try:
+            xml_data = ET.ElementTree(ET.fromstring(conn.loadfile(vgp_xml)))
+            policy = xml_data.getroot().find('policysetting')
+            data = policy.find('data')
+        except NTSTATUSError as e:
+            # STATUS_OBJECT_NAME_INVALID, STATUS_OBJECT_NAME_NOT_FOUND,
+            # STATUS_OBJECT_PATH_NOT_FOUND
+            if e.args[0] in [0xC0000033, 0xC0000034, 0xC000003A]:
+                raise CommandError("Cannot remove script '%s' "
+                    "because it does not exist" % script)
+            elif e.args[0] == 0xC0000022: # STATUS_ACCESS_DENIED
+                raise CommandError("The authenticated user does "
+                                   "not have sufficient privileges")
+            else:
+                raise
+
+        for listelement in data.findall('listelement'):
+            script_elm = listelement.find('script')
+            if script_elm.text == os.path.basename(script.replace('\\', '/')):
+                data.remove(listelement)
+                break
+        else:
+            raise CommandError("Cannot remove script '%s' "
+                "because it does not exist" % script)
+
+        out = BytesIO()
+        xml_data.write(out, encoding='UTF-8', xml_declaration=True)
+        out.seek(0)
+        try:
+            create_directory_hier(conn, vgp_dir)
+            conn.savefile(vgp_xml, out.read())
+        except NTSTATUSError as e:
+            if e.args[0] == 0xC0000022: # STATUS_ACCESS_DENIED
+                raise CommandError("The authenticated user does "
+                                   "not have sufficient privileges")
+            raise
+
+class cmd_startup(SuperCommand):
+    """Manage Startup Scripts Group Policy Objects"""
+    subcommands = {}
+    subcommands["list"] = cmd_list_startup()
+    subcommands["add"] = cmd_add_startup()
+    subcommands["remove"] = cmd_remove_startup()
+
+class cmd_scripts(SuperCommand):
+    """Manage Scripts Group Policy Objects"""
+    subcommands = {}
+    subcommands["startup"] = cmd_startup()
+
+class cmd_list_motd(Command):
+    """List VGP MOTD Group Policy from the sysvol
+
+This command lists the Message of the Day from the sysvol that will be applied
+to winbind clients.
+
+Example:
+samba-tool gpo manage motd list {31B2F340-016D-11D2-945F-00C04FB984F9}
+    """
+
+    synopsis = "%prog <gpo> [options]"
+
+    takes_optiongroups = {
+        "sambaopts": options.SambaOptions,
+        "versionopts": options.VersionOptions,
+        "credopts": options.CredentialsOptions,
+    }
+
+    takes_options = [
+        Option("-H", "--URL", help="LDB URL for database or target server", type=str,
+                metavar="URL", dest="H"),
+    ]
+
+    takes_args = ["gpo"]
+
+    def run(self, gpo, H=None, sambaopts=None, credopts=None, versionopts=None):
+        self.lp = sambaopts.get_loadparm()
+        self.creds = credopts.get_credentials(self.lp, fallback_machine=True)
+
+        # We need to know writable DC to setup SMB connection
+        if H and H.startswith('ldap://'):
+            dc_hostname = H[7:]
+            self.url = H
+        else:
+            dc_hostname = netcmd_finddc(self.lp, self.creds)
+            self.url = dc_url(self.lp, self.creds, dc=dc_hostname)
+
+        # SMB connect to DC
+        conn = smb_connection(dc_hostname,
+                              'sysvol',
+                              lp=self.lp,
+                              creds=self.creds)
+
+        realm = self.lp.get('realm')
+        vgp_xml = '\\'.join([realm.lower(), 'Policies', gpo,
+                                'MACHINE\\VGP\\VTLA\\Unix',
+                                'MOTD\\manifest.xml'])
+        try:
+            xml_data = ET.fromstring(conn.loadfile(vgp_xml))
+        except NTSTATUSError as e:
+            # STATUS_OBJECT_NAME_INVALID, STATUS_OBJECT_NAME_NOT_FOUND,
+            # STATUS_OBJECT_PATH_NOT_FOUND
+            if e.args[0] in [0xC0000033, 0xC0000034, 0xC000003A]:
+                return # The file doesn't exist, so there is nothing to list
+            if e.args[0] == 0xC0000022: # STATUS_ACCESS_DENIED
+                raise CommandError("The authenticated user does "
+                                   "not have sufficient privileges")
+            raise
+
+        policy = xml_data.find('policysetting')
+        data = policy.find('data')
+        text = data.find('text')
+        self.outf.write(text.text)
+
+class cmd_set_motd(Command):
+    """Sets a VGP MOTD Group Policy to the sysvol
+
+This command sets the Message of the Day to the sysvol for applying to winbind
+clients. Not providing a value will unset the policy.
+
+Example:
+samba-tool gpo manage motd set {31B2F340-016D-11D2-945F-00C04FB984F9} "Message for today"
+    """
+
+    synopsis = "%prog <gpo> [value] [options]"
+
+    takes_optiongroups = {
+        "sambaopts": options.SambaOptions,
+        "versionopts": options.VersionOptions,
+        "credopts": options.CredentialsOptions,
+    }
+
+    takes_options = [
+        Option("-H", "--URL", help="LDB URL for database or target server", type=str,
+                metavar="URL", dest="H"),
+    ]
+
+    takes_args = ["gpo", "value?"]
+
+    def run(self, gpo, value=None, H=None, sambaopts=None, credopts=None,
+            versionopts=None):
+        self.lp = sambaopts.get_loadparm()
+        self.creds = credopts.get_credentials(self.lp, fallback_machine=True)
+
+        # We need to know writable DC to setup SMB connection
+        if H and H.startswith('ldap://'):
+            dc_hostname = H[7:]
+            self.url = H
+        else:
+            dc_hostname = netcmd_finddc(self.lp, self.creds)
+            self.url = dc_url(self.lp, self.creds, dc=dc_hostname)
+
+        # SMB connect to DC
+        conn = smb_connection(dc_hostname,
+                              'sysvol',
+                              lp=self.lp,
+                              creds=self.creds)
+
+        realm = self.lp.get('realm')
+        vgp_dir = '\\'.join([realm.lower(), 'Policies', gpo,
+                             'MACHINE\\VGP\\VTLA\\Unix\\MOTD'])
+        vgp_xml = '\\'.join([vgp_dir, 'manifest.xml'])
+
+        if value is None:
+            conn.unlink(vgp_xml)
+            return
+
+        try:
+            xml_data = ET.fromstring(conn.loadfile(vgp_xml))
+        except NTSTATUSError as e:
+            # STATUS_OBJECT_NAME_INVALID, STATUS_OBJECT_NAME_NOT_FOUND,
+            # STATUS_OBJECT_PATH_NOT_FOUND
+            if e.args[0] in [0xC0000033, 0xC0000034, 0xC000003A]:
+                # The file doesn't exist, so create the xml structure
+                xml_data = ET.ElementTree(ET.Element('vgppolicy'))
+                policysetting = ET.SubElement(xml_data.getroot(),
+                                              'policysetting')
+                pv = ET.SubElement(policysetting, 'version')
+                pv.text = '1'
+                name = ET.SubElement(policysetting, 'name')
+                name.text = 'Text File'
+                description = ET.SubElement(policysetting, 'description')
+                description.text = 'Represents a Generic Text File'
+                apply_mode = ET.SubElement(policysetting, 'apply_mode')
+                apply_mode.text = 'replace'
+                data = ET.SubElement(policysetting, 'data')
+                filename = ET.SubElement(data, 'filename')
+                filename.text = 'motd'
+            elif e.args[0] == 0xC0000022: # STATUS_ACCESS_DENIED
+                raise CommandError("The authenticated user does "
+                                   "not have sufficient privileges")
+            else:
+                raise
+
+        text = ET.SubElement(data, 'text')
+        text.text = value
+
+        out = BytesIO()
+        xml_data.write(out, encoding='UTF-8', xml_declaration=True)
+        out.seek(0)
+        try:
+            create_directory_hier(conn, vgp_dir)
+            conn.savefile(vgp_xml, out.read())
+        except NTSTATUSError as e:
+            if e.args[0] == 0xC0000022: # STATUS_ACCESS_DENIED
+                raise CommandError("The authenticated user does "
+                                   "not have sufficient privileges")
+            raise
+
+class cmd_motd(SuperCommand):
+    """Manage Message of the Day Group Policy Objects"""
+    subcommands = {}
+    subcommands["list"] = cmd_list_motd()
+    subcommands["set"] = cmd_set_motd()
+
+class cmd_list_issue(Command):
+    """List VGP Issue Group Policy from the sysvol
+
+This command lists the Prelogin Message from the sysvol that will be applied
+to winbind clients.
+
+Example:
+samba-tool gpo manage issue list {31B2F340-016D-11D2-945F-00C04FB984F9}
+    """
+
+    synopsis = "%prog <gpo> [options]"
+
+    takes_optiongroups = {
+        "sambaopts": options.SambaOptions,
+        "versionopts": options.VersionOptions,
+        "credopts": options.CredentialsOptions,
+    }
+
+    takes_options = [
+        Option("-H", "--URL", help="LDB URL for database or target server", type=str,
+                metavar="URL", dest="H"),
+    ]
+
+    takes_args = ["gpo"]
+
+    def run(self, gpo, H=None, sambaopts=None, credopts=None, versionopts=None):
+        self.lp = sambaopts.get_loadparm()
+        self.creds = credopts.get_credentials(self.lp, fallback_machine=True)
+
+        # We need to know writable DC to setup SMB connection
+        if H and H.startswith('ldap://'):
+            dc_hostname = H[7:]
+            self.url = H
+        else:
+            dc_hostname = netcmd_finddc(self.lp, self.creds)
+            self.url = dc_url(self.lp, self.creds, dc=dc_hostname)
+
+        # SMB connect to DC
+        conn = smb_connection(dc_hostname,
+                              'sysvol',
+                              lp=self.lp,
+                              creds=self.creds)
+
+        realm = self.lp.get('realm')
+        vgp_xml = '\\'.join([realm.lower(), 'Policies', gpo,
+                                'MACHINE\\VGP\\VTLA\\Unix',
+                                'Issue\\manifest.xml'])
+        try:
+            xml_data = ET.fromstring(conn.loadfile(vgp_xml))
+        except NTSTATUSError as e:
+            # STATUS_OBJECT_NAME_INVALID, STATUS_OBJECT_NAME_NOT_FOUND,
+            # STATUS_OBJECT_PATH_NOT_FOUND
+            if e.args[0] in [0xC0000033, 0xC0000034, 0xC000003A]:
+                return # The file doesn't exist, so there is nothing to list
+            if e.args[0] == 0xC0000022: # STATUS_ACCESS_DENIED
+                raise CommandError("The authenticated user does "
+                                   "not have sufficient privileges")
+            raise
+
+        policy = xml_data.find('policysetting')
+        data = policy.find('data')
+        text = data.find('text')
+        self.outf.write(text.text)
+
+class cmd_set_issue(Command):
+    """Sets a VGP Issue Group Policy to the sysvol
+
+This command sets the Prelogin Message to the sysvol for applying to winbind
+clients. Not providing a value will unset the policy.
+
+Example:
+samba-tool gpo manage issue set {31B2F340-016D-11D2-945F-00C04FB984F9} "Welcome to Samba!"
+    """
+
+    synopsis = "%prog <gpo> [value] [options]"
+
+    takes_optiongroups = {
+        "sambaopts": options.SambaOptions,
+        "versionopts": options.VersionOptions,
+        "credopts": options.CredentialsOptions,
+    }
+
+    takes_options = [
+        Option("-H", "--URL", help="LDB URL for database or target server", type=str,
+                metavar="URL", dest="H"),
+    ]
+
+    takes_args = ["gpo", "value?"]
+
+    def run(self, gpo, value=None, H=None, sambaopts=None, credopts=None,
+            versionopts=None):
+        self.lp = sambaopts.get_loadparm()
+        self.creds = credopts.get_credentials(self.lp, fallback_machine=True)
+
+        # We need to know writable DC to setup SMB connection
+        if H and H.startswith('ldap://'):
+            dc_hostname = H[7:]
+            self.url = H
+        else:
+            dc_hostname = netcmd_finddc(self.lp, self.creds)
+            self.url = dc_url(self.lp, self.creds, dc=dc_hostname)
+
+        # SMB connect to DC
+        conn = smb_connection(dc_hostname,
+                              'sysvol',
+                              lp=self.lp,
+                              creds=self.creds)
+
+        realm = self.lp.get('realm')
+        vgp_dir = '\\'.join([realm.lower(), 'Policies', gpo,
+                             'MACHINE\\VGP\\VTLA\\Unix\\Issue'])
+        vgp_xml = '\\'.join([vgp_dir, 'manifest.xml'])
+
+        if value is None:
+            conn.unlink(vgp_xml)
+            return
+
+        try:
+            xml_data = ET.fromstring(conn.loadfile(vgp_xml))
+        except NTSTATUSError as e:
+            # STATUS_OBJECT_NAME_INVALID, STATUS_OBJECT_NAME_NOT_FOUND,
+            # STATUS_OBJECT_PATH_NOT_FOUND
+            if e.args[0] in [0xC0000033, 0xC0000034, 0xC000003A]:
+                # The file doesn't exist, so create the xml structure
+                xml_data = ET.ElementTree(ET.Element('vgppolicy'))
+                policysetting = ET.SubElement(xml_data.getroot(),
+                                              'policysetting')
+                pv = ET.SubElement(policysetting, 'version')
+                pv.text = '1'
+                name = ET.SubElement(policysetting, 'name')
+                name.text = 'Text File'
+                description = ET.SubElement(policysetting, 'description')
+                description.text = 'Represents a Generic Text File'
+                apply_mode = ET.SubElement(policysetting, 'apply_mode')
+                apply_mode.text = 'replace'
+                data = ET.SubElement(policysetting, 'data')
+                filename = ET.SubElement(data, 'filename')
+                filename.text = 'issue'
+            elif e.args[0] == 0xC0000022: # STATUS_ACCESS_DENIED
+                raise CommandError("The authenticated user does "
+                                   "not have sufficient privileges")
+            else:
+                raise
+
+        text = ET.SubElement(data, 'text')
+        text.text = value
+
+        out = BytesIO()
+        xml_data.write(out, encoding='UTF-8', xml_declaration=True)
+        out.seek(0)
+        try:
+            create_directory_hier(conn, vgp_dir)
+            conn.savefile(vgp_xml, out.read())
+        except NTSTATUSError as e:
+            if e.args[0] == 0xC0000022: # STATUS_ACCESS_DENIED
+                raise CommandError("The authenticated user does "
+                                   "not have sufficient privileges")
+            raise
+
+class cmd_issue(SuperCommand):
+    """Manage Issue Group Policy Objects"""
+    subcommands = {}
+    subcommands["list"] = cmd_list_issue()
+    subcommands["set"] = cmd_set_issue()
+
+class cmd_list_access(Command):
+    """List VGP Host Access Group Policy from the sysvol
+
+This command lists host access rules from the sysvol that will be applied to winbind clients.
+
+Example:
+samba-tool gpo manage access list {31B2F340-016D-11D2-945F-00C04FB984F9}
+    """
+
+    synopsis = "%prog <gpo> [options]"
+
+    takes_optiongroups = {
+        "sambaopts": options.SambaOptions,
+        "versionopts": options.VersionOptions,
+        "credopts": options.CredentialsOptions,
+    }
+
+    takes_options = [
+        Option("-H", "--URL", help="LDB URL for database or target server", type=str,
+                metavar="URL", dest="H"),
+    ]
+
+    takes_args = ["gpo"]
+
+    def run(self, gpo, H=None, sambaopts=None, credopts=None, versionopts=None):
+        self.lp = sambaopts.get_loadparm()
+        self.creds = credopts.get_credentials(self.lp, fallback_machine=True)
+
+        # We need to know writable DC to setup SMB connection
+        if H and H.startswith('ldap://'):
+            dc_hostname = H[7:]
+            self.url = H
+        else:
+            dc_hostname = netcmd_finddc(self.lp, self.creds)
+            self.url = dc_url(self.lp, self.creds, dc=dc_hostname)
+
+        # SMB connect to DC
+        conn = smb_connection(dc_hostname,
+                              'sysvol',
+                              lp=self.lp,
+                              creds=self.creds)
+
+        realm = self.lp.get('realm')
+        vgp_xml = '\\'.join([realm.lower(), 'Policies', gpo,
+                             'MACHINE\\VGP\\VTLA\\VAS'
+                             'HostAccessControl\\Allow\\manifest.xml'])
+        try:
+            allow = ET.fromstring(conn.loadfile(vgp_xml))
+        except NTSTATUSError as e:
+            # STATUS_OBJECT_NAME_INVALID, STATUS_OBJECT_NAME_NOT_FOUND,
+            # STATUS_OBJECT_PATH_NOT_FOUND
+            if e.args[0] in [0xC0000033, 0xC0000034, 0xC000003A]:
+                allow = None # The file doesn't exist, ignore it
+            elif e.args[0] == 0xC0000022: # STATUS_ACCESS_DENIED
+                raise CommandError("The authenticated user does "
+                                   "not have sufficient privileges")
+            else:
+                raise
+
+        if allow is not None:
+            policy = allow.find('policysetting')
+            data = policy.find('data')
+            for listelement in data.findall('listelement'):
+                adobject = listelement.find('adobject')
+                name = adobject.find('name')
+                domain = adobject.find('domain')
+                self.outf.write('+:%s\\%s:ALL\n' % (domain.text, name.text))
+
+        vgp_xml = '\\'.join([realm.lower(), 'Policies', gpo,
+                             'MACHINE\\VGP\\VTLA\\VAS'
+                             'HostAccessControl\\Deny\\manifest.xml'])
+        try:
+            deny = ET.fromstring(conn.loadfile(vgp_xml))
+        except NTSTATUSError as e:
+            # STATUS_OBJECT_NAME_INVALID, STATUS_OBJECT_NAME_NOT_FOUND,
+            # STATUS_OBJECT_PATH_NOT_FOUND
+            if e.args[0] in [0xC0000033, 0xC0000034, 0xC000003A]:
+                deny = None # The file doesn't exist, ignore it
+            elif e.args[0] == 0xC0000022: # STATUS_ACCESS_DENIED
+                raise CommandError("The authenticated user does "
+                                   "not have sufficient privileges")
+            else:
+                raise
+
+        if deny is not None:
+            policy = deny.find('policysetting')
+            data = policy.find('data')
+            for listelement in data.findall('listelement'):
+                adobject = listelement.find('adobject')
+                name = adobject.find('name')
+                domain = adobject.find('domain')
+                self.outf.write('-:%s\\%s:ALL\n' % (domain.text, name.text))
+
+class cmd_add_access(Command):
+    """Adds a VGP Host Access Group Policy to the sysvol
+
+This command adds a host access setting to the sysvol for applying to winbind
+clients.
+
+Example:
+samba-tool gpo manage access add {31B2F340-016D-11D2-945F-00C04FB984F9} allow goodguy example.com
+    """
+
+    synopsis = "%prog <gpo> <allow/deny> <cn> <domain> [options]"
+
+    takes_optiongroups = {
+        "sambaopts": options.SambaOptions,
+        "versionopts": options.VersionOptions,
+        "credopts": options.CredentialsOptions,
+    }
+
+    takes_options = [
+        Option("-H", "--URL", help="LDB URL for database or target server", type=str,
+                metavar="URL", dest="H"),
+    ]
+
+    takes_args = ["gpo", "etype", "cn", "domain"]
+
+    def run(self, gpo, etype, cn, domain, H=None, sambaopts=None,
+            credopts=None, versionopts=None):
+        self.lp = sambaopts.get_loadparm()
+        self.creds = credopts.get_credentials(self.lp, fallback_machine=True)
+
+        # We need to know writable DC to setup SMB connection
+        if H and H.startswith('ldap://'):
+            dc_hostname = H[7:]
+            self.url = H
+        else:
+            dc_hostname = netcmd_finddc(self.lp, self.creds)
+            self.url = dc_url(self.lp, self.creds, dc=dc_hostname)
+
+        # SMB connect to DC
+        conn = smb_connection(dc_hostname,
+                              'sysvol',
+                              lp=self.lp,
+                              creds=self.creds)
+
+        realm = self.lp.get('realm')
+        if etype == 'allow':
+            vgp_dir = '\\'.join([realm.lower(), 'Policies', gpo,
+                                 'MACHINE\\VGP\\VTLA\\VAS'
+                                 'HostAccessControl\\Allow'])
+        elif etype == 'deny':
+            vgp_dir = '\\'.join([realm.lower(), 'Policies', gpo,
+                                 'MACHINE\\VGP\\VTLA\\VAS'
+                                 'HostAccessControl\\Deny'])
+        else:
+            raise CommandError("The entry type must be either 'allow' or "
+                               "'deny'. Unknown type '%s'" % etype)
+        vgp_xml = '\\'.join([vgp_dir, 'manifest.xml'])
+        try:
+            xml_data = ET.ElementTree(ET.fromstring(conn.loadfile(vgp_xml)))
+            policy = xml_data.getroot().find('policysetting')
+            data = policy.find('data')
+        except NTSTATUSError as e:
+            # STATUS_OBJECT_NAME_INVALID, STATUS_OBJECT_NAME_NOT_FOUND,
+            # STATUS_OBJECT_PATH_NOT_FOUND
+            if e.args[0] in [0xC0000033, 0xC0000034, 0xC000003A]:
+                # The file doesn't exist, so create the xml structure
+                xml_data = ET.ElementTree(ET.Element('vgppolicy'))
+                policysetting = ET.SubElement(xml_data.getroot(),
+                                              'policysetting')
+                pv = ET.SubElement(policysetting, 'version')
+                pv.text = '1'
+                name = ET.SubElement(policysetting, 'name')
+                name.text = 'Host Access Control'
+                description = ET.SubElement(policysetting, 'description')
+                description.text = 'Represents host access control data (pam_access)'
+                apply_mode = ET.SubElement(policysetting, 'apply_mode')
+                apply_mode.text = 'merge'
+                data = ET.SubElement(policysetting, 'data')
+            elif e.args[0] == 0xC0000022: # STATUS_ACCESS_DENIED
+                raise CommandError("The authenticated user does "
+                                   "not have sufficient privileges")
+            else:
+                raise
+
+        url = dc_url(self.lp, self.creds, dc=domain)
+        samdb = SamDB(url=url, session_info=system_session(),
+                      credentials=self.creds, lp=self.lp)
+
+        res = samdb.search(base=samdb.domain_dn(),
+                           scope=ldb.SCOPE_SUBTREE,
+                           expression="(cn=%s)" % cn,
+                           attrs=['userPrincipalName',
+                                  'samaccountname',
+                                  'objectClass'])
+        if len(res) == 0:
+            raise CommandError('Unable to find user or group "%s"' % cn)
+
+        objectclass = get_string(res[0]['objectClass'][-1])
+        if objectclass not in ['user', 'group']:
+            raise CommandError('%s is not a user or group' % cn)
+
+        listelement = ET.SubElement(data, 'listelement')
+        etype = ET.SubElement(listelement, 'type')
+        etype.text = objectclass.upper()
+        entry = ET.SubElement(listelement, 'entry')
+        if objectclass == 'user':
+            entry.text = get_string(res[0]['userPrincipalName'][-1])
+        else:
+            groupattr = ET.SubElement(data, 'groupattr')
+            groupattr.text = 'samAccountName'
+            entry.text = '%s\\%s' % (domain,
+                                     get_string(res[0]['samaccountname'][-1]))
+        adobject = ET.SubElement(listelement, 'adobject')
+        name = ET.SubElement(adobject, 'name')
+        name.text = get_string(res[0]['samaccountname'][-1])
+        domain_elm = ET.SubElement(adobject, 'domain')
+        domain_elm.text = domain
+        etype = ET.SubElement(adobject, 'type')
+        etype.text = objectclass
+
+        out = BytesIO()
+        xml_data.write(out, encoding='UTF-8', xml_declaration=True)
+        out.seek(0)
+        try:
+            create_directory_hier(conn, vgp_dir)
+            conn.savefile(vgp_xml, out.read())
+        except NTSTATUSError as e:
+            if e.args[0] == 0xC0000022: # STATUS_ACCESS_DENIED
+                raise CommandError("The authenticated user does "
+                                   "not have sufficient privileges")
+            raise
+
+class cmd_remove_access(Command):
+    """Remove a VGP Host Access Group Policy from the sysvol
+
+This command removes a host access setting from the sysvol for applying to
+winbind clients.
+
+Example:
+samba-tool gpo manage access remove {31B2F340-016D-11D2-945F-00C04FB984F9} allow goodguy example.com
+    """
+
+    synopsis = "%prog <gpo> <allow/deny> <name> <domain> [options]"
+
+    takes_optiongroups = {
+        "sambaopts": options.SambaOptions,
+        "versionopts": options.VersionOptions,
+        "credopts": options.CredentialsOptions,
+    }
+
+    takes_options = [
+        Option("-H", "--URL", help="LDB URL for database or target server", type=str,
+                metavar="URL", dest="H"),
+    ]
+
+    takes_args = ["gpo", "etype", "name", "domain"]
+
+    def run(self, gpo, etype, name, domain, H=None, sambaopts=None,
+            credopts=None, versionopts=None):
+        self.lp = sambaopts.get_loadparm()
+        self.creds = credopts.get_credentials(self.lp, fallback_machine=True)
+
+        # We need to know writable DC to setup SMB connection
+        if H and H.startswith('ldap://'):
+            dc_hostname = H[7:]
+            self.url = H
+        else:
+            dc_hostname = netcmd_finddc(self.lp, self.creds)
+            self.url = dc_url(self.lp, self.creds, dc=dc_hostname)
+
+        # SMB connect to DC
+        conn = smb_connection(dc_hostname,
+                              'sysvol',
+                              lp=self.lp,
+                              creds=self.creds)
+
+        realm = self.lp.get('realm')
+        if etype == 'allow':
+            vgp_dir = '\\'.join([realm.lower(), 'Policies', gpo,
+                                 'MACHINE\\VGP\\VTLA\\VAS'
+                                 'HostAccessControl\\Allow'])
+        elif etype == 'deny':
+            vgp_dir = '\\'.join([realm.lower(), 'Policies', gpo,
+                                 'MACHINE\\VGP\\VTLA\\VAS'
+                                 'HostAccessControl\\Deny'])
+        else:
+            raise CommandError("The entry type must be either 'allow' or "
+                               "'deny'. Unknown type '%s'" % etype)
+        vgp_xml = '\\'.join([vgp_dir, 'manifest.xml'])
+        try:
+            xml_data = ET.ElementTree(ET.fromstring(conn.loadfile(vgp_xml)))
+            policy = xml_data.getroot().find('policysetting')
+            data = policy.find('data')
+        except NTSTATUSError as e:
+            # STATUS_OBJECT_NAME_INVALID, STATUS_OBJECT_NAME_NOT_FOUND,
+            # STATUS_OBJECT_PATH_NOT_FOUND
+            if e.args[0] in [0xC0000033, 0xC0000034, 0xC000003A]:
+                raise CommandError("Cannot remove %s entry because it does "
+                                   "not exist" % etype)
+            elif e.args[0] == 0xC0000022: # STATUS_ACCESS_DENIED
+                raise CommandError("The authenticated user does "
+                                   "not have sufficient privileges")
+            else:
+                raise
+
+        for listelement in data.findall('listelement'):
+            adobject = listelement.find('adobject')
+            name_elm = adobject.find('name')
+            domain_elm = adobject.find('domain')
+            if name_elm is not None and name_elm.text == name and \
+               domain_elm is not None and domain_elm.text == domain:
+                data.remove(listelement)
+                break
+        else:
+            raise CommandError("Cannot remove %s entry because it does "
+                                   "not exist" % etype)
+
+        out = BytesIO()
+        xml_data.write(out, encoding='UTF-8', xml_declaration=True)
+        out.seek(0)
+        try:
+            create_directory_hier(conn, vgp_dir)
+            conn.savefile(vgp_xml, out.read())
+        except NTSTATUSError as e:
+            if e.args[0] == 0xC0000022: # STATUS_ACCESS_DENIED
+                raise CommandError("The authenticated user does "
+                                   "not have sufficient privileges")
+            raise
+
+class cmd_access(SuperCommand):
+    """Manage Host Access Group Policy Objects"""
+    subcommands = {}
+    subcommands["list"] = cmd_list_access()
+    subcommands["add"] = cmd_add_access()
+    subcommands["remove"] = cmd_remove_access()
+
+class cmd_manage(SuperCommand):
+    """Manage Group Policy Objects"""
+    subcommands = {}
+    subcommands["sudoers"] = cmd_sudoers()
+    subcommands["security"] = cmd_security()
+    subcommands["smb_conf"] = cmd_smb_conf()
+    subcommands["symlink"] = cmd_symlink()
+    subcommands["files"] = cmd_files()
+    subcommands["openssh"] = cmd_openssh()
+    subcommands["scripts"] = cmd_scripts()
+    subcommands["motd"] = cmd_motd()
+    subcommands["issue"] = cmd_issue()
+    subcommands["access"] = cmd_access()
 
 class cmd_gpo(SuperCommand):
     """Group Policy Object (GPO) management."""
@@ -1685,3 +4021,4 @@ class cmd_gpo(SuperCommand):
     subcommands["backup"] = cmd_backup()
     subcommands["restore"] = cmd_restore()
     subcommands["admxload"] = cmd_admxload()
+    subcommands["manage"] = cmd_manage()

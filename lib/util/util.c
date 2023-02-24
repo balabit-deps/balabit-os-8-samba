@@ -54,158 +54,6 @@
  */
 
 /**
- * Convert a string to an unsigned long integer
- *
- * @param nptr		pointer to string which is to be converted
- * @param endptr	[optional] reference to remainder of the string
- * @param base		base of the numbering scheme
- * @param err		error occured during conversion
- * @flags		controlling conversion feature
- * @result		result of the conversion as provided by strtoul
- *
- * The following flags are supported
- *	SMB_STR_STANDARD # raise error if negative or non-numeric
- *	SMB_STR_ALLOW_NEGATIVE # allow strings with a leading "-"
- *	SMB_STR_FULL_STR_CONV # entire string must be converted
- *	SMB_STR_ALLOW_NO_CONVERSION # allow empty strings or non-numeric
- *	SMB_STR_GLIBC_STANDARD # act exactly as the standard glibc strtoul
- *
- * The following errors are detected
- * - wrong base
- * - value overflow
- * - string with a leading "-" indicating a negative number
- * - no conversion due to empty string or not representing a number
- */
-unsigned long int
-smb_strtoul(const char *nptr, char **endptr, int base, int *err, int flags)
-{
-	unsigned long int val;
-	int saved_errno = errno;
-	char *needle = NULL;
-	char *tmp_endptr = NULL;
-
-	errno = 0;
-	*err = 0;
-
-	val = strtoul(nptr, &tmp_endptr, base);
-
-	if (endptr != NULL) {
-		*endptr = tmp_endptr;
-	}
-
-	if (errno != 0) {
-		*err = errno;
-		errno = saved_errno;
-		return val;
-	}
-
-	if ((flags & SMB_STR_ALLOW_NO_CONVERSION) == 0) {
-		/* got an invalid number-string resulting in no conversion */
-		if (nptr == tmp_endptr) {
-			*err = EINVAL;
-			goto out;
-		}
-	}
-
-	if ((flags & SMB_STR_ALLOW_NEGATIVE ) == 0) {
-		/* did we convert a negative "number" ? */
-		needle = strchr(nptr, '-');
-		if (needle != NULL && needle < tmp_endptr) {
-			*err = EINVAL;
-			goto out;
-		}
-	}
-
-	if ((flags & SMB_STR_FULL_STR_CONV) != 0) {
-		/* did we convert the entire string ? */
-		if (tmp_endptr[0] != '\0') {
-			*err = EINVAL;
-			goto out;
-		}
-	}
-
-out:
-	errno = saved_errno;
-	return val;
-}
-
-/**
- * Convert a string to an unsigned long long integer
- *
- * @param nptr		pointer to string which is to be converted
- * @param endptr	[optional] reference to remainder of the string
- * @param base		base of the numbering scheme
- * @param err		error occured during conversion
- * @flags		controlling conversion feature
- * @result		result of the conversion as provided by strtoull
- *
- * The following flags are supported
- *	SMB_STR_STANDARD # raise error if negative or non-numeric
- *	SMB_STR_ALLOW_NEGATIVE # allow strings with a leading "-"
- *	SMB_STR_FULL_STR_CONV # entire string must be converted
- *	SMB_STR_ALLOW_NO_CONVERSION # allow empty strings or non-numeric
- *	SMB_STR_GLIBC_STANDARD # act exactly as the standard glibc strtoul
- *
- * The following errors are detected
- * - wrong base
- * - value overflow
- * - string with a leading "-" indicating a negative number
- * - no conversion due to empty string or not representing a number
- */
-unsigned long long int
-smb_strtoull(const char *nptr, char **endptr, int base, int *err, int flags)
-{
-	unsigned long long int val;
-	int saved_errno = errno;
-	char *needle = NULL;
-	char *tmp_endptr = NULL;
-
-	errno = 0;
-	*err = 0;
-
-	val = strtoull(nptr, &tmp_endptr, base);
-
-	if (endptr != NULL) {
-		*endptr = tmp_endptr;
-	}
-
-	if (errno != 0) {
-		*err = errno;
-		errno = saved_errno;
-		return val;
-	}
-
-	if ((flags & SMB_STR_ALLOW_NO_CONVERSION) == 0) {
-		/* got an invalid number-string resulting in no conversion */
-		if (nptr == tmp_endptr) {
-			*err = EINVAL;
-			goto out;
-		}
-	}
-
-	if ((flags & SMB_STR_ALLOW_NEGATIVE ) == 0) {
-		/* did we convert a negative "number" ? */
-		needle = strchr(nptr, '-');
-		if (needle != NULL && needle < tmp_endptr) {
-			*err = EINVAL;
-			goto out;
-		}
-	}
-
-	if ((flags & SMB_STR_FULL_STR_CONV) != 0) {
-		/* did we convert the entire string ? */
-		if (tmp_endptr[0] != '\0') {
-			*err = EINVAL;
-			goto out;
-		}
-	}
-
-out:
-	errno = saved_errno;
-	return val;
-}
-
-/**
  Find a suitable temporary directory. The result should be copied immediately
  as it may be overwritten by a subsequent call.
 **/
@@ -633,6 +481,48 @@ void print_asc(int level, const uint8_t *buf,int len)
 	print_asc_cb(buf, len, debugadd_cb, &level);
 }
 
+static void dump_data_block16(const char *prefix, size_t idx,
+			      const uint8_t *buf, size_t len,
+			      void (*cb)(const char *buf, void *private_data),
+			      void *private_data)
+{
+	char tmp[16];
+	size_t i;
+
+	SMB_ASSERT(len >= 0 && len <= 16);
+
+	snprintf(tmp, sizeof(tmp), "%s[%04zX]", prefix, idx);
+	cb(tmp, private_data);
+
+	for (i=0; i<16; i++) {
+		if (i == 8) {
+			cb("  ", private_data);
+		}
+		if (i < len) {
+			snprintf(tmp, sizeof(tmp), " %02X", (int)buf[i]);
+		} else {
+			snprintf(tmp, sizeof(tmp), "   ");
+		}
+		cb(tmp, private_data);
+	}
+
+	cb("   ", private_data);
+
+	if (len == 0) {
+		cb("EMPTY   BLOCK\n", private_data);
+		return;
+	}
+
+	for (i=0; i<len; i++) {
+		if (i == 8) {
+			cb(" ", private_data);
+		}
+		print_asc_cb(&buf[i], 1, cb, private_data);
+	}
+
+	cb("\n", private_data);
+}
+
 /**
  * Write dump of binary data to a callback
  */
@@ -643,73 +533,30 @@ void dump_data_cb(const uint8_t *buf, int len,
 {
 	int i=0;
 	bool skipped = false;
-	char tmp[16];
 
 	if (len<=0) return;
 
-	for (i=0;i<len;) {
+	for (i=0;i<len;i+=16) {
+		size_t remaining_len = len - i;
+		size_t this_len = MIN(remaining_len, 16);
+		const uint8_t *this_buf = &buf[i];
 
-		if (i%16 == 0) {
-			if ((omit_zero_bytes == true) &&
-			    (i > 0) &&
-			    (len > i+16) &&
-			    all_zero(&buf[i], 16))
-			{
-				i +=16;
-				continue;
+		if ((omit_zero_bytes == true) &&
+		    (i > 0) && (remaining_len > 16) &&
+		    (this_len == 16) && all_zero(this_buf, 16))
+		{
+			if (!skipped) {
+				cb("skipping zero buffer bytes\n",
+				   private_data);
+				skipped = true;
 			}
-
-			if (i<len)  {
-				snprintf(tmp, sizeof(tmp), "[%04X] ", i);
-				cb(tmp, private_data);
-			}
+			continue;
 		}
 
-		snprintf(tmp, sizeof(tmp), "%02X ", (int)buf[i]);
-		cb(tmp, private_data);
-		i++;
-		if (i%8 == 0) {
-			cb("  ", private_data);
-		}
-		if (i%16 == 0) {
-
-			print_asc_cb(&buf[i-16], 8, cb, private_data);
-			cb(" ", private_data);
-			print_asc_cb(&buf[i-8], 8, cb, private_data);
-			cb("\n", private_data);
-
-			if ((omit_zero_bytes == true) &&
-			    (len > i+16) &&
-			    all_zero(&buf[i], 16)) {
-				if (!skipped) {
-					cb("skipping zero buffer bytes\n",
-					   private_data);
-					skipped = true;
-				}
-			}
-		}
+		skipped = false;
+		dump_data_block16("", i, this_buf, this_len,
+				  cb, private_data);
 	}
-
-	if (i%16) {
-		int n;
-		n = 16 - (i%16);
-		cb("  ", private_data);
-		if (n>8) {
-			cb(" ", private_data);
-		}
-		while (n--) {
-			cb("   ", private_data);
-		}
-		n = MIN(8,i%16);
-		print_asc_cb(&buf[i-(i%16)], n, cb, private_data);
-		cb(" ", private_data);
-		n = (i%16) - n;
-		if (n>0) {
-			print_asc_cb(&buf[i-n], n, cb, private_data);
-		}
-		cb("\n", private_data);
-	}
-
 }
 
 /**
@@ -765,6 +612,90 @@ void dump_data_file(const uint8_t *buf, int len, bool omit_zero_bytes,
 		    FILE *f)
 {
 	dump_data_cb(buf, len, omit_zero_bytes, fprintf_cb, f);
+}
+
+/**
+ * Write dump of compared binary data to a callback
+ */
+void dump_data_diff_cb(const uint8_t *buf1, size_t len1,
+		       const uint8_t *buf2, size_t len2,
+		       bool omit_zero_bytes,
+		       void (*cb)(const char *buf, void *private_data),
+		       void *private_data)
+{
+	size_t len = MAX(len1, len2);
+	size_t i;
+	bool skipped = false;
+
+	for (i=0; i<len; i+=16) {
+		size_t remaining_len = len - i;
+		size_t remaining_len1 = 0;
+		size_t this_len1 = 0;
+		const uint8_t *this_buf1 = NULL;
+		size_t remaining_len2 = 0;
+		size_t this_len2 = 0;
+		const uint8_t *this_buf2 = NULL;
+
+		if (i < len1) {
+			remaining_len1 = len1 - i;
+			this_len1 = MIN(remaining_len1, 16);
+			this_buf1 = &buf1[i];
+		}
+		if (i < len2) {
+			remaining_len2 = len2 - i;
+			this_len2 = MIN(remaining_len2, 16);
+			this_buf2 = &buf2[i];
+		}
+
+		if ((omit_zero_bytes == true) &&
+		    (i > 0) && (remaining_len > 16) &&
+		    (this_len1 == 16) && all_zero(this_buf1, 16) &&
+		    (this_len2 == 16) && all_zero(this_buf2, 16))
+		{
+			if (!skipped) {
+				cb("skipping zero buffer bytes\n",
+				   private_data);
+				skipped = true;
+			}
+			continue;
+		}
+
+		skipped = false;
+
+		if ((this_len1 == this_len2) &&
+		    (memcmp(this_buf1, this_buf2, this_len1) == 0))
+		{
+			dump_data_block16(" ", i, this_buf1, this_len1,
+					  cb, private_data);
+			continue;
+		}
+
+		dump_data_block16("-", i, this_buf1, this_len1,
+				  cb, private_data);
+		dump_data_block16("+", i, this_buf2, this_len2,
+				  cb, private_data);
+	}
+}
+
+_PUBLIC_ void dump_data_diff(int dbgc_class, int level,
+			     bool omit_zero_bytes,
+			     const uint8_t *buf1, size_t len1,
+			     const uint8_t *buf2, size_t len2)
+{
+	struct debug_channel_level dcl = { dbgc_class, level };
+
+	if (!DEBUGLVLC(dbgc_class, level)) {
+		return;
+	}
+	dump_data_diff_cb(buf1, len1, buf2, len2, true, debugadd_channel_cb, &dcl);
+}
+
+_PUBLIC_ void dump_data_file_diff(FILE *f,
+			          bool omit_zero_bytes,
+			          const uint8_t *buf1, size_t len1,
+			          const uint8_t *buf2, size_t len2)
+{
+	dump_data_diff_cb(buf1, len1, buf2, len2, omit_zero_bytes, fprintf_cb, f);
 }
 
 /**
@@ -1031,49 +962,28 @@ _PUBLIC_ size_t strhex_to_str(char *p, size_t p_len, const char *strhex, size_t 
 {
 	size_t i = 0;
 	size_t num_chars = 0;
-	uint8_t   lonybble, hinybble;
-	const char     *hexchars = "0123456789ABCDEF";
-	char           *p1 = NULL, *p2 = NULL;
 
 	/* skip leading 0x prefix */
 	if (strncasecmp(strhex, "0x", 2) == 0) {
 		i += 2; /* skip two chars */
 	}
 
-	for (; i+1 < strhex_len && strhex[i] != 0 && strhex[i+1] != 0; i++) {
-		p1 = strchr(hexchars, toupper((unsigned char)strhex[i]));
-		if (p1 == NULL) {
+	while ((i < strhex_len) && (num_chars < p_len)) {
+		bool ok = hex_byte(&strhex[i], (uint8_t *)&p[num_chars]);
+		if (!ok) {
 			break;
 		}
-
-		i++; /* next hex digit */
-
-		p2 = strchr(hexchars, toupper((unsigned char)strhex[i]));
-		if (p2 == NULL) {
-			break;
-		}
-
-		/* get the two nybbles */
-		hinybble = PTR_DIFF(p1, hexchars);
-		lonybble = PTR_DIFF(p2, hexchars);
-
-		if (num_chars >= p_len) {
-			break;
-		}
-
-		p[num_chars] = (hinybble << 4) | lonybble;
-		num_chars++;
-
-		p1 = NULL;
-		p2 = NULL;
+		i += 2;
+		num_chars += 1;
 	}
+
 	return num_chars;
 }
 
 /**
  * Parse a hex string and return a data blob.
  */
-_PUBLIC_ _PURE_ DATA_BLOB strhex_to_data_blob(TALLOC_CTX *mem_ctx, const char *strhex) 
+_PUBLIC_ DATA_BLOB strhex_to_data_blob(TALLOC_CTX *mem_ctx, const char *strhex)
 {
 	DATA_BLOB ret_blob = data_blob_talloc(mem_ctx, NULL, strlen(strhex)/2+1);
 
@@ -1089,7 +999,7 @@ _PUBLIC_ _PURE_ DATA_BLOB strhex_to_data_blob(TALLOC_CTX *mem_ctx, const char *s
  * is generated from dump_data_cb() elsewhere in this file
  * 
  */
-_PUBLIC_ _PURE_ DATA_BLOB hexdump_to_data_blob(TALLOC_CTX *mem_ctx, const char *hexdump, size_t hexdump_len)
+_PUBLIC_ DATA_BLOB hexdump_to_data_blob(TALLOC_CTX *mem_ctx, const char *hexdump, size_t hexdump_len)
 {
 	DATA_BLOB ret_blob = { 0 };
 	size_t i = 0;
@@ -1339,21 +1249,56 @@ void anonymous_shared_free(void *ptr)
 */
 void samba_start_debugger(void)
 {
-	char *cmd = NULL;
+	int ready_pipe[2];
+	char c;
+	int ret;
+	pid_t pid;
+
+	ret = pipe(ready_pipe);
+	SMB_ASSERT(ret == 0);
+
+	pid = fork();
+	SMB_ASSERT(pid >= 0);
+
+	if (pid) {
+		c = 0;
+
+		ret = close(ready_pipe[0]);
+		SMB_ASSERT(ret == 0);
 #if defined(HAVE_PRCTL) && defined(PR_SET_PTRACER)
-	/*
-	 * Make sure all children can attach a debugger.
-	 */
-	prctl(PR_SET_PTRACER, getpid(), 0, 0, 0);
+		/*
+		 * Make sure the child process can attach a debugger.
+		 *
+		 * We don't check the error code as the debugger
+		 * will tell us if it can't attach.
+		 */
+		(void)prctl(PR_SET_PTRACER, pid, 0, 0, 0);
 #endif
-	if (asprintf(&cmd, "xterm -e \"gdb --pid %u\"&", getpid()) == -1) {
-		return;
+		ret = write(ready_pipe[1], &c, 1);
+		SMB_ASSERT(ret == 1);
+
+		ret = close(ready_pipe[1]);
+		SMB_ASSERT(ret == 0);
+
+		/* Wait for gdb to attach. */
+		sleep(2);
+	} else {
+		char *cmd = NULL;
+
+		ret = close(ready_pipe[1]);
+		SMB_ASSERT(ret == 0);
+
+		ret = read(ready_pipe[0], &c, 1);
+		SMB_ASSERT(ret == 1);
+
+		ret = close(ready_pipe[0]);
+		SMB_ASSERT(ret == 0);
+
+		ret = asprintf(&cmd, "gdb --pid %u", getppid());
+		SMB_ASSERT(ret != -1);
+
+		execlp("xterm", "xterm", "-e", cmd, (char *) NULL);
+		smb_panic("execlp() failed");
 	}
-	if (system(cmd) == -1) {
-		free(cmd);
-		return;
-	}
-	free(cmd);
-	sleep(2);
 }
 #endif

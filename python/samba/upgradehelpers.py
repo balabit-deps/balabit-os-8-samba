@@ -19,8 +19,6 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-from __future__ import print_function
-from __future__ import division
 """Helpers used for upgrading between different database formats."""
 
 import os
@@ -28,7 +26,7 @@ import re
 import shutil
 import samba
 
-from samba.compat import cmp_fn
+from samba.common import cmp
 from samba import Ldb, version, ntacls
 from ldb import SCOPE_SUBTREE, SCOPE_ONELEVEL, SCOPE_BASE
 import ldb
@@ -37,7 +35,7 @@ from samba.provision import (provision_paths_from_lp,
                              provision, ProvisioningError,
                              secretsdb_self_join)
 from samba.provision.common import FILL_FULL
-from samba.dcerpc import xattr, drsblobs, security
+from samba.dcerpc import drsblobs
 from samba.dcerpc.misc import SEC_CHAN_BDC
 from samba.ndr import ndr_unpack
 from samba.samdb import SamDB
@@ -284,7 +282,7 @@ def dn_sort(x, y):
     len2 = len(tab2) - 1
     # Note: python range go up to upper limit but do not include it
     for i in range(0, minimum):
-        ret = cmp_fn(tab1[len1 - i], tab2[len2 - i])
+        ret = cmp(tab1[len1 - i], tab2[len2 - i])
         if ret != 0:
             return ret
         else:
@@ -584,7 +582,7 @@ def update_machine_account_password(samdb, secrets_ldb, names):
         assert(len(res) == 1)
 
         msg = ldb.Message(res[0].dn)
-        machinepass = samba.generate_random_machine_password(128, 255)
+        machinepass = samba.generate_random_machine_password(120, 120)
         mputf16 = machinepass.encode('utf-16-le')
         msg["clearTextPassword"] = ldb.MessageElement(mputf16,
                                                       ldb.FLAG_MOD_REPLACE,
@@ -660,9 +658,12 @@ def update_krbtgt_account_password(samdb):
     assert(len(res) == 1)
 
     msg = ldb.Message(res[0].dn)
-    machinepass = samba.generate_random_machine_password(128, 255)
-    mputf16 = machinepass.encode('utf-16-le')
-    msg["clearTextPassword"] = ldb.MessageElement(mputf16,
+    # Note that the machinepass value is ignored
+    # as the backend (password_hash.c) will generate its
+    # own random values for the krbtgt keys
+    krbtgtpass = samba.generate_random_machine_password(128, 255)
+    kputf16 = krbtgtpass.encode('utf-16-le')
+    msg["clearTextPassword"] = ldb.MessageElement(kputf16,
                                                   ldb.FLAG_MOD_REPLACE,
                                                   "clearTextPassword")
 

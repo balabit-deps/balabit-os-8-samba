@@ -48,6 +48,7 @@
 #include "passdb.h"
 #include "../libcli/smb/smbXcli_base.h"
 #include "libsmb/dsgetdcname.h"
+#include "lib/util/string_wrappers.h"
 
 static int net_mode_share;
 static NTSTATUS sync_files(struct copy_clistate *cp_clistate, const char *mask);
@@ -193,11 +194,18 @@ int run_rpc_command(struct net_context *c,
 		if (lp_client_schannel()
 		    && (ndr_syntax_id_equal(&table->syntax_id,
 					    &ndr_table_netlogon.syntax_id))) {
+			const char *remote_name =
+				smbXcli_conn_remote_name(cli->conn);
+			const struct sockaddr_storage *remote_sockaddr =
+				smbXcli_conn_remote_sockaddr(cli->conn);
+
 			/* Always try and create an schannel netlogon pipe. */
 			TALLOC_FREE(c->netlogon_creds);
 			nt_status = cli_rpc_pipe_open_schannel(
 				cli, c->msg_ctx, table, NCACN_NP,
 				domain_name,
+				remote_name,
+				remote_sockaddr,
 				&pipe_hnd, c, &c->netlogon_creds);
 			if (!NT_STATUS_IS_OK(nt_status)) {
 				DEBUG(0, ("Could not initialise schannel netlogon pipe. Error was %s\n",
@@ -206,15 +214,6 @@ int run_rpc_command(struct net_context *c,
 			}
 		} else {
 			if (conn_flags & NET_FLAGS_SEAL) {
-				struct cli_credentials *creds = NULL;
-
-				creds = net_context_creds(c, mem_ctx);
-				if (creds == NULL) {
-					DBG_ERR("net_rpc_ntlm_creds() failed\n");
-					nt_status = NT_STATUS_INTERNAL_ERROR;
-					goto fail;
-				}
-
 				nt_status = cli_rpc_pipe_open_with_creds(
 					cli, table,
 					(conn_flags & NET_FLAGS_TCP) ?
@@ -222,7 +221,8 @@ int run_rpc_command(struct net_context *c,
 					DCERPC_AUTH_TYPE_NTLMSSP,
 					DCERPC_AUTH_LEVEL_PRIVACY,
 					smbXcli_conn_remote_name(cli->conn),
-					creds, &pipe_hnd);
+					smbXcli_conn_remote_sockaddr(cli->conn),
+					c->creds, &pipe_hnd);
 			} else {
 				nt_status = cli_rpc_pipe_open_noauth(
 					cli, table,
@@ -377,6 +377,8 @@ static int net_rpc_oldjoin(struct net_context *c, int argc, const char **argv)
 		return 0;
 	}
 
+	net_warn_member_options();
+
 	mem_ctx = talloc_init("net_rpc_oldjoin");
 	if (!mem_ctx) {
 		return -1;
@@ -496,6 +498,8 @@ int net_rpc_testjoin(struct net_context *c, int argc, const char **argv)
 		return 0;
 	}
 
+	net_warn_member_options();
+
 	mem_ctx = talloc_init("net_rpc_testjoin");
 	if (!mem_ctx) {
 		return -1;
@@ -569,6 +573,8 @@ static int net_rpc_join_newstyle(struct net_context *c, int argc, const char **a
 			 "    Join a domain the new way\n");
 		return 0;
 	}
+
+	net_warn_member_options();
 
 	mem_ctx = talloc_init("net_rpc_join_newstyle");
 	if (!mem_ctx) {
@@ -690,6 +696,8 @@ int net_rpc_join(struct net_context *c, int argc, const char **argv)
 		d_printf(_("cannot join as standalone machine\n"));
 		return -1;
 	}
+
+	net_warn_member_options();
 
 	if (strlen(lp_netbios_name()) > 15) {
 		d_printf(_("Our netbios name can be at most 15 chars long, "
@@ -820,6 +828,8 @@ int net_rpc_info(struct net_context *c, int argc, const char **argv)
 			 _("Display information about the domain"));
 		return 0;
 	}
+
+	net_warn_member_options();
 
 	return run_rpc_command(c, NULL, &ndr_table_samr,
 			       NET_FLAGS_PDC, rpc_info_internals,
@@ -1312,10 +1322,10 @@ int net_rpc_user(struct net_context *c, int argc, const char **argv)
 	if (status != 0) {
 		return -1;
 	}
-	libnetapi_set_username(c->netapi_ctx, c->opt_user_name);
-	libnetapi_set_password(c->netapi_ctx, c->opt_password);
-	if (c->opt_kerberos) {
-		libnetapi_set_use_kerberos(c->netapi_ctx);
+
+	status = libnetapi_set_creds(c->netapi_ctx, c->creds);
+	if (status != 0) {
+		return -1;
 	}
 
 	if (argc == 0) {
@@ -3505,10 +3515,10 @@ int net_rpc_group(struct net_context *c, int argc, const char **argv)
 	if (status != 0) {
 		return -1;
 	}
-	libnetapi_set_username(c->netapi_ctx, c->opt_user_name);
-	libnetapi_set_password(c->netapi_ctx, c->opt_password);
-	if (c->opt_kerberos) {
-		libnetapi_set_use_kerberos(c->netapi_ctx);
+
+	status = libnetapi_set_creds(c->netapi_ctx, c->creds);
+	if (status != 0) {
+		return -1;
 	}
 
 	if (argc == 0) {
@@ -3972,7 +3982,7 @@ static int rpc_share_migrate_shares(struct net_context *c, int argc,
  * @param state	arg-pointer
  *
  **/
-static NTSTATUS copy_fn(const char *mnt, struct file_info *f,
+static NTSTATUS copy_fn(struct file_info *f,
 		    const char *mask, void *state)
 {
 	static NTSTATUS nt_status;
@@ -5476,11 +5486,12 @@ int net_rpc_share(struct net_context *c, int argc, const char **argv)
 	if (status != 0) {
 		return -1;
 	}
-	libnetapi_set_username(c->netapi_ctx, c->opt_user_name);
-	libnetapi_set_password(c->netapi_ctx, c->opt_password);
-	if (c->opt_kerberos) {
-		libnetapi_set_use_kerberos(c->netapi_ctx);
+
+	status = libnetapi_set_creds(c->netapi_ctx, c->creds);
+	if (status != 0) {
+		return -1;
 	}
+
 
 	if (argc == 0) {
 		if (c->display_usage) {
@@ -5758,10 +5769,10 @@ int net_rpc_file(struct net_context *c, int argc, const char **argv)
 	if (status != 0) {
 		return -1;
 	}
-	libnetapi_set_username(c->netapi_ctx, c->opt_user_name);
-	libnetapi_set_password(c->netapi_ctx, c->opt_password);
-	if (c->opt_kerberos) {
-		libnetapi_set_use_kerberos(c->netapi_ctx);
+
+	status = libnetapi_set_creds(c->netapi_ctx, c->creds);
+	if (status != 0) {
+		return -1;
 	}
 
 	if (argc == 0) {
@@ -8369,13 +8380,10 @@ int net_rpc(struct net_context *c, int argc, const char **argv)
 	if (status != 0) {
 		return -1;
 	}
-	libnetapi_set_username(c->netapi_ctx, c->opt_user_name);
-	libnetapi_set_password(c->netapi_ctx, c->opt_password);
-	if (c->opt_kerberos) {
-		libnetapi_set_use_kerberos(c->netapi_ctx);
-	}
-	if (c->opt_ccache) {
-		libnetapi_set_use_ccache(c->netapi_ctx);
+
+	status = libnetapi_set_creds(c->netapi_ctx, c->creds);
+	if (status != 0) {
+		return -1;
 	}
 
 	return net_run_function(c, argc, argv, "net rpc", func);

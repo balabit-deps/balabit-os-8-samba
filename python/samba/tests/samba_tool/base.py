@@ -21,11 +21,12 @@
 #
 # These can all be accesses via os.environ["VARIBLENAME"] when needed
 
+import os
 import random
 import string
 from samba.auth import system_session
 from samba.samdb import SamDB
-from samba.compat import StringIO
+from io import StringIO
 from samba.netcmd.main import cmd_sambatool
 import samba.tests
 
@@ -105,8 +106,11 @@ class SambaToolCmdTest(samba.tests.BlackboxTestCase):
         return (result, cmd.outf.getvalue(), cmd.errf.getvalue())
 
     def assertCmdSuccess(self, exit, out, err, msg=""):
-        self.assertIsNone(exit, msg="exit[%s] stdout[%s] stderr[%s]: %s" % (
-                          exit, out, err, msg))
+        # Make sure we allow '\n]\n' in stdout and stderr
+        # without causing problems with the subunit protocol.
+        # We just inject a space...
+        msg = "exit[%s] stdout[%s] stderr[%s]: %s" % (exit, out, err, msg)
+        self.assertIsNone(exit, msg=msg.replace("\n]\n", "\n] \n"))
 
     def assertCmdFail(self, val, msg=""):
         self.assertIsNotNone(val, msg)
@@ -125,11 +129,35 @@ class SambaToolCmdTest(samba.tests.BlackboxTestCase):
         return name
 
     def randomXid(self):
-        # pick some hopefully unused, high UID/GID range to avoid interference
+        # pick some unused, high UID/GID range to avoid interference
         # from the system the test runs on
-        xid = random.randint(4711000, 4799000)
-        return xid
+
+        # initialize a list to store used IDs
+        try:
+            self.used_xids
+        except AttributeError:
+            self.used_xids = []
+
+        # try to get an unused ID
+        failed = 0
+        while failed < 50:
+            xid = random.randint(4711000, 4799000)
+            if xid not in self.used_xids:
+                self.used_xids += [xid]
+                return xid
+            failed += 1
+        assert False, "No Xid are available"
 
     def assertWithin(self, val1, val2, delta, msg=""):
         """Assert that val1 is within delta of val2, useful for time computations"""
         self.assertTrue(((val1 + delta) > val2) and ((val1 - delta) < val2), msg)
+
+    def cleanup_join(self, netbios_name):
+        (result, out, err) \
+            = self.runsubcmd("domain",
+                             "demote",
+                             ("--remove-other-dead-server=%s " % netbios_name),
+                             ("-U%s%%%s" % (os.environ["USERNAME"], os.environ["PASSWORD"])),
+                             ("--server=%s" % os.environ["SERVER"]))
+
+        self.assertCmdSuccess(result, out, err)

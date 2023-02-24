@@ -31,6 +31,8 @@
 #include "libsmb/libsmb.h"
 #include "lib/param/param.h"
 #include "auth/gensec/gensec.h"
+#include "libcli/auth/netlogon_creds_cli.h"
+#include "lib/cmdline/cmdline.h"
 
 NTSTATUS net_rpc_lookup_name(struct net_context *c,
 			     TALLOC_CTX *mem_ctx, struct cli_state *cli,
@@ -108,24 +110,17 @@ NTSTATUS connect_to_service(struct net_context *c,
 			    const char *service_type)
 {
 	NTSTATUS nt_status;
-	enum smb_signing_setting signing_setting = SMB_SIGNING_DEFAULT;
-	struct cli_credentials *creds = NULL;
-
-	creds = net_context_creds(c, c);
-	if (creds == NULL) {
-		d_fprintf(stderr, "net_context_creds() failed.\n");
-		return NT_STATUS_INTERNAL_ERROR;
-	}
+	int flags = 0;
 
 	if (strequal(service_type, "IPC")) {
-		signing_setting = SMB_SIGNING_IPC_DEFAULT;
+		flags |= CLI_FULL_CONNECTION_IPC;
 	}
 
 	nt_status = cli_full_connection_creds(cli_ctx, NULL, server_name,
 					server_ss, c->opt_port,
 					service_name, service_type,
-					creds, 0,
-					signing_setting);
+					c->creds,
+					flags);
 	if (!NT_STATUS_IS_OK(nt_status)) {
 		d_fprintf(stderr, _("Could not connect to server %s\n"),
 			  server_name);
@@ -146,16 +141,6 @@ NTSTATUS connect_to_service(struct net_context *c,
 		    NT_STATUS_V(NT_STATUS_ACCOUNT_DISABLED))
 			d_fprintf(stderr, _("The account was disabled.\n"));
 		return nt_status;
-	}
-
-	if (c->smb_encrypt) {
-		nt_status = cli_cm_force_encryption_creds(*cli_ctx,
-							  creds,
-							  service_name);
-		if (!NT_STATUS_IS_OK(nt_status)) {
-			cli_shutdown(*cli_ctx);
-			*cli_ctx = NULL;
-		}
 	}
 
 	return nt_status;
@@ -195,7 +180,8 @@ NTSTATUS connect_to_ipc_anonymous(struct net_context *c,
 	nt_status = cli_full_connection_creds(cli_ctx, c->opt_requester_name,
 					server_name, server_ss, c->opt_port,
 					"IPC$", "IPC",
-					anon_creds, 0, SMB_SIGNING_OFF);
+					anon_creds,
+					CLI_FULL_CONNECTION_IPC);
 
 	if (NT_STATUS_IS_OK(nt_status)) {
 		return nt_status;
@@ -277,6 +263,8 @@ int net_use_krb_machine_account(struct net_context *c)
 	}
 	c->opt_user_name = user_name;
 	c->opt_user_specified = true;
+
+	cli_credentials_set_machine_account(c->creds, c->lp_ctx);
 	return 0;
 }
 
@@ -443,140 +431,16 @@ done:
 /****************************************************************************
 ****************************************************************************/
 
+/* TODO FIXME: Pass cli_creds via net_context and get rid of this function. */
 const char *net_prompt_pass(struct net_context *c, const char *user)
 {
-	char *prompt = NULL;
-	char pwd[256] = {0};
-	int rc;
+	struct cli_credentials *creds = samba_cmdline_get_creds();
 
-	if (c->opt_password) {
-		return c->opt_password;
+	if (c->opt_password == NULL) {
+		c->opt_password = cli_credentials_get_password(creds);
 	}
 
-	if (c->opt_machine_pass) {
-		return NULL;
-	}
-
-	if (c->opt_kerberos && !c->opt_user_specified) {
-		return NULL;
-	}
-
-	if (c->opt_ccache) {
-		return NULL;
-	}
-
-	if (asprintf(&prompt, _("Enter %s's password:"), user) == -1) {
-		return NULL;
-	}
-
-	rc = samba_getpass(prompt, pwd, sizeof(pwd), false, false);
-	SAFE_FREE(prompt);
-	if (rc < 0) {
-		return NULL;
-	}
-
-	return SMB_STRDUP(pwd);
-}
-
-struct cli_credentials *net_context_creds(struct net_context *c,
-					  TALLOC_CTX *mem_ctx)
-{
-	struct cli_credentials *creds = NULL;
-	struct loadparm_context *lp_ctx = NULL;
-
-	c->opt_password = net_prompt_pass(c, c->opt_user_name);
-
-	creds = cli_credentials_init(mem_ctx);
-	if (creds == NULL) {
-		d_printf("ERROR: Unable to allocate memory!\n");
-		exit(-1);
-	}
-
-	lp_ctx = loadparm_init_s3(creds, loadparm_s3_helpers());
-	if (lp_ctx == NULL) {
-		d_printf("loadparm_init_s3 failed\n");
-		exit(-1);
-	}
-
-	cli_credentials_guess(creds, lp_ctx);
-
-	if (c->opt_kerberos && c->opt_user_specified) {
-		cli_credentials_set_kerberos_state(creds,
-						   CRED_AUTO_USE_KERBEROS);
-	} else if (c->opt_kerberos) {
-		cli_credentials_set_kerberos_state(creds,
-						   CRED_MUST_USE_KERBEROS);
-	} else {
-		cli_credentials_set_kerberos_state(creds,
-						   CRED_DONT_USE_KERBEROS);
-	}
-
-	if (c->opt_ccache) {
-		uint32_t features;
-
-		features = cli_credentials_get_gensec_features(creds);
-		features |= GENSEC_FEATURE_NTLM_CCACHE;
-		cli_credentials_set_gensec_features(creds, features);
-
-		if (c->opt_password != NULL && strlen(c->opt_password) == 0) {
-			/*
-			 * some callers pass "" as no password
-			 *
-			 * GENSEC_FEATURE_NTLM_CCACHE only handles
-			 * NULL as no password.
-			 */
-			c->opt_password = NULL;
-		}
-	}
-
-	if (c->opt_user_specified) {
-		const char *default_domain =
-			cli_credentials_get_domain(creds);
-		char *username = NULL;
-		const char *domain = NULL;
-		char *tmp = NULL;
-		char *p = NULL;
-		bool is_default;
-
-		tmp = talloc_strdup(creds, c->opt_user_name);
-		if (tmp == NULL) {
-			exit(-1);
-		}
-		username = tmp;
-
-		/* allow for workgroups as part of the username */
-		if ((p = strchr_m(tmp, '\\')) ||
-		    (p = strchr_m(tmp, '/')) ||
-		    (p = strchr_m(tmp, *lp_winbind_separator()))) {
-			*p = 0;
-			username = p + 1;
-			domain = tmp;
-		}
-
-		if (domain == NULL) {
-			domain = c->opt_workgroup;
-		}
-
-		/*
-		 * Don't overwrite the value from cli_credentials_guess()
-		 * with CRED_SPECIFIED, unless we have to.
-		 */
-		is_default = strequal_m(domain, default_domain);
-		if (!is_default) {
-			cli_credentials_set_domain(creds,
-						   domain,
-						   CRED_SPECIFIED);
-		}
-
-		cli_credentials_set_username(creds,
-					     username,
-					     CRED_SPECIFIED);
-		cli_credentials_set_password(creds,
-					     c->opt_password,
-					     CRED_SPECIFIED);
-	}
-
-	return creds;
+	return c->opt_password;
 }
 
 int net_run_function(struct net_context *c, int argc, const char **argv,
@@ -613,6 +477,19 @@ void net_display_usage_from_functable(struct functable *table)
 	for (i=0; table[i].funcname != NULL; i++) {
 		d_printf("%s\n", _(table[i].usage));
 	}
+}
+
+void net_warn_member_options(void)
+{
+	TALLOC_CTX *frame = talloc_stackframe();
+	struct loadparm_context *lp_ctx = NULL;
+
+	lp_ctx = loadparm_init_s3(frame, loadparm_s3_helpers());
+	if (lp_ctx != NULL) {
+		netlogon_creds_cli_warn_options(lp_ctx);
+	}
+
+	TALLOC_FREE(frame);
 }
 
 const char *net_share_type_str(int num_type)

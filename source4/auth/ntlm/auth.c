@@ -178,10 +178,11 @@ static void auth_check_password_next(struct tevent_req *req);
  *
  * @param ev The tevent context the request should operate on
  *
- * @param auth_ctx Supplies the challenges and some other data. 
- *                  Must be created with make_auth_context(), and the challenges should be 
- *                  filled in, either at creation or by calling the challenge geneation 
- *                  function auth_get_challenge().  
+ * @param auth_ctx Supplies the challenges and some other data.  Must
+ *                 be created with make_auth_context(), and the
+ *                 challenges should be filled in, either at creation
+ *                 or by calling the challenge generation function
+ *                 auth_get_challenge().
  *
  * @param user_info Contains the user supplied components, including the passwords.
  *
@@ -219,16 +220,11 @@ _PUBLIC_ struct tevent_req *auth_check_password_send(TALLOC_CTX *mem_ctx,
 	state->user_info	= user_info;
 	state->authoritative	= 1;
 
-	if (!user_info->mapped_state) {
+	if (user_info->mapped.account_name == NULL) {
 		struct auth_usersupplied_info *user_info_tmp;
 
 		/*
 		 * We don't really do any mapping here.
-		 *
-		 * So we don't set user_info->mapped_state,
-		 * but we set mapped.domain_name and
-		 * mapped.account_name to the client
-		 * provided values.
 		 *
 		 * It's up to the backends to do mappings
 		 * for their authentication.

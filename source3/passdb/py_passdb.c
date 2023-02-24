@@ -27,6 +27,7 @@
 #include "passdb.h"
 #include "secrets.h"
 #include "idmap.h"
+#include "lib/util/string_wrappers.h"
 
 #ifndef Py_TYPE /* Py_TYPE is only available on Python > 2.6 */
 #define Py_TYPE(ob)             (((PyObject*)(ob))->ob_type)
@@ -1358,12 +1359,19 @@ static int py_groupmap_set_nt_name(PyObject *obj, PyObject *value, void *closure
 	GROUP_MAP *group_map = (GROUP_MAP *)pytalloc_get_ptr(obj);
 
 	PY_CHECK_TYPE(&PyUnicode_Type, value, return -1;);
-	if (value == Py_None) {
-		fstrcpy(group_map->nt_name, NULL);
-	} else {
-		fstrcpy(group_map->nt_name, PyUnicode_AsUTF8(value));
+	if (group_map->nt_name != NULL) {
+		TALLOC_FREE(group_map->nt_name);
 	}
-	talloc_free(frame);
+	if (value == Py_None) {
+		group_map->nt_name = talloc_strdup(group_map, "");
+	} else {
+		group_map->nt_name = talloc_strdup(group_map,
+						   PyUnicode_AsUTF8(value));
+	}
+	TALLOC_FREE(frame);
+	if (group_map->nt_name == NULL) {
+		return -1;
+	}
 	return 0;
 }
 
@@ -1388,12 +1396,19 @@ static int py_groupmap_set_comment(PyObject *obj, PyObject *value, void *closure
 	GROUP_MAP *group_map = (GROUP_MAP *)pytalloc_get_ptr(obj);
 
 	PY_CHECK_TYPE(&PyUnicode_Type, value, return -1;);
-	if (value == Py_None) {
-		fstrcpy(group_map->comment, NULL);
-	} else {
-		fstrcpy(group_map->comment, PyUnicode_AsUTF8(value));
+	if (group_map->comment != NULL) {
+		TALLOC_FREE(group_map->comment);
 	}
-	talloc_free(frame);
+	if (value == Py_None) {
+		group_map->comment = talloc_strdup(group_map, "");
+	} else {
+		group_map->comment = talloc_strdup(group_map,
+						   PyUnicode_AsUTF8(value));
+	}
+	TALLOC_FREE(frame);
+	if (group_map->comment == NULL) {
+		return -1;
+	}
 	return 0;
 }
 
@@ -2071,9 +2086,8 @@ static PyObject *py_pdb_enum_group_mapping(PyObject *self, PyObject *args)
 	struct dom_sid *domain_sid = NULL;
 	GROUP_MAP **gmap = NULL;
 	GROUP_MAP *group_map;
-	size_t num_entries;
+	size_t i, num_entries;
 	PyObject *py_gmap_list, *py_group_map;
-	int i;
 
 	if (!PyArg_ParseTuple(args, "|O!ii:enum_group_mapping", dom_sid_Type, &py_domain_sid,
 					&lsa_sidtype_value, &unix_only)) {
@@ -2140,10 +2154,9 @@ static PyObject *py_pdb_enum_group_members(PyObject *self, PyObject *args)
 	PyObject *py_group_sid;
 	struct dom_sid *group_sid;
 	uint32_t *member_rids;
-	size_t num_members;
+	size_t i, num_members;
 	PyObject *py_sid_list;
 	struct dom_sid *domain_sid, *member_sid;
-	int i;
 
 	if (!PyArg_ParseTuple(args, "O!:enum_group_members", dom_sid_Type, &py_group_sid)) {
 		talloc_free(frame);
@@ -2198,7 +2211,7 @@ static PyObject *py_pdb_enum_group_memberships(PyObject *self, PyObject *args)
 	TALLOC_CTX *frame = talloc_stackframe();
 	NTSTATUS status;
 	struct pdb_methods *methods;
-	int i;
+	uint32_t i;
 
 	struct samu *sam_acct;
 	PyObject *py_sam_acct;
@@ -2529,8 +2542,7 @@ static PyObject *py_pdb_enum_aliasmem(PyObject *self, PyObject *args)
 	PyObject *py_alias_sid;
 	struct dom_sid *alias_sid, *member_sid, *tmp_sid;
 	PyObject *py_member_list, *py_member_sid;
-	size_t num_members;
-	int i;
+	size_t i, num_members;
 
 	if (!PyArg_ParseTuple(args, "O!:enum_aliasmem", dom_sid_Type, &py_alias_sid)) {
 		talloc_free(frame);
@@ -3116,10 +3128,9 @@ static PyObject *py_pdb_enum_trusteddoms(PyObject *self, PyObject *unused)
 	TALLOC_CTX *frame = talloc_stackframe();
 	NTSTATUS status;
 	struct pdb_methods *methods;
-	uint32_t num_domains;
+	uint32_t i, num_domains;
 	struct trustdom_info **domains;
 	PyObject *py_domain_list, *py_dict;
-	int i;
 
 	methods = pytalloc_get_ptr(self);
 
@@ -3377,10 +3388,9 @@ static PyObject *py_pdb_enum_trusted_domains(PyObject *self, PyObject *args)
 	TALLOC_CTX *frame = talloc_stackframe();
 	NTSTATUS status;
 	struct pdb_methods *methods;
-	uint32_t num_domains;
+	uint32_t i, num_domains;
 	struct pdb_trusted_domain **td_info;
 	PyObject *py_td_info, *py_domain_info;
-	int i;
 
 	methods = pytalloc_get_ptr(self);
 

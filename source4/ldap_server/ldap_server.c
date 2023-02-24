@@ -30,10 +30,10 @@
 #include "../lib/util/dlinklist.h"
 #include "../lib/util/asn1.h"
 #include "ldap_server/ldap_server.h"
-#include "smbd/service_task.h"
-#include "smbd/service_stream.h"
-#include "smbd/service.h"
-#include "smbd/process_model.h"
+#include "samba/service_task.h"
+#include "samba/service_stream.h"
+#include "samba/service.h"
+#include "samba/process_model.h"
 #include "lib/tls/tls.h"
 #include "lib/messaging/irpc.h"
 #include <ldb.h>
@@ -48,6 +48,8 @@
 #include "../libcli/util/tstream.h"
 #include "libds/common/roles.h"
 #include "lib/util/time.h"
+
+#undef strcasecmp
 
 static void ldapsrv_terminate_connection_done(struct tevent_req *subreq);
 
@@ -253,7 +255,9 @@ static int ldapsrv_load_limits(struct ldapsrv_connection *conn)
 			continue;
 		}
 		if (strcasecmp("MaxQueryDuration", policy_name) == 0) {
-			conn->limits.search_timeout = policy_value;
+			if (policy_value > 0) {
+				conn->limits.search_timeout = policy_value;
+			}
 			continue;
 		}
 	}
@@ -300,7 +304,6 @@ static void ldapsrv_accept(struct stream_connection *c,
 	struct ldapsrv_connection *conn;
 	struct cli_credentials *server_credentials;
 	struct socket_address *socket_address;
-	NTSTATUS status;
 	int port;
 	int ret;
 	struct tevent_req *subreq;
@@ -350,18 +353,12 @@ static void ldapsrv_accept(struct stream_connection *c,
 		conn->global_catalog = true;
 	}
 
-	server_credentials = cli_credentials_init(conn);
+	server_credentials = cli_credentials_init_server(conn, conn->lp_ctx);
 	if (!server_credentials) {
 		stream_terminate_connection(c, "Failed to init server credentials\n");
 		return;
 	}
 
-	cli_credentials_set_conf(server_credentials, conn->lp_ctx);
-	status = cli_credentials_set_machine_account(server_credentials, conn->lp_ctx);
-	if (!NT_STATUS_IS_OK(status)) {
-		stream_terminate_connection(c, talloc_asprintf(conn, "Failed to obtain server credentials, perhaps a standalone server?: %s\n", nt_errstr(status)));
-		return;
-	}
 	conn->server_credentials = server_credentials;
 
 	conn->session_info = session_info;
@@ -594,10 +591,7 @@ static void ldapsrv_call_read_done(struct tevent_req *subreq)
 		return;
 	}
 
-	if (!asn1_load(asn1, blob)) {
-		ldapsrv_terminate_connection(conn, "asn1_load failed");
-		return;
-	}
+	asn1_load_nocopy(asn1, blob.data, blob.length);
 
 	limits.max_search_size =
 		lpcfg_ldap_max_search_request_size(conn->lp_ctx);
@@ -612,6 +606,7 @@ static void ldapsrv_call_read_done(struct tevent_req *subreq)
 	}
 
 	data_blob_free(&blob);
+	TALLOC_FREE(asn1);
 
 
 	/* queue the call in the global queue */
@@ -720,7 +715,7 @@ static void ldapsrv_call_writev_start(struct ldapsrv_call *call)
 
 		/*
 		 * Overflow is harmless here, just used below to
-		 * decide if to read or write, but checkd above anyway
+		 * decide if to read or write, but checked above anyway
 		 */
 		length += reply->blob.length;
 

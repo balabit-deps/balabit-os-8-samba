@@ -184,7 +184,8 @@ def CHECK_TYPE_IN(conf, t, headers=None, alternate=None, define=None):
 
 @conf
 def CHECK_VARIABLE(conf, v, define=None, always=False,
-                   headers=None, msg=None, lib=None):
+                   headers=None, msg=None, lib=None,
+                   mandatory=False):
     '''check for a variable declaration (or define)'''
     if define is None:
         define = 'HAVE_%s' % v.upper()
@@ -208,6 +209,7 @@ def CHECK_VARIABLE(conf, v, define=None, always=False,
                       lib=lib,
                       headers=headers,
                       define=define,
+                      mandatory=mandatory,
                       always=always)
 
 
@@ -905,9 +907,15 @@ def ADD_EXTRA_INCLUDES(conf, includes):
 
 
 
-def CURRENT_CFLAGS(bld, target, cflags, allow_warnings=False, hide_symbols=False):
+def CURRENT_CFLAGS(bld, target, cflags,
+                   allow_warnings=False,
+                   use_hostcc=False,
+                   hide_symbols=False):
     '''work out the current flags. local flags are added first'''
-    ret = TO_LIST(cflags)
+    ret = []
+    if use_hostcc:
+        ret += ['-D_SAMBA_HOSTCC_']
+    ret += TO_LIST(cflags)
     if not 'EXTRA_CFLAGS' in bld.env:
         list = []
     else:

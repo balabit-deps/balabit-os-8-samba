@@ -359,12 +359,6 @@ sub mk_krb5_conf($$)
 ";
 	}
 
-	print KRB5CONF "
-[realms]
- $our_realms_stanza
-";
-
-
         if (defined($ctx->{tlsdir})) {
 	       print KRB5CONF "
 
@@ -378,7 +372,32 @@ sub mk_krb5_conf($$)
 
 ";
         }
+
+	print KRB5CONF "
+[realms]
+ $our_realms_stanza
+";
+
 	close(KRB5CONF);
+}
+
+sub append_krb5_conf_trust_realms($$)
+{
+	my ($ctx) = @_;
+
+	unless (open(KRB5CONF, ">>$ctx->{KRB5_CONFIG}")) {
+	        warn("can't open $ctx->{KRB5_CONFIG}$?");
+		return undef;
+	}
+
+	my $trust_realms_stanza = mk_realms_stanza($ctx->{TRUST_REALM},
+						   $ctx->{TRUST_DNSNAME},
+						   $ctx->{TRUST_DOMAIN},
+						   $ctx->{TRUST_SERVER_IP});
+
+	print KRB5CONF " $trust_realms_stanza";
+
+	close(KRB5CONF)
 }
 
 sub mk_realms_stanza($$$$)
@@ -386,26 +405,36 @@ sub mk_realms_stanza($$$$)
 	my ($realm, $dnsname, $domain, $kdc_ipv4) = @_;
 	my $lc_domain = lc($domain);
 
+	# The   pkinit_require_krbtgt_otherName = false
+	# is just because the certificates we have saved
+	# do not have the realm in the subjectAltName
+	# (specially encoded as a principal)
+	# per
+	# https://github.com/heimdal/heimdal/wiki/Setting-up-PK-INIT-and-Certificates
 	my $realms_stanza = "
  $realm = {
   kdc = $kdc_ipv4:88
   admin_server = $kdc_ipv4:88
   default_domain = $dnsname
+  pkinit_require_krbtgt_otherName = false
  }
  $dnsname = {
   kdc = $kdc_ipv4:88
   admin_server = $kdc_ipv4:88
   default_domain = $dnsname
+  pkinit_require_krbtgt_otherName = false
  }
  $domain = {
   kdc = $kdc_ipv4:88
   admin_server = $kdc_ipv4:88
   default_domain = $dnsname
+  pkinit_require_krbtgt_otherName = false
  }
  $lc_domain = {
   kdc = $kdc_ipv4:88
   admin_server = $kdc_ipv4:88
   default_domain = $dnsname
+  pkinit_require_krbtgt_otherName = false
  }
 
 ";
@@ -579,6 +608,8 @@ sub get_interface($)
 		lclnt4dc2smb1	  => 55,
 		fipsdc            => 56,
 		fipsadmember      => 57,
+		offlineadmem      => 58,
+		s2kmember         => 59,
 		admemidmapnss     => 60,
 
 		rootdnsforwarder  => 64,

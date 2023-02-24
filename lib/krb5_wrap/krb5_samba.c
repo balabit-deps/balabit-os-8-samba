@@ -237,7 +237,7 @@ krb5_error_code smb_krb5_mk_error(krb5_context context,
 		return code;
 	}
 
-	errpkt.error = error_code;
+	errpkt.error = error_code - ERROR_TABLE_BASE_krb5;
 
 	errpkt.text.length = 0;
 	if (e_text != NULL) {
@@ -1079,7 +1079,7 @@ krb5_error_code smb_krb5_renew_ticket(const char *ccache_string,
 		goto done;
 	}
 
-	DEBUG(10,("smb_krb5_renew_ticket: using %s as ccache\n", ccache_string));
+	DBG_DEBUG("Using %s as ccache for '%s'\n", ccache_string, client_string);
 
 	/* FIXME: we should not fall back to defaults */
 	ret = krb5_cc_resolve(context, discard_const_p(char, ccache_string), &ccache);
@@ -1101,7 +1101,10 @@ krb5_error_code smb_krb5_renew_ticket(const char *ccache_string,
 
 	ret = krb5_get_renewed_creds(context, &creds, client, ccache, discard_const_p(char, service_string));
 	if (ret) {
-		DEBUG(10,("smb_krb5_renew_ticket: krb5_get_kdc_cred failed: %s\n", error_message(ret)));
+		DBG_DEBUG("krb5_get_renewed_creds using ccache '%s' "
+			  "for client '%s' and service '%s' failed: %s\n",
+			  ccache_string, client_string, service_string,
+			  error_message(ret));
 		goto done;
 	}
 
@@ -3572,15 +3575,9 @@ int ads_krb5_cli_get_ticket(TALLOC_CTX *mem_ctx,
 	krb5_ccache ccdef = NULL;
 	krb5_auth_context auth_context = NULL;
 	krb5_enctype enc_types[] = {
-#ifdef HAVE_ENCTYPE_AES256_CTS_HMAC_SHA1_96
 		ENCTYPE_AES256_CTS_HMAC_SHA1_96,
-#endif
-#ifdef HAVE_ENCTYPE_AES128_CTS_HMAC_SHA1_96
 		ENCTYPE_AES128_CTS_HMAC_SHA1_96,
-#endif
 		ENCTYPE_ARCFOUR_HMAC,
-		ENCTYPE_DES_CBC_MD5,
-		ENCTYPE_DES_CBC_CRC,
 		ENCTYPE_NULL};
 	bool ok;
 

@@ -77,6 +77,7 @@ NTSTATUS auth_system_session_info(TALLOC_CTX *parent_ctx,
 	struct auth_user_info_dc *user_info_dc = NULL;
 	struct auth_session_info *session_info = NULL;
 	TALLOC_CTX *mem_ctx = NULL;
+	bool ok;
 
 	mem_ctx = talloc_new(parent_ctx);
 	if (mem_ctx == NULL) {
@@ -101,7 +102,10 @@ NTSTATUS auth_system_session_info(TALLOC_CTX *parent_ctx,
 		return NT_STATUS_NO_MEMORY;
 	}
 
-	cli_credentials_set_conf(session_info->credentials, lp_ctx);
+	ok = cli_credentials_set_conf(session_info->credentials, lp_ctx);
+	if (!ok) {
+		return NT_STATUS_INTERNAL_ERROR;
+	}
 
 	cli_credentials_set_machine_account_pending(session_info->credentials, lp_ctx);
 	*_session_info = session_info;
@@ -115,13 +119,13 @@ NTSTATUS auth_system_user_info_dc(TALLOC_CTX *mem_ctx, const char *netbios_name,
 	struct auth_user_info_dc *user_info_dc;
 	struct auth_user_info *info;
 
-	user_info_dc = talloc(mem_ctx, struct auth_user_info_dc);
+	user_info_dc = talloc_zero(mem_ctx, struct auth_user_info_dc);
 	NT_STATUS_HAVE_NO_MEMORY(user_info_dc);
 
 	/* This returns a pointer to a struct dom_sid, which is the
 	 * same as a 1 element list of struct dom_sid */
 	user_info_dc->num_sids = 1;
-	user_info_dc->sids = dom_sid_parse_talloc(user_info_dc, SID_NT_SYSTEM);
+	user_info_dc->sids = dom_sid_dup(user_info_dc, &global_sid_System);
 	NT_STATUS_HAVE_NO_MEMORY(user_info_dc->sids);
 
 	/* annoying, but the Anonymous really does have a session key, 
@@ -191,7 +195,7 @@ static NTSTATUS auth_domain_admin_user_info_dc(TALLOC_CTX *mem_ctx,
 	struct auth_user_info_dc *user_info_dc;
 	struct auth_user_info *info;
 
-	user_info_dc = talloc(mem_ctx, struct auth_user_info_dc);
+	user_info_dc = talloc_zero(mem_ctx, struct auth_user_info_dc);
 	NT_STATUS_HAVE_NO_MEMORY(user_info_dc);
 
 	user_info_dc->num_sids = 7;
@@ -322,6 +326,7 @@ _PUBLIC_ NTSTATUS auth_anonymous_session_info(TALLOC_CTX *parent_ctx,
 	struct auth_user_info_dc *user_info_dc = NULL;
 	struct auth_session_info *session_info = NULL;
 	TALLOC_CTX *mem_ctx = talloc_new(parent_ctx);
+	bool ok;
 	
 	nt_status = auth_anonymous_user_info_dc(mem_ctx,
 					       lpcfg_netbios_name(lp_ctx),
@@ -342,7 +347,10 @@ _PUBLIC_ NTSTATUS auth_anonymous_session_info(TALLOC_CTX *parent_ctx,
 		return NT_STATUS_NO_MEMORY;
 	}
 
-	cli_credentials_set_conf(session_info->credentials, lp_ctx);
+	ok = cli_credentials_set_conf(session_info->credentials, lp_ctx);
+	if (!ok) {
+		return NT_STATUS_INTERNAL_ERROR;
+	}
 	cli_credentials_set_anonymous(session_info->credentials);
 	
 	*_session_info = session_info;
@@ -356,13 +364,13 @@ _PUBLIC_ NTSTATUS auth_anonymous_user_info_dc(TALLOC_CTX *mem_ctx,
 {
 	struct auth_user_info_dc *user_info_dc;
 	struct auth_user_info *info;
-	user_info_dc = talloc(mem_ctx, struct auth_user_info_dc);
+	user_info_dc = talloc_zero(mem_ctx, struct auth_user_info_dc);
 	NT_STATUS_HAVE_NO_MEMORY(user_info_dc);
 
 	/* This returns a pointer to a struct dom_sid, which is the
 	 * same as a 1 element list of struct dom_sid */
 	user_info_dc->num_sids = 1;
-	user_info_dc->sids = dom_sid_parse_talloc(user_info_dc, SID_NT_ANONYMOUS);
+	user_info_dc->sids = dom_sid_dup(user_info_dc, &global_sid_Anonymous);
 	NT_STATUS_HAVE_NO_MEMORY(user_info_dc->sids);
 
 	/* annoying, but the Anonymous really does have a session key... */

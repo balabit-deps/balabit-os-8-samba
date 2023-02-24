@@ -33,6 +33,8 @@
 #include "messages.h"
 #include "lib/afs/afs_funcs.h"
 #include "lib/util_path.h"
+#include "lib/util/string_wrappers.h"
+#include "source3/lib/substitute.h"
 
 bool canonicalize_connect_path(connection_struct *conn)
 {
@@ -558,17 +560,17 @@ static NTSTATUS make_connection_snum(struct smbXsrv_connection *xconn,
 	/* Case options for the share. */
 	conn_setup_case_options(conn);
 
-	conn->encrypt_level = lp_smb_encrypt(snum);
-	if (conn->encrypt_level > SMB_SIGNING_OFF) {
-		if (lp_smb_encrypt(-1) == SMB_SIGNING_OFF) {
-			if (conn->encrypt_level == SMB_SIGNING_REQUIRED) {
+	conn->encrypt_level = lp_server_smb_encrypt(snum);
+	if (conn->encrypt_level > SMB_ENCRYPTION_OFF) {
+		if (lp_server_smb_encrypt(-1) == SMB_ENCRYPTION_OFF) {
+			if (conn->encrypt_level == SMB_ENCRYPTION_REQUIRED) {
 				DBG_ERR("Service [%s] requires encryption, but "
 					"it is disabled globally!\n",
 					lp_const_servicename(snum));
 				status = NT_STATUS_ACCESS_DENIED;
 				goto err_root_exit;
 			}
-			conn->encrypt_level = SMB_SIGNING_OFF;
+			conn->encrypt_level = SMB_ENCRYPTION_OFF;
 		}
 	}
 
@@ -1109,14 +1111,16 @@ connection_struct *make_connection(struct smb_request *req,
  Close a cnum.
 ****************************************************************************/
 
-void close_cnum(connection_struct *conn, uint64_t vuid)
+void close_cnum(connection_struct *conn,
+		uint64_t vuid,
+		enum file_close_type close_type)
 {
 	char rootpath[2] = { '/', '\0'};
 	struct smb_filename root_fname = { .base_name = rootpath };
 	const struct loadparm_substitution *lp_sub =
 		loadparm_s3_global_substitution();
 
-	file_close_conn(conn);
+	file_close_conn(conn, close_type);
 
 	change_to_root_user();
 

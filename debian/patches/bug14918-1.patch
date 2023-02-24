@@ -18,7 +18,7 @@ Signed-off-by: Douglas Bagnall <douglas.bagnall@catalyst.net.nz>
 
 --- a/python/samba/netcmd/domain_backup.py
 +++ b/python/samba/netcmd/domain_backup.py
-@@ -1085,6 +1085,7 @@ class cmd_domain_backup_offline(samba.ne
+@@ -1109,6 +1109,7 @@ class cmd_domain_backup_offline(samba.ne
  
          # Recursively get all file paths in the backup directories
          all_files = []
@@ -26,7 +26,7 @@ Signed-off-by: Douglas Bagnall <douglas.bagnall@catalyst.net.nz>
          for backup_dir in backup_dirs:
              for (working_dir, _, filenames) in os.walk(backup_dir):
                  if working_dir.startswith(paths.sysvol):
-@@ -1102,7 +1103,13 @@ class cmd_domain_backup_offline(samba.ne
+@@ -1126,7 +1127,13 @@ class cmd_domain_backup_offline(samba.ne
                      # Ignore files that have already been added. This prevents
                      # duplicates if one backup dir is a subdirectory of another,
                      # or if backup dirs contain hardlinks.
@@ -41,11 +41,11 @@ Signed-off-by: Douglas Bagnall <douglas.bagnall@catalyst.net.nz>
                          continue
  
                      # Assume existing backup files are from a previous backup.
-@@ -1116,6 +1123,7 @@ class cmd_domain_backup_offline(samba.ne
+@@ -1140,6 +1147,7 @@ class cmd_domain_backup_offline(samba.ne
                          continue
  
                      all_files.append(full_path)
 +                    all_stats.add((s.st_ino, s.st_dev))
  
-         # Backup secrets, sam.ldb and their downstream files
-         self.backup_secrets(paths.private_dir, lp, logger)
+         # We would prefer to open with FLG_RDONLY but then we can't
+         # start a transaction which is the strong isolation we want

@@ -404,6 +404,218 @@ EOF
     return 0
 }
 
+# Test recursive listing across msdfs links
+test_msdfs_recursive_dir()
+{
+    tmpfile=$PREFIX/smbclient.in.$$
+    error="NT_STATUS_OBJECT_PATH_NOT_FOUND"
+
+    cat > $tmpfile <<EOF
+recurse
+dir
+quit
+EOF
+
+    cmd='$SMBCLIENT "$@" -U$USERNAME%$PASSWORD //$SERVER/msdfs-share -I $SERVER_IP $ADDARGS -m $PROTOCOL < $tmpfile 2>&1'
+    out=$(eval $cmd)
+    ret="$?"
+
+    if [ "$ret" -ne 0 ] ; then
+	echo "$out"
+	echo "failed listing msfds-share\ with error $ret"
+	return 1
+    fi
+
+    echo "$out" | grep "$error" > /dev/null 2>&1
+
+    ret="$?"
+    if [ "$ret" -eq 0 ] ; then
+	echo "$out"
+	echo "Listing \\msdfs-share recursively found $error"
+	return 1
+    fi
+
+    return 0
+}
+
+# Test doing a normal file rename on an msdfs path.
+test_msdfs_rename()
+{
+    tmpfile="$PREFIX/smbclient.in.$$"
+    filename_src="src.$$"
+    filename_dst="dest.$$"
+    filename_src_path="$PREFIX/$filename_src"
+    rm -f "$filename_src_path"
+    touch "$filename_src_path"
+
+#
+# Use both non-force and force rename to
+# ensure we test both codepaths inside libsmb.
+#
+    cat > $tmpfile <<EOF
+lcd $PREFIX
+put $filename_src
+ren $filename_src $filename_dst -f
+ren $filename_dst $filename_src
+del $filename_src
+quit
+EOF
+
+    cmd='CLI_FORCE_INTERACTIVE=yes $SMBCLIENT "$@" -U$USERNAME%$PASSWORD //$SERVER/msdfs-share -I $SERVER_IP $ADDARGS < $tmpfile 2>&1'
+    eval echo "$cmd"
+    out=`eval $cmd`
+    ret=$?
+    rm -f "$tmpfile"
+    rm -f "$filename_src_path"
+
+    if [ $ret != 0 ] ; then
+	echo "$out"
+	echo "failed renaming $filename_src $filename_dst with error $ret"
+	return 1
+    fi
+
+    echo "$out" | grep "NT_STATUS" >/dev/null 2>&1
+
+    ret="$?"
+    if [ "$ret" -eq 0 ] ; then
+	echo "$out"
+	echo "renaming $filename_src $filename_dst got NT_STATUS_ error"
+	return 1
+    fi
+    return 0
+}
+
+# Test doing a normal file hardlink on an msdfs path.
+test_msdfs_hardlink()
+{
+    tmpfile="$PREFIX/smbclient.in.$$"
+    filename_src="src.$$"
+    filename_dst="dest.$$"
+    filename_src_path="$PREFIX/$filename_src"
+    rm -f "$filename_src_path"
+    touch "$filename_src_path"
+
+    cat > $tmpfile <<EOF
+lcd $PREFIX
+put $filename_src
+hardlink $filename_src $filename_dst
+del $filename_src
+del $filename_dst
+quit
+EOF
+
+    cmd='CLI_FORCE_INTERACTIVE=yes $SMBCLIENT "$@" -U$USERNAME%$PASSWORD //$SERVER/msdfs-share -I $SERVER_IP $ADDARGS < $tmpfile 2>&1'
+    eval echo "$cmd"
+    out=`eval $cmd`
+    ret=$?
+    rm -f "$tmpfile"
+    rm -f "$filename_src_path"
+
+    if [ $ret != 0 ] ; then
+	echo "$out"
+	echo "failed hardlink $filename_src $filename_dst with error $ret"
+	return 1
+    fi
+
+    echo "$out" | grep "NT_STATUS" >/dev/null 2>&1
+
+    ret="$?"
+    if [ "$ret" -eq 0 ] ; then
+	echo "$out"
+	echo "hardlink $filename_src $filename_dst got NT_STATUS_ error"
+	return 1
+    fi
+    return 0
+}
+
+test_msdfs_del()
+{
+    tmpfile="$PREFIX/smbclient.in.$$"
+    filename_src="src.$$"
+    filename_src_path="$PREFIX/$filename_src"
+    rm -f "$filename_src_path"
+    touch "$filename_src_path"
+
+    cat > $tmpfile <<EOF
+lcd $PREFIX
+cd dfshop1
+cd dfshop2
+put $filename_src
+del $filename_src
+quit
+EOF
+
+    cmd='CLI_FORCE_INTERACTIVE=yes $SMBCLIENT "$@" -U$USERNAME%$PASSWORD //$SERVER/msdfs-share -I $SERVER_IP $ADDARGS < $tmpfile 2>&1'
+    eval echo "$cmd"
+    out=`eval $cmd`
+    ret=$?
+    rm -f "$tmpfile"
+    rm -f "$filename_src_path"
+
+    if [ $ret != 0 ] ; then
+	echo "$out"
+	echo "failed deleteing $filename_src with error $ret"
+	return 1
+    fi
+
+    echo "$out" | grep "NT_STATUS" >/dev/null 2>&1
+
+    ret="$?"
+    if [ "$ret" -eq 0 ] ; then
+	echo "$out"
+	echo "del $filename_src NT_STATUS_ error"
+	return 1
+    fi
+    return 0
+}
+
+test_msdfs_deltree()
+{
+    tmpfile="$PREFIX/smbclient.in.$$"
+    dirname_src="foodir.$$"
+    filename_src="src.$$"
+    filename_src_path="$PREFIX/$filename_src"
+    dirname_src_path="$PREFIX/$dirname"
+    rm -f "$filename_src_path"
+    touch "$filename_src_path"
+
+    cat > $tmpfile <<EOF
+lcd $PREFIX
+cd dfshop1
+cd dfshop2
+mkdir $dirname_src
+cd $dirname_src
+put $filename_src
+cd ..
+deltree $dirname_src
+quit
+EOF
+
+    cmd='CLI_FORCE_INTERACTIVE=yes $SMBCLIENT "$@" -U$USERNAME%$PASSWORD //$SERVER/msdfs-share -I $SERVER_IP $ADDARGS < $tmpfile 2>&1'
+    eval echo "$cmd"
+    out=`eval $cmd`
+    ret=$?
+    rm -f "$tmpfile"
+    rm -f "$filename_src_path"
+    rm -f "$dirname_src_path"
+
+    if [ $ret != 0 ] ; then
+	echo "$out"
+	echo "deltree failed deleting dir $dirname_src with error $ret"
+	return 1
+    fi
+
+    echo "$out" | grep "NT_STATUS" >/dev/null 2>&1
+
+    ret="$?"
+    if [ "$ret" -eq 0 ] ; then
+	echo "$out"
+	echo "deltree $dirname_src NT_STATUS_ error"
+	return 1
+    fi
+    return 0
+}
+
 # Archive bits are correctly set on file/dir creation and rename.
 test_rename_archive_bit()
 {
@@ -582,7 +794,7 @@ test_ccache_access()
 	return 1
     fi
 
-    $SMBCLIENT //$SERVER_IP/tmp -C -U "${USERNAME}" $ADDARGS -c quit 2>&1
+    $SMBCLIENT //$SERVER_IP/tmp --use-winbind-ccache -U "${USERNAME}" $ADDARGS -c quit 2>&1
     ret=$?
 
     if [ $ret != 0 ] ; then
@@ -598,7 +810,7 @@ test_ccache_access()
 	return 1
     fi
 
-    $SMBCLIENT //$SERVER_IP/tmp -C -U "${USERNAME}" $ADDARGS -c quit 2>&1
+    $SMBCLIENT //$SERVER_IP/tmp --use-winbind-ccache -U "${USERNAME}" $ADDARGS -c quit 2>&1
     ret=$?
 
     if [ $ret -eq 0 ] ; then
@@ -1010,12 +1222,12 @@ EOF
 	return 1
     fi
 
-# This should fail with NT_STATUS_ACCESS_DENIED
-    echo "$out" | grep 'NT_STATUS_ACCESS_DENIED'
+# This should fail with NT_STATUS_OBJECT_NAME_NOT_FOUND
+    echo "$out" | grep 'NT_STATUS_OBJECT_NAME_NOT_FOUND'
     ret=$?
     if [ $ret != 0 ] ; then
 	echo "$out"
-	echo "failed - should get NT_STATUS_ACCESS_DENIED listing \\widelinks_share\\source"
+	echo "failed - should get NT_STATUS_OBJECT_NAME_NOT_FOUND listing \\widelinks_share\\source"
 	return 1
     fi
 }
@@ -1071,16 +1283,17 @@ test_nosymlinks()
     rm -rf $local_test_dir
 
     local_nosymlink_target_file="nosymlink_target_file"
-    echo "$local_slink_target" > $local_nosymlink_target_file
+    echo "$local_slink_target" > $PREFIX/$local_nosymlink_target_file
 
     local_foobar_target_file="testfile"
-    echo "$share_target_file" > $local_foobar_target_file
+    echo "$share_target_file" > $PREFIX/$local_foobar_target_file
 
     tmpfile=$PREFIX/smbclient_interactive_prompt_commands
     cat > $tmpfile <<EOF
 mkdir $share_test_dir
 mkdir $share_foo_dir
 mkdir $share_foobar_dir
+lcd $PREFIX
 cd /$share_test_dir
 put $local_nosymlink_target_file
 cd /$share_foobar_dir
@@ -1093,8 +1306,8 @@ EOF
     out=`eval $cmd`
     ret=$?
     rm -f $tmpfile
-    rm -f $local_nosymlink_target_file
-    rm -f $local_foobar_target_file
+    rm -f $PREFIX/$local_nosymlink_target_file
+    rm -f $PREFIX/$local_foobar_target_file
 
     if [ $ret -ne 0 ] ; then
        echo "$out"
@@ -1133,11 +1346,11 @@ EOF
        return 1
     fi
 
-    echo "$out" | grep 'NT_STATUS_ACCESS_DENIED'
+    echo "$out" | grep 'NT_STATUS_OBJECT_NAME_NOT_FOUND'
     ret=$?
     if [ $ret -ne 0 ] ; then
        echo "$out"
-       echo "failed - should get NT_STATUS_ACCESS_DENIED getting \\nosymlinks\\source"
+       echo "failed - should get NT_STATUS_OBJECT_NAME_NOT_FOUND getting \\nosymlinks\\source"
        return 1
     fi
 
@@ -1796,6 +2009,140 @@ EOF
     fi
 }
 
+test_valid_users()
+{
+    tmpfile=$PREFIX/smbclient_interactive_prompt_commands
+    cat > $tmpfile <<EOF
+ls
+quit
+EOF
+    # User in "valid users" can login to service
+    cmd='CLI_FORCE_INTERACTIVE=yes $SMBCLIENT "$@" -U$DC_USERNAME%$DC_PASSWORD //$SERVER/valid_users $ADDARGS < $tmpfile 2>&1'
+    eval echo "$cmd"
+    out=`eval $cmd`
+    ret=$?
+
+    if [ $ret -ne 0 ] ; then
+       echo "$out"
+       echo "test_valid_users:valid_users 'User in 'valid users' can login to service' failed - $ret"
+       return 1
+    fi
+
+    # User from ad group in "valid users" can login to service
+    cmd='CLI_FORCE_INTERACTIVE=yes $SMBCLIENT "$@" -U$DC_USERNAME%$DC_PASSWORD //$SERVER/valid_users_group $ADDARGS < $tmpfile 2>&1'
+    eval echo "$cmd"
+    out=`eval $cmd`
+    ret=$?
+
+    if [ $ret -ne 0 ] ; then
+       echo "$out"
+       echo "test_valid_users:valid_users_group 'User from ad group in 'valid users' can login to service' failed - $ret"
+       return 1
+    fi
+
+    # User from UNIX group in "valid users" can login to service
+    cmd='CLI_FORCE_INTERACTIVE=yes $SMBCLIENT "$@" -U$DC_USERNAME%$DC_PASSWORD //$SERVER/valid_users_unix_group $ADDARGS < $tmpfile 2>&1'
+    eval echo "$cmd"
+    out=`eval $cmd`
+    ret=$?
+
+    if [ $ret -ne 0 ] ; then
+       echo "$out"
+       echo "test_valid_users:valid_users_unix_group 'User from UNIX group in 'valid users' can login to service' failed - $ret"
+       return 1
+    fi
+
+    # User not in NIS group in "valid users" can't login to service
+    cmd='CLI_FORCE_INTERACTIVE=yes $SMBCLIENT "$@" -U$DC_USERNAME%$DC_PASSWORD //$SERVER/valid_users_nis_group $ADDARGS < $tmpfile 2>&1'
+    eval echo "$cmd"
+    out=`eval $cmd`
+    echo "$out" | grep 'NT_STATUS_ACCESS_DENIED'
+    ret=$?
+
+    if [ $ret -ne 0 ] ; then
+       echo "$out"
+       echo "test_valid_users:valid_users_nis_group 'User not in NIS group in 'valid users' can't login to service' failed - $ret"
+       return 1
+    fi
+
+    # Check user in UNIX, then in NIS group in "valid users" can login to service
+    cmd='CLI_FORCE_INTERACTIVE=yes $SMBCLIENT "$@" -U$DC_USERNAME%$DC_PASSWORD //$SERVER/valid_users_unix_nis_group $ADDARGS < $tmpfile 2>&1'
+    eval echo "$cmd"
+    out=`eval $cmd`
+    ret=$?
+
+    if [ $ret -ne 0 ] ; then
+       echo "$out"
+       echo "test_valid_users:valid_users_unix_nis_group 'Check user in UNIX, then in NIS group in 'valid users' can login to service' failed - $ret"
+       return 1
+    fi
+
+    # Check user in NIS, then in UNIX group in "valid users" can login to service
+    cmd='CLI_FORCE_INTERACTIVE=yes $SMBCLIENT "$@" -U$DC_USERNAME%$DC_PASSWORD //$SERVER/valid_users_nis_unix_group $ADDARGS < $tmpfile 2>&1'
+    eval echo "$cmd"
+    out=`eval $cmd`
+    ret=$?
+
+    if [ $ret -ne 0 ] ; then
+       echo "$out"
+       echo "test_valid_users:valid_users_nis_unix_group 'Check user in NIS, then in UNIX group in 'valid users' can login to service' failed - $ret"
+       return 1
+    fi
+
+    # User not in "invalid users" can login to service
+    cmd='CLI_FORCE_INTERACTIVE=yes $SMBCLIENT "$@" -Ualice%Secret007 //$SERVER/invalid_users $ADDARGS < $tmpfile 2>&1'
+    eval echo "$cmd"
+    out=`eval $cmd`
+    ret=$?
+
+    if [ $ret -ne 0 ] ; then
+       echo "$out"
+       echo "test_valid_users:invalid_users 'User not in 'invalid users' can login to service' failed - $ret"
+       return 1
+    fi
+
+    # User in "invalid users" can't login to service
+    cmd='CLI_FORCE_INTERACTIVE=yes $SMBCLIENT "$@" -U$DC_USERNAME%$DC_PASSWORD //$SERVER/invalid_users $ADDARGS < $tmpfile 2>&1'
+    eval echo "$cmd"
+    out=`eval $cmd`
+    echo "$out" | grep 'NT_STATUS_ACCESS_DENIED'
+    ret=$?
+
+    if [ $ret -ne 0 ] ; then
+       echo "$out"
+       echo "test_valid_users:invalid_users 'User in 'invalid users' can't login to service' failed - $ret"
+       return 1
+    fi
+
+    # User is in "valid and invalid users" can't login to service
+    cmd='CLI_FORCE_INTERACTIVE=yes $SMBCLIENT "$@" -U$DC_USERNAME%$DC_PASSWORD //$SERVER/valid_and_invalid_users $ADDARGS < $tmpfile 2>&1'
+    eval echo "$cmd"
+    out=`eval $cmd`
+    echo "$out" | grep 'NT_STATUS_ACCESS_DENIED'
+    ret=$?
+
+    if [ $ret -ne 0 ] ; then
+       echo "$out"
+       echo "test_valid_users:valid_and_invalid_users 'User is in 'valid and invalid users' can't login to service' failed - $ret"
+       return 1
+    fi
+
+    # 2 Users are in "valid users"
+    cmd='CLI_FORCE_INTERACTIVE=yes $SMBCLIENT "$@" -Ualice%Secret007 //$SERVER/valid_and_invalid_users $ADDARGS < $tmpfile 2>&1'
+    eval echo "$cmd"
+    out=`eval $cmd`
+    ret=$?
+    rm -f $tmpfile
+
+    if [ $ret -ne 0 ] ; then
+       echo "$out"
+       echo "test_valid_users:valid_and_invalid_users '2 Users are in 'valid users'' failed - $ret"
+       return 1
+    fi
+
+    return 0
+}
+
 #
 #
 LOGDIR_PREFIX=test_smbclient_s3
@@ -1852,6 +2199,26 @@ testit "Reading a owner-only file fails" \
 testit "Accessing an MS-DFS link" \
    test_msdfs_link || \
    failed=`expr $failed + 1`
+
+testit "Recursive ls across MS-DFS links" \
+   test_msdfs_recursive_dir || \
+   failed=`expr $failed + 1`
+
+testit "Rename on MS-DFS share" \
+    test_msdfs_rename || \
+    failed=`expr $failed + 1`
+
+testit "Hardlink on MS-DFS share" \
+    test_msdfs_hardlink || \
+    failed=`expr $failed + 1`
+
+testit "del on MS-DFS share" \
+    test_msdfs_del || \
+    failed=`expr $failed + 1`
+
+testit "deltree on MS-DFS share" \
+    test_msdfs_deltree || \
+    failed=`expr $failed + 1`
 
 testit "Ensure archive bit is set correctly on file/dir rename" \
     test_rename_archive_bit || \
@@ -1947,6 +2314,10 @@ testit "rm -rf $LOGDIR" \
 
 testit "delete a non empty directory" \
     test_del_nedir || \
+    failed=`expr $failed + 1`
+
+testit "valid users" \
+    test_valid_users || \
     failed=`expr $failed + 1`
 
 testok $0 $failed

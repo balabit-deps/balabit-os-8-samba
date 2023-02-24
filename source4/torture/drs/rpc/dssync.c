@@ -21,7 +21,7 @@
 */
 
 #include "includes.h"
-#include "lib/cmdline/popt_common.h"
+#include "lib/cmdline/cmdline.h"
 #include "librpc/gen_ndr/ndr_drsuapi_c.h"
 #include "librpc/gen_ndr/ndr_drsblobs.h"
 #include "libcli/cldap/cldap.h"
@@ -35,6 +35,8 @@
 #include "lib/tsocket/tsocket.h"
 #include "libcli/resolve/resolve.h"
 #include "lib/util/util_paths.h"
+
+#undef strcasecmp
 
 struct DsSyncBindInfo {
 	struct dcerpc_pipe *drs_pipe;
@@ -124,7 +126,7 @@ static struct DsSyncTest *test_create_context(struct torture_context *tctx)
 	}
 
 	/* ctx->admin ...*/
-	ctx->admin.credentials	= popt_get_cmdline_credentials();
+	ctx->admin.credentials	= samba_cmdline_get_creds();
 
 	our_bind_info28				= &ctx->admin.drsuapi.our_bind_info28;
 	our_bind_info28->supported_extensions	= 0xFFFFFFFF;
@@ -144,7 +146,7 @@ static struct DsSyncTest *test_create_context(struct torture_context *tctx)
 	ctx->admin.drsuapi.req.out.bind_handle		= &ctx->admin.drsuapi.bind_handle;
 
 	/* ctx->new_dc ...*/
-	ctx->new_dc.credentials	= popt_get_cmdline_credentials();
+	ctx->new_dc.credentials	= samba_cmdline_get_creds();
 
 	our_bind_info28				= &ctx->new_dc.drsuapi.our_bind_info28;
 	our_bind_info28->supported_extensions	|= DRSUAPI_SUPPORTED_EXTENSION_BASE;
@@ -525,7 +527,9 @@ static bool test_analyse_objects(struct torture_context *tctx,
 				el = &new_msg->elements[idx];
 				a = dsdb_attribute_by_lDAPDisplayName(ldap_schema,
 				                                      el->name);
-				if (!(el->flags & (LDB_FLAG_MOD_ADD|LDB_FLAG_MOD_REPLACE))) {
+				if (LDB_FLAG_MOD_TYPE(el->flags) != LDB_FLAG_MOD_ADD &&
+				    LDB_FLAG_MOD_TYPE(el->flags) != LDB_FLAG_MOD_REPLACE)
+				{
 					/* DRS only value */
 					is_warning = false;
 				} else if (a->linkID & 1) {

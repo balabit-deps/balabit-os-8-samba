@@ -166,7 +166,7 @@ sub wait_for_start($$)
 		$cmd .= "$testenv_vars->{CONFIGURATION} ";
 		$cmd .= "-H ldap://$testenv_vars->{SERVER} ";
 		$cmd .= "-U$testenv_vars->{USERNAME}%$testenv_vars->{PASSWORD} ";
-		$cmd .= "-s base ";
+		$cmd .= "--scope base ";
 		$cmd .= "-b '$search_dn' ";
 		while (system("$cmd >/dev/null") != 0) {
 			$count++;
@@ -204,28 +204,29 @@ sub wait_for_start($$)
 	# Ensure we registered all our names
 	if ($testenv_vars->{SERVER_ROLE} eq "domain controller") {
 		my $max_wait = 120;
-		print "Waiting for dns_update_cache to be created.\n";
+		my $dns_update_cache = "$testenv_vars->{PRIVATEDIR}/dns_update_cache";
+		print "Waiting for $dns_update_cache to be created.\n";
 		$count = 0;
-		while (not -e "$testenv_vars->{PRIVATEDIR}/dns_update_cache") {
+		while (not -e $dns_update_cache) {
 			$count++;
 			if ($count > $max_wait) {
 				teardown_env($self, $testenv_vars);
-				warn("Timed out ($max_wait sec) waiting for dns_update_cache PID $testenv_vars->{SAMBA_PID}");
+				warn("Timed out ($max_wait sec) waiting for $dns_update_cache PID $testenv_vars->{SAMBA_PID}");
 				return -1;
 			}
-			print "Waiting for dns_update_cache to be created...\n";
+			print "Waiting for $dns_update_cache to be created...\n";
 			sleep(1);
 		}
-		print "Waiting for dns_update_cache to be filled.\n";
+		print "Waiting for $dns_update_cache to be filled.\n";
 		$count = 0;
-		while ((-s "$testenv_vars->{PRIVATEDIR}/dns_update_cache") == 0) {
+		while ((-s "$dns_update_cache") == 0) {
 			$count++;
 			if ($count > $max_wait) {
 				teardown_env($self, $testenv_vars);
-				warn("Timed out ($max_wait sec) waiting for dns_update_cache PID $testenv_vars->{SAMBA_PID}");
+				warn("Timed out ($max_wait sec) waiting for $dns_update_cache PID $testenv_vars->{SAMBA_PID}");
 				return -1;
 			}
-			print "Waiting for dns_update_cache to be filled...\n";
+			print "Waiting for $dns_update_cache to be filled...\n";
 			sleep(1);
 		}
 	}
@@ -463,10 +464,10 @@ sub setup_namespaces
 	$namespaces .= $cmd_config;
 	unless (system($namespaces) == 0) {
 		warn("Failed to add namespaces \n$namespaces");
-		return;
+		return -1;
 	}
 
-	return;
+	return 0;
 }
 
 sub setup_trust($$$$$)
@@ -474,12 +475,17 @@ sub setup_trust($$$$$)
 	my ($self, $localenv, $remoteenv, $type, $extra_args) = @_;
 
 	$localenv->{TRUST_SERVER} = $remoteenv->{SERVER};
+	$localenv->{TRUST_SERVER_IP} = $remoteenv->{SERVER_IP};
+	$localenv->{TRUST_DNSNAME} = $remoteenv->{DNSNAME};
 
 	$localenv->{TRUST_USERNAME} = $remoteenv->{USERNAME};
 	$localenv->{TRUST_PASSWORD} = $remoteenv->{PASSWORD};
 	$localenv->{TRUST_DOMAIN} = $remoteenv->{DOMAIN};
 	$localenv->{TRUST_REALM} = $remoteenv->{REALM};
 	$localenv->{TRUST_DOMSID} = $remoteenv->{DOMSID};
+
+	# Add trusted domain realms to krb5.conf
+	Samba::append_krb5_conf_trust_realms($localenv);
 
 	my $samba_tool =  Samba::bindir_path($self, "samba-tool");
 
@@ -606,7 +612,7 @@ sub provision_raw_prepare($$$$$$$$$$$$$$)
 	$ctx->{logdir} = "$prefix_abs/logs";
 	$ctx->{statedir} = "$prefix_abs/statedir";
 	$ctx->{cachedir} = "$prefix_abs/cachedir";
-	$ctx->{winbindd_socket_dir} = "$prefix_abs/winbindd_socket";
+	$ctx->{winbindd_socket_dir} = "$prefix_abs/wbsock";
 	$ctx->{ntp_signd_socket_dir} = "$prefix_abs/ntp_signd_socket";
 	$ctx->{nsswrap_passwd} = "$ctx->{etcdir}/passwd";
 	$ctx->{nsswrap_group} = "$ctx->{etcdir}/group";
@@ -614,10 +620,10 @@ sub provision_raw_prepare($$$$$$$$$$$$$$)
 	$ctx->{nsswrap_hostname} = "$ctx->{hostname}.$ctx->{dnsname}";
 	if ($ENV{SAMBA_DNS_FAKING}) {
 		$ctx->{dns_host_file} = "$ENV{SELFTEST_PREFIX}/dns_host_file";
-		$ctx->{samba_dnsupdate} = "$ENV{SRCDIR_ABS}/source4/scripting/bin/samba_dnsupdate -s $ctx->{smb_conf} --all-interfaces --use-file=$ctx->{dns_host_file}";
+		$ctx->{samba_dnsupdate} = "$ENV{SRCDIR_ABS}/source4/scripting/bin/samba_dnsupdate --configfile=$ctx->{smb_conf} --all-interfaces --use-file=$ctx->{dns_host_file}";
 		$ctx->{samba_dnsupdate} = $python_cmd .  $ctx->{samba_dnsupdate};
 	} else {
-	        $ctx->{samba_dnsupdate} = "$ENV{SRCDIR_ABS}/source4/scripting/bin/samba_dnsupdate -s $ctx->{smb_conf} --all-interfaces";
+	        $ctx->{samba_dnsupdate} = "$ENV{SRCDIR_ABS}/source4/scripting/bin/samba_dnsupdate --configfile=$ctx->{smb_conf} --all-interfaces";
 		$ctx->{samba_dnsupdate} = $python_cmd .  $ctx->{samba_dnsupdate};
 		$ctx->{use_resolv_wrapper} = 1;
 	}
@@ -770,6 +776,8 @@ sub provision_raw_step1($$)
 	tls crlfile = ${crlfile}
 	tls verify peer = no_check
 	panic action = $RealBin/gdb_backtrace \%d
+	smbd:suicide mode = yes
+	smbd:FSCTL_SMBTORTURE = yes
 	wins support = yes
 	server role = $ctx->{server_role}
 	server services = +echo $services
@@ -785,8 +793,8 @@ sub provision_raw_step1($$)
 	server min protocol = SMB2_02
 	mangled names = yes
 	dns update command = $ctx->{samba_dnsupdate}
-	spn update command = $ctx->{python} $ENV{SRCDIR_ABS}/source4/scripting/bin/samba_spnupdate -s $ctx->{smb_conf}
-	gpo update command = $ctx->{python} $ENV{SRCDIR_ABS}/source4/scripting/bin/samba-gpupdate -s $ctx->{smb_conf} --target=Computer
+	spn update command = $ctx->{python} $ENV{SRCDIR_ABS}/source4/scripting/bin/samba_spnupdate --configfile $ctx->{smb_conf}
+	gpo update command = $ctx->{python} $ENV{SRCDIR_ABS}/source4/scripting/bin/samba-gpupdate --configfile $ctx->{smb_conf} --target=Computer
 	samba kcc command = $ctx->{python} $ENV{SRCDIR_ABS}/source4/scripting/bin/samba_kcc
 	dreplsrv:periodic_startup_interval = 0
 	dsdb:schema update allowed = yes
@@ -1362,7 +1370,7 @@ server min protocol = LANMAN1
 
 	my $samba_tool =  Samba::bindir_path($self, "samba-tool");
 	my $cmd = $self->get_cmd_env_vars($ret);
-	$cmd .= "$samba_tool domain join $ret->{CONFIGURATION} $dcvars->{REALM} member";
+	$cmd .= "$samba_tool domain join $ret->{CONFIGURATION} $dcvars->{REALM} --experimental-s4-member member";
 	$cmd .= " -U$dcvars->{DC_USERNAME}\%$dcvars->{DC_PASSWORD}";
 	$cmd .= " --machinepass=machine$ret->{PASSWORD}";
 
@@ -1427,7 +1435,7 @@ sub provision_rpc_proxy($$$)
 
 	# The joind runs in the context of the rpc_proxy/member for now
 	my $cmd = $self->get_cmd_env_vars($ret);
-	$cmd .= "$samba_tool domain join $ret->{CONFIGURATION} $dcvars->{REALM} member";
+	$cmd .= "$samba_tool domain join $ret->{CONFIGURATION} $dcvars->{REALM} --experimental-s4-member member";
 	$cmd .= " -U$dcvars->{DC_USERNAME}\%$dcvars->{DC_PASSWORD}";
 	$cmd .= " --machinepass=machine$ret->{PASSWORD}";
 
@@ -1490,6 +1498,8 @@ sub provision_promoted_dc($$$)
 
         ntlm auth = ntlmv2-only
 
+	kdc force enable rc4 weak session keys = yes
+
 [sysvol]
 	path = $ctx->{statedir}/sysvol
 	read only = yes
@@ -1507,7 +1517,7 @@ sub provision_promoted_dc($$$)
 
 	my $samba_tool =  Samba::bindir_path($self, "samba-tool");
 	my $cmd = $self->get_cmd_env_vars($ret);
-	$cmd .= "$samba_tool domain join $ret->{CONFIGURATION} $dcvars->{REALM} MEMBER --realm=$dcvars->{REALM}";
+	$cmd .= "$samba_tool domain join $ret->{CONFIGURATION} $dcvars->{REALM} --experimental-s4-member MEMBER --realm=$dcvars->{REALM}";
 	$cmd .= " -U$dcvars->{DC_USERNAME}\%$dcvars->{DC_PASSWORD}";
 	$cmd .= " --machinepass=machine$ret->{PASSWORD}";
 
@@ -1609,7 +1619,6 @@ sub provision_ad_dc_ntvfs($$$)
         my $extra_conf_options = "netbios aliases = localDC1-a
         server services = +winbind -winbindd
 	ldap server require strong auth = allow_sasl_over_tls
-	allow nt4 crypto = yes
 	raw NTLMv2 auth = yes
 	lsa over netlogon = yes
         rpc server port = 1027
@@ -1617,10 +1626,53 @@ sub provision_ad_dc_ntvfs($$$)
 	dsdb event notification = true
 	dsdb password event notification = true
 	dsdb group change notification = true
-	server schannel = auto
 	# override the new SMB2 only default
 	client min protocol = CORE
 	server min protocol = LANMAN1
+
+	CVE_2020_1472:warn_about_unused_debug_level = 3
+	CVE_2022_38023:warn_about_unused_debug_level = 3
+	allow nt4 crypto:torturetest\$ = yes
+	server reject md5 schannel:schannel2\$ = no
+	server reject md5 schannel:schannel3\$ = no
+	server reject md5 schannel:schannel8\$ = no
+	server reject md5 schannel:schannel9\$ = no
+	server reject md5 schannel:torturetest\$ = no
+	server reject md5 schannel:tests4u2proxywk\$ = no
+	server reject md5 schannel:tests4u2selfbdc\$ = no
+	server reject md5 schannel:tests4u2selfwk\$ = no
+	server reject md5 schannel:torturepacbdc\$ = no
+	server reject md5 schannel:torturepacwksta\$ = no
+	server require schannel:schannel0\$ = no
+	server require schannel:schannel1\$ = no
+	server require schannel:schannel2\$ = no
+	server require schannel:schannel3\$ = no
+	server require schannel:schannel4\$ = no
+	server require schannel:schannel5\$ = no
+	server require schannel:schannel6\$ = no
+	server require schannel:schannel7\$ = no
+	server require schannel:schannel8\$ = no
+	server require schannel:schannel9\$ = no
+	server require schannel:schannel10\$ = no
+	server require schannel:schannel11\$ = no
+	server require schannel:torturetest\$ = no
+	server schannel require seal:schannel0\$ = no
+	server schannel require seal:schannel1\$ = no
+	server schannel require seal:schannel2\$ = no
+	server schannel require seal:schannel3\$ = no
+	server schannel require seal:schannel4\$ = no
+	server schannel require seal:schannel5\$ = no
+	server schannel require seal:schannel6\$ = no
+	server schannel require seal:schannel7\$ = no
+	server schannel require seal:schannel8\$ = no
+	server schannel require seal:schannel9\$ = no
+	server schannel require seal:schannel10\$ = no
+	server schannel require seal:schannel11\$ = no
+	server schannel require seal:torturetest\$ = no
+
+	# needed for 'samba.tests.auth_log' tests
+	server require schannel:LOCALDC\$ = no
+	server schannel require seal:LOCALDC\$ = no
 	";
 	push (@{$extra_provision_options}, "--use-ntvfs");
 	my $ret = $self->provision($prefix,
@@ -1658,6 +1710,13 @@ sub provision_fl2000dc($$)
 	my $extra_conf_options = "
 	spnego:simulate_w2k=yes
 	ntlmssp_server:force_old_spnego=yes
+
+	CVE_2022_38023:warn_about_unused_debug_level = 3
+	server reject md5 schannel:tests4u2proxywk\$ = no
+	server reject md5 schannel:tests4u2selfbdc\$ = no
+	server reject md5 schannel:tests4u2selfwk\$ = no
+	server reject md5 schannel:torturepacbdc\$ = no
+	server reject md5 schannel:torturepacwksta\$ = no
 ";
 	my $extra_provision_options = ["--base-schema=2008_R2"];
 	# This environment uses plain text secrets
@@ -1701,7 +1760,16 @@ sub provision_fl2003dc($$$)
 	my $extra_conf_options = "allow dns updates = nonsecure and secure
 	dcesrv:header signing = no
 	dcesrv:max auth states = 0
-	dns forwarder = $ip_addr1 $ip_addr2";
+	dns forwarder = $ip_addr1 $ip_addr2
+
+	CVE_2022_38023:warn_about_unused_debug_level = 3
+	server reject md5 schannel:tests4u2proxywk\$ = no
+	server reject md5 schannel:tests4u2selfbdc\$ = no
+	server reject md5 schannel:tests4u2selfwk\$ = no
+	server reject md5 schannel:torturepacbdc\$ = no
+	server reject md5 schannel:torturepacwksta\$ = no
+";
+
 	my $extra_provision_options = ["--base-schema=2008_R2"];
 	my $ret = $self->provision($prefix,
 				   "domain controller",
@@ -1756,6 +1824,13 @@ sub provision_fl2008r2dc($$$)
 	ldap server require strong auth = no
         # delay by 10 seconds, 10^7 usecs
 	ldap_server:delay_expire_disconnect = 10000
+
+	CVE_2022_38023:warn_about_unused_debug_level = 3
+	server reject md5 schannel:tests4u2proxywk\$ = no
+	server reject md5 schannel:tests4u2selfbdc\$ = no
+	server reject md5 schannel:tests4u2selfwk\$ = no
+	server reject md5 schannel:torturepacbdc\$ = no
+	server reject md5 schannel:torturepacwksta\$ = no
 ";
 	my $extra_provision_options = ["--base-schema=2008_R2"];
 	my $ret = $self->provision($prefix,
@@ -1933,6 +2008,8 @@ sub provision_ad_dc($$$$$$$)
 	kernel oplocks = no
 	kernel change notify = no
 	smb2 leases = no
+	smb2 disable oplock break retry = yes
+	server multi channel support = yes
 
 	logging = file
 	printing = bsd
@@ -1965,8 +2042,48 @@ sub provision_ad_dc($$$$$$$)
 	lpq cache time = 0
 	print notify backchannel = yes
 
-	server schannel = auto
-        auth event notification = true
+	CVE_2020_1472:warn_about_unused_debug_level = 3
+	CVE_2022_38023:warn_about_unused_debug_level = 3
+	CVE_2022_38023:error_debug_level = 2
+	server reject md5 schannel:schannel2\$ = no
+	server reject md5 schannel:schannel3\$ = no
+	server reject md5 schannel:schannel8\$ = no
+	server reject md5 schannel:schannel9\$ = no
+	server reject md5 schannel:torturetest\$ = no
+	server reject md5 schannel:tests4u2proxywk\$ = no
+	server reject md5 schannel:tests4u2selfbdc\$ = no
+	server reject md5 schannel:tests4u2selfwk\$ = no
+	server reject md5 schannel:torturepacbdc\$ = no
+	server reject md5 schannel:torturepacwksta\$ = no
+	server reject md5 schannel:samlogontest\$ = no
+	server require schannel:schannel0\$ = no
+	server require schannel:schannel1\$ = no
+	server require schannel:schannel2\$ = no
+	server require schannel:schannel3\$ = no
+	server require schannel:schannel4\$ = no
+	server require schannel:schannel5\$ = no
+	server require schannel:schannel6\$ = no
+	server require schannel:schannel7\$ = no
+	server require schannel:schannel8\$ = no
+	server require schannel:schannel9\$ = no
+	server require schannel:schannel10\$ = no
+	server require schannel:schannel11\$ = no
+	server require schannel:torturetest\$ = no
+	server schannel require seal:schannel0\$ = no
+	server schannel require seal:schannel1\$ = no
+	server schannel require seal:schannel2\$ = no
+	server schannel require seal:schannel3\$ = no
+	server schannel require seal:schannel4\$ = no
+	server schannel require seal:schannel5\$ = no
+	server schannel require seal:schannel6\$ = no
+	server schannel require seal:schannel7\$ = no
+	server schannel require seal:schannel8\$ = no
+	server schannel require seal:schannel9\$ = no
+	server schannel require seal:schannel10\$ = no
+	server schannel require seal:schannel11\$ = no
+	server schannel require seal:torturetest\$ = no
+
+	auth event notification = true
 	dsdb event notification = true
 	dsdb password event notification = true
 	dsdb group change notification = true
@@ -2222,7 +2339,7 @@ sub check_env($$)
 
 	fl2008r2dc           => ["ad_dc"],
 	fl2003dc             => ["ad_dc"],
-	fl2000dc             => ["dns_hub"],
+	fl2000dc             => ["ad_dc"],
 
 	vampire_2000_dc      => ["fl2000dc"],
 	vampire_dc           => ["ad_dc_ntvfs"],
@@ -2392,13 +2509,15 @@ sub setup_chgdcpass
 
 sub setup_fl2000dc
 {
-	my ($self, $path) = @_;
+	my ($self, $path, $dc_vars) = @_;
 
 	my $env = $self->provision_fl2000dc($path);
 	if (defined $env) {
 	        if (not defined($self->check_or_start($env, "standard"))) {
 		        return undef;
 		}
+
+		$env = $self->setup_trust($env, $dc_vars, "external", "--no-aes-keys --direction=outgoing");
 	}
 
 	return $env;
@@ -2434,7 +2553,9 @@ sub setup_fl2008r2dc
 		my $upn_array = ["$env->{REALM}.upn"];
 		my $spn_array = ["$env->{REALM}.spn"];
 
-		$self->setup_namespaces($env, $upn_array, $spn_array);
+		if ($self->setup_namespaces($env, $upn_array, $spn_array) != 0) {
+			return undef;
+		}
 
 		$env = $self->setup_trust($env, $dc_vars, "forest", "");
 	}
@@ -2619,7 +2740,9 @@ sub _setup_ad_dc
 	my $upn_array = ["$env->{REALM}.upn"];
 	my $spn_array = ["$env->{REALM}.spn"];
 
-	$self->setup_namespaces($env, $upn_array, $spn_array);
+	if ($self->setup_namespaces($env, $upn_array, $spn_array) != 0) {
+		return undef;
+	}
 
 	return $env;
 }
@@ -2637,6 +2760,10 @@ sub setup_ad_dc_smb1
 [global]
 	client min protocol = CORE
 	server min protocol = LANMAN1
+
+	# needed for 'samba.tests.auth_log' tests
+	server require schannel:ADDCSMB1\$ = no
+	server schannel require seal:ADDCSMB1\$ = no
 ";
 	return _setup_ad_dc($self, $path, $conf_opts, "addcsmb1", "addom2.samba.example.com");
 }
@@ -2677,7 +2804,9 @@ sub setup_ad_dc_no_nss
 	my $upn_array = ["$env->{REALM}.upn"];
 	my $spn_array = ["$env->{REALM}.spn"];
 
-	$self->setup_namespaces($env, $upn_array, $spn_array);
+	if ($self->setup_namespaces($env, $upn_array, $spn_array) != 0) {
+		return undef;
+	}
 
 	return $env;
 }
@@ -2709,7 +2838,9 @@ sub setup_ad_dc_no_ntlm
 	my $upn_array = ["$env->{REALM}.upn"];
 	my $spn_array = ["$env->{REALM}.spn"];
 
-	$self->setup_namespaces($env, $upn_array, $spn_array);
+	if ($self->setup_namespaces($env, $upn_array, $spn_array) != 0) {
+		return undef;
+	}
 
 	return $env;
 }
@@ -2741,7 +2872,9 @@ sub setup_ad_dc_fips
 	my $upn_array = ["$env->{REALM}.upn"];
 	my $spn_array = ["$env->{REALM}.spn"];
 
-	$self->setup_namespaces($env, $upn_array, $spn_array);
+	if ($self->setup_namespaces($env, $upn_array, $spn_array) != 0) {
+		return undef;
+	}
 
 	return $env;
 }
@@ -2771,6 +2904,11 @@ sub setup_preforkrestartdc
 		return undef;
 	}
 
+        # We treat processes in this environment cruelly, sometimes
+        # sending them SIGSEGV signals. We don't need gdb_backtrace
+        # dissecting these fake crashes in precise detail.
+        $env->{PLEASE_NO_GDB_BACKTRACE} = '1';
+
 	$env->{NSS_WRAPPER_MODULE_SO_PATH} = undef;
 	$env->{NSS_WRAPPER_MODULE_FN_PREFIX} = undef;
 
@@ -2781,7 +2919,9 @@ sub setup_preforkrestartdc
 	my $upn_array = ["$env->{REALM}.upn"];
 	my $spn_array = ["$env->{REALM}.spn"];
 
-	$self->setup_namespaces($env, $upn_array, $spn_array);
+	if ($self->setup_namespaces($env, $upn_array, $spn_array) != 0) {
+		return undef;
+	}
 
 	return $env;
 }
@@ -2820,7 +2960,9 @@ sub setup_proclimitdc
 	my $upn_array = ["$env->{REALM}.upn"];
 	my $spn_array = ["$env->{REALM}.spn"];
 
-	$self->setup_namespaces($env, $upn_array, $spn_array);
+	if ($self->setup_namespaces($env, $upn_array, $spn_array) != 0) {
+		return undef;
+	}
 
 	return $env;
 }
@@ -2851,7 +2993,9 @@ sub setup_schema_dc
 	my $upn_array = ["$env->{REALM}.upn"];
 	my $spn_array = ["$env->{REALM}.spn"];
 
-	$self->setup_namespaces($env, $upn_array, $spn_array);
+	if ($self->setup_namespaces($env, $upn_array, $spn_array) != 0) {
+		return undef;
+	}
 
 	return $env;
 }
@@ -2948,7 +3092,9 @@ sub setup_backupfromdc
 	my $upn_array = ["$env->{REALM}.upn"];
 	my $spn_array = ["$env->{REALM}.spn"];
 
-	$self->setup_namespaces($env, $upn_array, $spn_array);
+	if ($self->setup_namespaces($env, $upn_array, $spn_array) != 0) {
+		return undef;
+	}
 
 	# Set up a dangling forward link to an expunged object
 	#
@@ -3244,7 +3390,9 @@ sub setup_renamedc
 	my $upn_array = ["$env->{REALM}.upn"];
 	my $spn_array = ["$env->{REALM}.spn"];
 
-	$self->setup_namespaces($env, $upn_array, $spn_array);
+	if ($self->setup_namespaces($env, $upn_array, $spn_array) != 0) {
+		return undef;
+	}
 
 	return $env;
 }
@@ -3269,7 +3417,7 @@ sub setup_offlinebackupdc
 
 	# create an offline backup of the 'backupfromdc' target
 	my $backupdir = File::Temp->newdir();
-	my $cmd = "offline -s $dcvars->{SERVERCONFFILE}";
+	my $cmd = "offline --configfile $dcvars->{SERVERCONFFILE}";
 	my $backup_file = $self->create_backup($env, $dcvars,
 					       $backupdir, $cmd);
 
@@ -3363,7 +3511,9 @@ sub setup_labdc
 	my $upn_array = ["$env->{REALM}.upn"];
 	my $spn_array = ["$env->{REALM}.spn"];
 
-	$self->setup_namespaces($env, $upn_array, $spn_array);
+	if ($self->setup_namespaces($env, $upn_array, $spn_array) != 0) {
+		return undef;
+	}
 
 	return $env;
 }
@@ -3483,7 +3633,9 @@ sub setup_customdc
 	my $upn_array = ["$env->{REALM}.upn"];
 	my $spn_array = ["$env->{REALM}.spn"];
 
-	$self->setup_namespaces($env, $upn_array, $spn_array);
+	if ($self->setup_namespaces($env, $upn_array, $spn_array) != 0) {
+		return undef;
+	}
 
 	return $env;
 }

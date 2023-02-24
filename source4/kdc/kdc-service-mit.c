@@ -25,8 +25,8 @@
 #include "system/filesys.h"
 #include "lib/param/param.h"
 #include "lib/util/samba_util.h"
-#include "source4/smbd/service.h"
-#include "source4/smbd/process_model.h"
+#include "source4/samba/service.h"
+#include "source4/samba/process_model.h"
 #include "kdc/kdc-service-mit.h"
 #include "dynconfig.h"
 #include "libds/common/roles.h"
@@ -291,8 +291,8 @@ NTSTATUS mitkdc_task_init(struct task_server *task)
 		return NT_STATUS_INTERNAL_ERROR;
 	}
 
-	kdc->keytab_name = talloc_asprintf(kdc, "KDB:");
-	if (kdc->keytab_name == NULL) {
+	kdc->kpasswd_keytab_name = talloc_asprintf(kdc, "KDB:");
+	if (kdc->kpasswd_keytab_name == NULL) {
 		task_server_terminate(task,
 				      "KDC: Out of memory",
 				      true);

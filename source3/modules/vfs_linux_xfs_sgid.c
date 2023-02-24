@@ -31,7 +31,7 @@ static int linux_xfs_sgid_mkdirat(vfs_handle_struct *handle,
 	struct smb_filename *fname = NULL;
 	int mkdir_res;
 	int res;
-	bool ok;
+	NTSTATUS status;
 
 	DEBUG(10, ("Calling linux_xfs_sgid_mkdirat(%s)\n",
 		smb_fname->base_name));
@@ -46,9 +46,21 @@ static int linux_xfs_sgid_mkdirat(vfs_handle_struct *handle,
 		return mkdir_res;
 	}
 
-	ok = parent_smb_fname(talloc_tos(), smb_fname, &dname, NULL);
-	if (!ok) {
-		DBG_WARNING("parent_smb_fname() failed\n");
+	fname = full_path_from_dirfsp_atname(talloc_tos(),
+					     dirfsp,
+					     smb_fname);
+	if (fname == NULL) {
+		return -1;
+	}
+
+	status = SMB_VFS_PARENT_PATHNAME(handle->conn,
+					 talloc_tos(),
+					 fname,
+					 &dname,
+					 NULL);
+	if (!NT_STATUS_IS_OK(status)) {
+		DBG_WARNING("SMB_VFS_PARENT_PATHNAME() failed with %s\n",
+			nt_errstr(status));
 		/* return success, we did the mkdir */
 		return mkdir_res;
 	}
@@ -69,13 +81,6 @@ static int linux_xfs_sgid_mkdirat(vfs_handle_struct *handle,
 	}
 	TALLOC_FREE(dname);
 
-	fname = cp_smb_filename(talloc_tos(), smb_fname);
-	if (fname == NULL) {
-		DBG_WARNING("cp_smb_filename() failed\n");
-		/* return success, we did the mkdir */
-		return mkdir_res;
-	}
-
 	res = SMB_VFS_NEXT_STAT(handle, fname);
 	if (res == -1) {
 		DBG_NOTICE("Could not stat just created dir %s: %s\n",
@@ -94,7 +99,7 @@ static int linux_xfs_sgid_mkdirat(vfs_handle_struct *handle,
 	 * return success. What can you do...
 	 */
 	become_root();
-	res = SMB_VFS_NEXT_CHMOD(handle, fname, fname->st.st_ex_mode);
+	res = SMB_VFS_NEXT_FCHMOD(handle, smb_fname->fsp, fname->st.st_ex_mode);
 	unbecome_root();
 
 	if (res == -1) {

@@ -302,13 +302,13 @@ static NTSTATUS smbd_smb2_tree_connect(struct smbd_smb2_request *req,
 		TALLOC_FREE(proxy);
 	}
 
-	if ((lp_smb_encrypt(snum) >= SMB_SIGNING_DESIRED) &&
+	if ((lp_server_smb_encrypt(snum) >= SMB_ENCRYPTION_DESIRED) &&
 	    (conn->smb2.server.cipher != 0))
 	{
 		encryption_desired = true;
 	}
 
-	if (lp_smb_encrypt(snum) == SMB_SIGNING_REQUIRED) {
+	if (lp_server_smb_encrypt(snum) == SMB_ENCRYPTION_REQUIRED) {
 		encryption_desired = true;
 		encryption_required = true;
 	}
@@ -612,12 +612,7 @@ static struct tevent_req *smbd_smb2_tdis_send(TALLOC_CTX *mem_ctx,
 				continue;
 			}
 
-			/*
-			 * Never cancel anything in a compound
-			 * request. Way too hard to deal with
-			 * the result.
-			 */
-			if (!preq->compound_related && preq->subreq != NULL) {
+			if (preq->subreq != NULL) {
 				tevent_req_cancel(preq->subreq);
 			}
 

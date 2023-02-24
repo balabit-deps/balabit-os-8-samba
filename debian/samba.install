@@ -19,6 +19,7 @@ usr/lib/*/samba/libkdc-samba4.so.2
 usr/lib/*/samba/libkdc-samba4.so.2.0.0
 usr/lib/*/samba/libmscat.so.0
 usr/lib/*/samba/libpac.so.*
+usr/lib/*/samba/samba-bgqd
 usr/lib/*/samba/service/*.so
 usr/sbin/eventlogadm
 usr/sbin/mksmbpasswd
@@ -44,6 +45,7 @@ usr/share/man/man8/pdbedit.8
 usr/share/man/man8/samba-gpupdate.8
 usr/share/man/man8/samba_downgrade_db.8
 usr/share/man/man8/samba.8
+usr/share/man/man8/samba-bgqd.8
 usr/share/man/man8/smbd.8
 usr/share/samba/admx/
 usr/share/samba/mdssvc/elasticsearch_mappings.json

@@ -23,6 +23,7 @@
 #include "../libcli/security/security.h"
 #include "libsmb/libsmb.h"
 #include "libsmb/clirap.h"
+#include "lib/util/string_wrappers.h"
 
 bool torture_utable(int dummy)
 {
@@ -42,8 +43,8 @@ bool torture_utable(int dummy)
 
 	memset(valid, 0, sizeof(valid));
 
+	torture_deltree(cli, "\\utable");
 	cli_mkdir(cli, "\\utable");
-	cli_unlink(cli, "\\utable\\*", FILE_ATTRIBUTE_SYSTEM | FILE_ATTRIBUTE_HIDDEN);
 
 	for (c=1; c < 0x10000; c++) {
 		size_t size = 0;
@@ -145,8 +146,7 @@ bool torture_casetable(int dummy)
 
 	memset(equiv, 0, sizeof(equiv));
 
-	cli_unlink(cli, "\\utable\\*", FILE_ATTRIBUTE_SYSTEM | FILE_ATTRIBUTE_HIDDEN);
-	cli_rmdir(cli, "\\utable");
+	torture_deltree(cli, "\\utable");
 	if (!NT_STATUS_IS_OK(cli_mkdir(cli, "\\utable"))) {
 		printf("Failed to create utable directory!\n");
 		return False;
@@ -204,8 +204,7 @@ bool torture_casetable(int dummy)
 		cli_close(cli, fnum);
 	}
 
-	cli_unlink(cli, "\\utable\\*", FILE_ATTRIBUTE_SYSTEM | FILE_ATTRIBUTE_HIDDEN);
-	cli_rmdir(cli, "\\utable");
+	torture_deltree(cli, "\\utable");
 
 	return True;
 }

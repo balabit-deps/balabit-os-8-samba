@@ -174,7 +174,8 @@ _kdc_find_etype(krb5_context context, krb5_boolean use_strongest_session_key,
 		ret = hdb_enctype2key(context, &princ->entry, p[i], &key);
 		if (ret)
 		    continue;
-		if (is_preauth && !is_default_salt_p(&def_salt, key))
+		if (is_preauth && enctype == (krb5_enctype)ETYPE_DES_CBC_CRC
+		    && !is_default_salt_p(&def_salt, key))
 		    continue;
 		enctype = p[i];
 	    }
@@ -222,6 +223,39 @@ _kdc_find_etype(krb5_context context, krb5_boolean use_strongest_session_key,
 out:
     krb5_free_salt (context, def_salt);
     return ret;
+}
+
+/*
+ * The principal's session_etypes must be sorted in order of strength, with
+ * preferred etype first.
+*/
+krb5_error_code
+_kdc_find_session_etype(krb5_context context,
+			krb5_enctype *etypes, size_t len,
+			const hdb_entry_ex *princ,
+			krb5_enctype *ret_enctype)
+{
+    size_t i;
+
+    if (princ->entry.session_etypes == NULL) {
+	/* The principal must have session etypes available. */
+	return KRB5KDC_ERR_ETYPE_NOSUPP;
+    }
+
+    /* Loop over the client's specified etypes. */
+    for (i = 0; i < len; ++i) {
+	size_t j;
+
+	/* Check that the server also supports the etype. */
+	for (j = 0; j < princ->entry.session_etypes->len; ++j) {
+	    if (princ->entry.session_etypes->val[j] == etypes[i]) {
+		*ret_enctype = etypes[i];
+		return 0;
+	    }
+	}
+    }
+
+    return KRB5KDC_ERR_ETYPE_NOSUPP;
 }
 
 krb5_error_code
@@ -1153,6 +1187,12 @@ _kdc_as_rep(krb5_context context,
     memset(&ek, 0, sizeof(ek));
 
     /*
+     * This has to be here (not later), because we need to have r->sessionetype
+     * set prior to calling pa_pkinit_validate(), which in turn calls
+     * _kdc_pk_mk_pa_reply(), during padata validation.
+     */
+
+    /*
      * Select a session enctype from the list of the crypto system
      * supported enctypes that is supported by the client and is one of
      * the enctype of the enctype of the service (likely krbtgt).
@@ -1162,9 +1202,8 @@ _kdc_as_rep(krb5_context context,
      * enctype that an older version of a KDC in the same realm can't
      * decrypt.
      */
-    ret = _kdc_find_etype(context, config->as_use_strongest_session_key, FALSE,
-			  client, b->etype.val, b->etype.len, &sessionetype,
-			  NULL);
+    ret = _kdc_find_session_etype(context, b->etype.val, b->etype.len,
+				  server, &sessionetype);
     if (ret) {
 	kdc_log(context, config, 0,
 		"Client (%s) from %s has no common enctypes with KDC "
@@ -1357,13 +1396,19 @@ _kdc_as_rep(krb5_context context,
 
 		free_EncryptedData(&enc_data);
 
-		if (clientdb->hdb_auth_status)
-		    (clientdb->hdb_auth_status)(context, clientdb, client,
+		if (clientdb->hdb_auth_status) {
+		    ret = (clientdb->hdb_auth_status)(context, clientdb, client,
 						from_addr,
 						&_kdc_now,
 						client_name,
 						str ? str : "unknown enctype",
 						HDB_AUTH_WRONG_PASSWORD);
+		    if (ret == HDB_ERR_NOT_FOUND_HERE) {
+			kdc_log(context, config, 5, "client %s HDB_AUTH_WRONG_PASSWORD at this KDC, forward to proxy", client_name);
+			free(str);
+			goto out;
+		    }
+		}
 
 		free(str);
 
@@ -1384,7 +1429,6 @@ _kdc_as_rep(krb5_context context,
 			client_name);
 		continue;
 	    }
-	    free_PA_ENC_TS_ENC(&p);
 	    if (abs(kdc_time - p.patimestamp) > context->max_skew) {
 		char client_time[100];
 
@@ -1406,8 +1450,10 @@ _kdc_as_rep(krb5_context context,
 		 * there is a e_text, they become unhappy.
 		 */
 		e_text = NULL;
+		free_PA_ENC_TS_ENC(&p);
 		goto out;
 	    }
+	    free_PA_ENC_TS_ENC(&p);
 	    et.flags.pre_authent = 1;
 
 	    set_salt_padata(rep.padata, pa_key->salt);
@@ -1770,7 +1816,7 @@ _kdc_as_rep(krb5_context context,
 
 	sent_pac_request = send_pac_p(context, req, &pac_request);
 
-	ret = _kdc_pac_generate(context, client, pk_reply_key,
+	ret = _kdc_pac_generate(context, client, server, pk_reply_key,
 				sent_pac_request ? &pac_request : NULL,
 				&p);
 	if (ret) {
@@ -1794,6 +1840,7 @@ _kdc_as_rep(krb5_context context,
 				 &skey->key, /* Server key */
 				 &krbtgt_key->key, /* TGS key */
 				 rodc_id,
+				 false, /* add_full_sig */
 				 &data);
 	    krb5_free_principal(context, client_pac);
 	    krb5_pac_free(context, p);

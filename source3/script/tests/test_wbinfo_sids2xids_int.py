@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 
-from __future__ import print_function
 import sys
 import os
 import subprocess
-from samba.compat import get_string
+from samba.common import get_string
 
 
 if len(sys.argv) != 3:

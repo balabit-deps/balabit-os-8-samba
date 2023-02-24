@@ -164,9 +164,11 @@ static DIR *skel_fdopendir(vfs_handle_struct *handle, files_struct *fsp,
 }
 
 static struct dirent *skel_readdir(vfs_handle_struct *handle,
-				   DIR *dirp, SMB_STRUCT_STAT *sbuf)
+				   struct files_struct *dirfsp,
+				   DIR *dirp,
+				   SMB_STRUCT_STAT *sbuf)
 {
-	return SMB_VFS_NEXT_READDIR(handle, dirp, sbuf);
+	return SMB_VFS_NEXT_READDIR(handle, dirfsp, dirp, sbuf);
 }
 
 static void skel_seekdir(vfs_handle_struct *handle, DIR *dirp, long offset)
@@ -212,7 +214,6 @@ static int skel_openat(struct vfs_handle_struct *handle,
 
 static NTSTATUS skel_create_file(struct vfs_handle_struct *handle,
 				 struct smb_request *req,
-				 struct files_struct **dirfsp,
 				 struct smb_filename *smb_fname,
 				 uint32_t access_mask,
 				 uint32_t share_access,
@@ -231,7 +232,6 @@ static NTSTATUS skel_create_file(struct vfs_handle_struct *handle,
 {
 	return SMB_VFS_NEXT_CREATE_FILE(handle,
 					req,
-					dirfsp,
 					smb_fname,
 					access_mask,
 					share_access,
@@ -491,13 +491,6 @@ static int skel_unlinkat(vfs_handle_struct *handle,
 			flags);
 }
 
-static int skel_chmod(vfs_handle_struct *handle,
-			const struct smb_filename *smb_fname,
-			mode_t mode)
-{
-	return SMB_VFS_NEXT_CHMOD(handle, smb_fname, mode);
-}
-
 static int skel_fchmod(vfs_handle_struct *handle, files_struct *fsp,
 		       mode_t mode)
 {
@@ -530,11 +523,11 @@ static struct smb_filename *skel_getwd(vfs_handle_struct *handle,
 	return SMB_VFS_NEXT_GETWD(handle, ctx);
 }
 
-static int skel_ntimes(vfs_handle_struct *handle,
-		       const struct smb_filename *smb_fname,
-		       struct smb_file_time *ft)
+static int skel_fntimes(vfs_handle_struct *handle,
+			files_struct *fsp,
+			struct smb_file_time *ft)
 {
-	return SMB_VFS_NEXT_NTIMES(handle, smb_fname, ft);
+	return SMB_VFS_NEXT_FNTIMES(handle, fsp, ft);
 }
 
 static int skel_ftruncate(vfs_handle_struct *handle, files_struct *fsp,
@@ -602,7 +595,7 @@ static int skel_symlinkat(vfs_handle_struct *handle,
 }
 
 static int skel_vfs_readlinkat(vfs_handle_struct *handle,
-			files_struct *dirfsp,
+			const struct files_struct *dirfsp,
 			const struct smb_filename *smb_fname,
 			char *buf,
 			size_t bufsiz)
@@ -649,11 +642,11 @@ static struct smb_filename *skel_realpath(vfs_handle_struct *handle,
 	return SMB_VFS_NEXT_REALPATH(handle, ctx, smb_fname);
 }
 
-static int skel_chflags(vfs_handle_struct *handle,
-			const struct smb_filename *smb_fname,
+static int skel_fchflags(vfs_handle_struct *handle,
+			struct files_struct *fsp,
 			uint flags)
 {
-	return SMB_VFS_NEXT_CHFLAGS(handle, smb_fname, flags);
+	return SMB_VFS_NEXT_FCHFLAGS(handle, fsp, flags);
 }
 
 static struct file_id skel_file_id_create(vfs_handle_struct *handle,
@@ -829,13 +822,12 @@ static NTSTATUS skel_offload_write_recv(struct vfs_handle_struct *handle,
 	return NT_STATUS_OK;
 }
 
-static NTSTATUS skel_get_compression(struct vfs_handle_struct *handle,
+static NTSTATUS skel_fget_compression(struct vfs_handle_struct *handle,
 				     TALLOC_CTX *mem_ctx,
 				     struct files_struct *fsp,
-				     struct smb_filename *smb_fname,
 				     uint16_t *_compression_fmt)
 {
-	return SMB_VFS_NEXT_GET_COMPRESSION(handle, mem_ctx, fsp, smb_fname,
+	return SMB_VFS_NEXT_FGET_COMPRESSION(handle, mem_ctx, fsp,
 					    _compression_fmt);
 }
 
@@ -848,16 +840,14 @@ static NTSTATUS skel_set_compression(struct vfs_handle_struct *handle,
 					    compression_fmt);
 }
 
-static NTSTATUS skel_streaminfo(struct vfs_handle_struct *handle,
-				struct files_struct *fsp,
-				const struct smb_filename *smb_fname,
-				TALLOC_CTX *mem_ctx,
-				unsigned int *num_streams,
-				struct stream_struct **streams)
+static NTSTATUS skel_fstreaminfo(struct vfs_handle_struct *handle,
+				 struct files_struct *fsp,
+				 TALLOC_CTX *mem_ctx,
+				 unsigned int *num_streams,
+				 struct stream_struct **streams)
 {
-	return SMB_VFS_NEXT_STREAMINFO(handle,
+	return SMB_VFS_NEXT_FSTREAMINFO(handle,
 				fsp,
-				smb_fname,
 				mem_ctx,
 				num_streams,
 				streams);
@@ -908,6 +898,19 @@ static NTSTATUS skel_translate_name(struct vfs_handle_struct *handle,
 					   mem_ctx, pmapped_name);
 }
 
+static NTSTATUS skel_parent_pathname(struct vfs_handle_struct *handle,
+				     TALLOC_CTX *mem_ctx,
+				     const struct smb_filename *smb_fname_in,
+				     struct smb_filename **parent_dir_out,
+				     struct smb_filename **atname_out)
+{
+	return SMB_VFS_NEXT_PARENT_PATHNAME(handle,
+					    mem_ctx,
+					    smb_fname_in,
+					    parent_dir_out,
+					    atname_out);
+}
+
 static NTSTATUS skel_fsctl(struct vfs_handle_struct *handle,
 			   struct files_struct *fsp,
 			   TALLOC_CTX *ctx,
@@ -927,21 +930,12 @@ static NTSTATUS skel_fsctl(struct vfs_handle_struct *handle,
 				  in_len, _out_data, max_out_len, out_len);
 }
 
-static NTSTATUS skel_readdir_attr(struct vfs_handle_struct *handle,
-				  const struct smb_filename *fname,
-				  TALLOC_CTX *mem_ctx,
-				  struct readdir_attr_data **pattr_data)
+static NTSTATUS skel_freaddir_attr(struct vfs_handle_struct *handle,
+				   struct files_struct *fsp,
+				   TALLOC_CTX *mem_ctx,
+				   struct readdir_attr_data **pattr_data)
 {
-	return SMB_VFS_NEXT_READDIR_ATTR(handle, fname, mem_ctx, pattr_data);
-}
-
-static NTSTATUS skel_get_dos_attributes(struct vfs_handle_struct *handle,
-				struct smb_filename *smb_fname,
-				uint32_t *dosmode)
-{
-	return SMB_VFS_NEXT_GET_DOS_ATTRIBUTES(handle,
-				smb_fname,
-				dosmode);
+	return SMB_VFS_NEXT_FREADDIR_ATTR(handle, fsp, mem_ctx, pattr_data);
 }
 
 struct skel_get_dos_attributes_state {
@@ -1032,15 +1026,6 @@ static NTSTATUS skel_fget_dos_attributes(struct vfs_handle_struct *handle,
 				dosmode);
 }
 
-static NTSTATUS skel_set_dos_attributes(struct vfs_handle_struct *handle,
-				const struct smb_filename *smb_fname,
-				uint32_t dosmode)
-{
-	return SMB_VFS_NEXT_SET_DOS_ATTRIBUTES(handle,
-				smb_fname,
-				dosmode);
-}
-
 static NTSTATUS skel_fset_dos_attributes(struct vfs_handle_struct *handle,
 				struct files_struct *fsp,
 				uint32_t dosmode)
@@ -1059,21 +1044,6 @@ static NTSTATUS skel_fget_nt_acl(vfs_handle_struct *handle, files_struct *fsp,
 					ppdesc);
 }
 
-static NTSTATUS skel_get_nt_acl_at(vfs_handle_struct *handle,
-				struct files_struct *dirfsp,
-				const struct smb_filename *smb_fname,
-				uint32_t security_info,
-				TALLOC_CTX *mem_ctx,
-				struct security_descriptor **ppdesc)
-{
-	return SMB_VFS_NEXT_GET_NT_ACL_AT(handle,
-				dirfsp,
-				smb_fname,
-				security_info,
-				mem_ctx,
-				ppdesc);
-}
-
 static NTSTATUS skel_fset_nt_acl(vfs_handle_struct *handle, files_struct *fsp,
 				 uint32_t security_info_sent,
 				 const struct security_descriptor *psd)
@@ -1081,28 +1051,12 @@ static NTSTATUS skel_fset_nt_acl(vfs_handle_struct *handle, files_struct *fsp,
 	return SMB_VFS_NEXT_FSET_NT_ACL(handle, fsp, security_info_sent, psd);
 }
 
-static SMB_ACL_T skel_sys_acl_get_file(vfs_handle_struct *handle,
-				       const struct smb_filename *smb_fname,
-				       SMB_ACL_TYPE_T type,
-				       TALLOC_CTX *mem_ctx)
-{
-	return SMB_VFS_NEXT_SYS_ACL_GET_FILE(handle, smb_fname, type, mem_ctx);
-}
-
 static SMB_ACL_T skel_sys_acl_get_fd(vfs_handle_struct *handle,
-				     files_struct *fsp, TALLOC_CTX *mem_ctx)
+				     files_struct *fsp,
+				     SMB_ACL_TYPE_T type,
+				     TALLOC_CTX *mem_ctx)
 {
-	return SMB_VFS_NEXT_SYS_ACL_GET_FD(handle, fsp, mem_ctx);
-}
-
-static int skel_sys_acl_blob_get_file(vfs_handle_struct *handle,
-				const struct smb_filename *smb_fname,
-				TALLOC_CTX *mem_ctx,
-				char **blob_description,
-				DATA_BLOB *blob)
-{
-	return SMB_VFS_NEXT_SYS_ACL_BLOB_GET_FILE(handle, smb_fname, mem_ctx,
-						  blob_description, blob);
+	return SMB_VFS_NEXT_SYS_ACL_GET_FD(handle, fsp, type, mem_ctx);
 }
 
 static int skel_sys_acl_blob_get_fd(vfs_handle_struct *handle,
@@ -1113,34 +1067,18 @@ static int skel_sys_acl_blob_get_fd(vfs_handle_struct *handle,
 						blob_description, blob);
 }
 
-static int skel_sys_acl_set_file(vfs_handle_struct *handle,
-				const struct smb_filename *smb_fname,
-				SMB_ACL_TYPE_T acltype,
-				SMB_ACL_T theacl)
-{
-	return SMB_VFS_NEXT_SYS_ACL_SET_FILE(handle, smb_fname,
-			acltype, theacl);
-}
-
-static int skel_sys_acl_set_fd(vfs_handle_struct *handle, files_struct *fsp,
+static int skel_sys_acl_set_fd(vfs_handle_struct *handle,
+			       struct files_struct *fsp,
+			       SMB_ACL_TYPE_T type,
 			       SMB_ACL_T theacl)
 {
-	return SMB_VFS_NEXT_SYS_ACL_SET_FD(handle, fsp, theacl);
+	return SMB_VFS_NEXT_SYS_ACL_SET_FD(handle, fsp, type, theacl);
 }
 
-static int skel_sys_acl_delete_def_file(vfs_handle_struct *handle,
-					const struct smb_filename *smb_fname)
+static int skel_sys_acl_delete_def_fd(vfs_handle_struct *handle,
+					struct files_struct *fsp)
 {
-	return SMB_VFS_NEXT_SYS_ACL_DELETE_DEF_FILE(handle, smb_fname);
-}
-
-static ssize_t skel_getxattr(vfs_handle_struct *handle,
-				const struct smb_filename *smb_fname,
-				const char *name,
-				void *value,
-				size_t size)
-{
-	return SMB_VFS_NEXT_GETXATTR(handle, smb_fname, name, value, size);
+	return SMB_VFS_NEXT_SYS_ACL_DELETE_DEF_FD(handle, fsp);
 }
 
 struct skel_getxattrat_state {
@@ -1236,14 +1174,6 @@ static ssize_t skel_fgetxattr(vfs_handle_struct *handle,
 	return SMB_VFS_NEXT_FGETXATTR(handle, fsp, name, value, size);
 }
 
-static ssize_t skel_listxattr(vfs_handle_struct *handle,
-				const struct smb_filename *smb_fname,
-				char *list,
-				size_t size)
-{
-	return SMB_VFS_NEXT_LISTXATTR(handle, smb_fname, list, size);
-}
-
 static ssize_t skel_flistxattr(vfs_handle_struct *handle,
 			       struct files_struct *fsp, char *list,
 			       size_t size)
@@ -1251,28 +1181,10 @@ static ssize_t skel_flistxattr(vfs_handle_struct *handle,
 	return SMB_VFS_NEXT_FLISTXATTR(handle, fsp, list, size);
 }
 
-static int skel_removexattr(vfs_handle_struct *handle,
-			const struct smb_filename *smb_fname,
-			const char *name)
-{
-	return SMB_VFS_NEXT_REMOVEXATTR(handle, smb_fname, name);
-}
-
 static int skel_fremovexattr(vfs_handle_struct *handle,
 			     struct files_struct *fsp, const char *name)
 {
 	return SMB_VFS_NEXT_FREMOVEXATTR(handle, fsp, name);
-}
-
-static int skel_setxattr(vfs_handle_struct *handle,
-			const struct smb_filename *smb_fname,
-			const char *name,
-			const void *value,
-			size_t size,
-			int flags)
-{
-	return SMB_VFS_NEXT_SETXATTR(handle, smb_fname,
-			name, value, size, flags);
 }
 
 static int skel_fsetxattr(vfs_handle_struct *handle, struct files_struct *fsp,
@@ -1394,13 +1306,12 @@ static struct vfs_fn_pointers skel_transparent_fns = {
 	.lstat_fn = skel_lstat,
 	.get_alloc_size_fn = skel_get_alloc_size,
 	.unlinkat_fn = skel_unlinkat,
-	.chmod_fn = skel_chmod,
 	.fchmod_fn = skel_fchmod,
 	.fchown_fn = skel_fchown,
 	.lchown_fn = skel_lchown,
 	.chdir_fn = skel_chdir,
 	.getwd_fn = skel_getwd,
-	.ntimes_fn = skel_ntimes,
+	.fntimes_fn = skel_fntimes,
 	.ftruncate_fn = skel_ftruncate,
 	.fallocate_fn = skel_fallocate,
 	.lock_fn = skel_lock,
@@ -1413,61 +1324,52 @@ static struct vfs_fn_pointers skel_transparent_fns = {
 	.linkat_fn = skel_linkat,
 	.mknodat_fn = skel_mknodat,
 	.realpath_fn = skel_realpath,
-	.chflags_fn = skel_chflags,
+	.fchflags_fn = skel_fchflags,
 	.file_id_create_fn = skel_file_id_create,
 	.fs_file_id_fn = skel_fs_file_id,
 	.offload_read_send_fn = skel_offload_read_send,
 	.offload_read_recv_fn = skel_offload_read_recv,
 	.offload_write_send_fn = skel_offload_write_send,
 	.offload_write_recv_fn = skel_offload_write_recv,
-	.get_compression_fn = skel_get_compression,
+	.fget_compression_fn = skel_fget_compression,
 	.set_compression_fn = skel_set_compression,
 
-	.streaminfo_fn = skel_streaminfo,
+	.fstreaminfo_fn = skel_fstreaminfo,
 	.get_real_filename_fn = skel_get_real_filename,
 	.connectpath_fn = skel_connectpath,
 	.brl_lock_windows_fn = skel_brl_lock_windows,
 	.brl_unlock_windows_fn = skel_brl_unlock_windows,
 	.strict_lock_check_fn = skel_strict_lock_check,
 	.translate_name_fn = skel_translate_name,
+	.parent_pathname_fn = skel_parent_pathname,
 	.fsctl_fn = skel_fsctl,
-	.readdir_attr_fn = skel_readdir_attr,
+	.freaddir_attr_fn = skel_freaddir_attr,
 	.audit_file_fn = skel_audit_file,
 
 	/* DOS attributes. */
-	.get_dos_attributes_fn = skel_get_dos_attributes,
 	.get_dos_attributes_send_fn = skel_get_dos_attributes_send,
 	.get_dos_attributes_recv_fn = skel_get_dos_attributes_recv,
 	.fget_dos_attributes_fn = skel_fget_dos_attributes,
-	.set_dos_attributes_fn = skel_set_dos_attributes,
 	.fset_dos_attributes_fn = skel_fset_dos_attributes,
 
 	/* NT ACL operations. */
 
 	.fget_nt_acl_fn = skel_fget_nt_acl,
-	.get_nt_acl_at_fn = skel_get_nt_acl_at,
 	.fset_nt_acl_fn = skel_fset_nt_acl,
 
 	/* POSIX ACL operations. */
 
-	.sys_acl_get_file_fn = skel_sys_acl_get_file,
 	.sys_acl_get_fd_fn = skel_sys_acl_get_fd,
-	.sys_acl_blob_get_file_fn = skel_sys_acl_blob_get_file,
 	.sys_acl_blob_get_fd_fn = skel_sys_acl_blob_get_fd,
-	.sys_acl_set_file_fn = skel_sys_acl_set_file,
 	.sys_acl_set_fd_fn = skel_sys_acl_set_fd,
-	.sys_acl_delete_def_file_fn = skel_sys_acl_delete_def_file,
+	.sys_acl_delete_def_fd_fn = skel_sys_acl_delete_def_fd,
 
 	/* EA operations. */
-	.getxattr_fn = skel_getxattr,
 	.getxattrat_send_fn = skel_getxattrat_send,
 	.getxattrat_recv_fn = skel_getxattrat_recv,
 	.fgetxattr_fn = skel_fgetxattr,
-	.listxattr_fn = skel_listxattr,
 	.flistxattr_fn = skel_flistxattr,
-	.removexattr_fn = skel_removexattr,
 	.fremovexattr_fn = skel_fremovexattr,
-	.setxattr_fn = skel_setxattr,
 	.fsetxattr_fn = skel_fsetxattr,
 
 	/* aio operations */

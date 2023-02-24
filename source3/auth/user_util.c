@@ -24,19 +24,6 @@
 #include "auth.h"
 #include "lib/gencache.h"
 
-#ifdef HAVE_NETGROUP
-/* rpc/xdr.h uses TRUE and FALSE */
-#ifdef TRUE
-#undef TRUE
-#endif
-
-#ifdef FALSE
-#undef FALSE
-#endif
-
-#include "system/nis.h"
-#endif
-
 /*******************************************************************
  Map a username from a dos name to a unix name by looking in the username
  map. Note that this modifies the name in place.
@@ -149,22 +136,22 @@ static void store_map_in_gencache(TALLOC_CTX *ctx, const char *from, const char 
 bool user_in_netgroup(TALLOC_CTX *ctx, const char *user, const char *ngname)
 {
 #ifdef HAVE_NETGROUP
-	static char *my_yp_domain = NULL;
+	char nis_domain_buf[256];
+	const char *nis_domain = NULL;
 	char *lowercase_user = NULL;
 
-	if (my_yp_domain == NULL) {
-		yp_get_default_domain(&my_yp_domain);
-	}
-
-	if (my_yp_domain == NULL) {
+	if (getdomainname(nis_domain_buf, sizeof(nis_domain_buf)) == 0) {
+		nis_domain = &nis_domain_buf[0];
+	} else {
 		DEBUG(5,("Unable to get default yp domain, "
 			"let's try without specifying it\n"));
+		nis_domain = NULL;
 	}
 
 	DEBUG(5,("looking for user %s of domain %s in netgroup %s\n",
-		user, my_yp_domain?my_yp_domain:"(ANY)", ngname));
+		user, nis_domain ? nis_domain : "(ANY)", ngname));
 
-	if (innetgr(ngname, NULL, user, my_yp_domain)) {
+	if (innetgr(ngname, NULL, user, nis_domain)) {
 		DEBUG(5,("user_in_netgroup: Found\n"));
 		return true;
 	}
@@ -187,9 +174,9 @@ bool user_in_netgroup(TALLOC_CTX *ctx, const char *user, const char *ngname)
 	}
 
 	DEBUG(5,("looking for user %s of domain %s in netgroup %s\n",
-		lowercase_user, my_yp_domain?my_yp_domain:"(ANY)", ngname));
+		lowercase_user, nis_domain ? nis_domain : "(ANY)", ngname));
 
-	if (innetgr(ngname, NULL, lowercase_user, my_yp_domain)) {
+	if (innetgr(ngname, NULL, lowercase_user, nis_domain)) {
 		DEBUG(5,("user_in_netgroup: Found\n"));
 		return true;
 	}

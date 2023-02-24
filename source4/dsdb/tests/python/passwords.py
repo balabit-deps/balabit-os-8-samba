@@ -8,7 +8,6 @@
 # secured enough (SASL with a minimum of 128 Bit encryption) - consider
 # MS-ADTS 3.1.1.3.1.5
 
-from __future__ import print_function
 import optparse
 import sys
 import base64
@@ -36,7 +35,6 @@ from samba import gensec
 from samba.samdb import SamDB
 import samba.tests
 from samba.tests import delete_force
-from password_lockout_base import BasePasswordTestCase
 
 parser = optparse.OptionParser("passwords.py [options] <host>")
 sambaopts = options.SambaOptions(parser)

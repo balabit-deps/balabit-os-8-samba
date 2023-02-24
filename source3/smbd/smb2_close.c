@@ -163,7 +163,20 @@ static void setup_close_full_information(connection_struct *conn,
 				uint64_t *out_end_of_file,
 				uint32_t *out_file_attributes)
 {
+	NTSTATUS status;
 	int ret;
+
+	status = openat_pathref_fsp(conn->cwd_fsp, smb_fname);
+	if (NT_STATUS_EQUAL(status, NT_STATUS_OBJECT_NAME_NOT_FOUND) &&
+	    (smb_fname->flags & SMB_FILENAME_POSIX_PATH) &&
+	    S_ISLNK(smb_fname->st.st_ex_mode))
+	{
+		status = NT_STATUS_OK;
+	}
+	if (!NT_STATUS_IS_OK(status)) {
+		return;
+	}
+
 	if (posix_open) {
 		ret = SMB_VFS_LSTAT(conn, smb_fname);
 	} else {
@@ -174,7 +187,7 @@ static void setup_close_full_information(connection_struct *conn,
 	}
 
 	*out_flags = SMB2_CLOSE_FLAGS_FULL_INFORMATION;
-	*out_file_attributes = dos_mode(conn, smb_fname);
+	*out_file_attributes = fdos_mode(smb_fname->fsp);
 	*out_last_write_ts = smb_fname->st.st_ex_mtime;
 	*out_last_access_ts = smb_fname->st.st_ex_atime;
 	*out_creation_ts = get_create_timespec(conn, NULL, smb_fname);

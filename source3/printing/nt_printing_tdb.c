@@ -27,6 +27,7 @@
 #include "librpc/gen_ndr/ndr_security.h"
 #include "libcli/security/security.h"
 #include "util_tdb.h"
+#include "lib/util/string_wrappers.h"
 
 #define FORMS_PREFIX "FORMS/"
 #define DRIVERS_PREFIX "DRIVERS/"
@@ -209,6 +210,7 @@ static int sec_desc_upg_fn( TDB_CONTEXT *the_tdb, TDB_DATA key,
 			case READ_CONTROL_ACCESS:
 				sec->dacl->aces[i].access_mask = PRINTER_ACE_MANAGE_DOCUMENTS;
 
+				break;
 			default:	/* no change */
 				break;
 		}

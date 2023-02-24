@@ -63,6 +63,7 @@
  * implement this yet.
  */
 #define NTTIME_FREEZE UINT64_MAX
+#define NTTIME_THAW (UINT64_MAX - 1)
 
 #define SAMBA_UTIME_NOW UTIME_NOW
 #define SAMBA_UTIME_OMIT UTIME_OMIT
@@ -342,6 +343,8 @@ bool nt_time_equal(NTTIME *t1, NTTIME *t2);
 
 void interpret_dos_date(uint32_t date,int *year,int *month,int *day,int *hour,int *minute,int *second);
 
+struct timespec nt_time_to_unix_timespec_raw(NTTIME nt);
+
 struct timespec nt_time_to_unix_timespec(NTTIME nt);
 
 time_t convert_timespec_to_time_t(struct timespec ts);
@@ -360,6 +363,7 @@ void round_timespec_to_sec(struct timespec *ts);
 void round_timespec_to_usec(struct timespec *ts);
 void round_timespec_to_nttime(struct timespec *ts);
 NTTIME unix_timespec_to_nt_time(struct timespec ts);
+void normalize_timespec(struct timespec *ts);
 
 /*
  * Functions supporting the full range of time_t and struct timespec values,
@@ -374,5 +378,23 @@ struct timespec nt_time_to_full_timespec(NTTIME nt);
 time_t full_timespec_to_time_t(const struct timespec *ts);
 time_t nt_time_to_full_time_t(NTTIME nt);
 struct timespec time_t_to_full_timespec(time_t t);
+
+/*
+ * Functions to get and set the number of nanoseconds for times in a stat field.
+ * If the stat has timestamp granularity less than nanosecond, then the set_*
+ * operations will be lossy.
+ */
+struct stat;
+time_t get_atimensec(const struct stat *);
+time_t get_mtimensec(const struct stat *);
+time_t get_ctimensec(const struct stat *);
+void set_atimensec(struct stat *, time_t);
+void set_mtimensec(struct stat *, time_t);
+void set_ctimensec(struct stat *, time_t);
+
+/* These are convenience wrappers for the above getters. */
+struct timespec get_atimespec(const struct stat *);
+struct timespec get_mtimespec(const struct stat *);
+struct timespec get_ctimespec(const struct stat *);
 
 #endif /* _SAMBA_TIME_H_ */

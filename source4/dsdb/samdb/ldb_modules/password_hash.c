@@ -65,6 +65,9 @@
 #define MINIMUM_GPGME_VERSION "1.2.0"
 #endif
 
+#undef strncasecmp
+#undef strcasecmp
+
 /* If we have decided there is a reason to work on this request, then
  * setup all the password hash types correctly.
  *
@@ -1554,6 +1557,7 @@ static int setup_primary_userPassword_hash(
 	 * RHEL 7 behaviour.
 	 */
 	errno = 0;
+
 #ifdef HAVE_CRYPT_RN
 	hash = crypt_rn((char *)io->n.cleartext_utf8->data,
 			cmd,
@@ -1568,18 +1572,29 @@ static int setup_primary_userPassword_hash(
 	 */
 	hash = crypt((char *)io->n.cleartext_utf8->data, cmd);
 #endif
-	if (hash == NULL) {
+	/*
+	* On error, crypt() and crypt_r() may return a null pointer,
+	* or a pointer to an invalid hash beginning with a '*'.
+	*/
+	if (hash == NULL || hash[0] == '*') {
 		char buf[1024];
-		int err = strerror_r(errno, buf, sizeof(buf));
-		if (err != 0) {
-			strlcpy(buf, "Unknown error", sizeof(buf)-1);
+		const char *reason = NULL;
+		if (errno == ERANGE) {
+			reason = "Password exceeds maximum length allowed for crypt() hashing";
+		} else {
+			int err = strerror_r(errno, buf, sizeof(buf));
+			if (err == 0) {
+				reason = buf;
+			} else {
+				reason = "Unknown error";
+			}
 		}
 		ldb_asprintf_errstring(
 			ldb,
 			"setup_primary_userPassword: generation of a %s "
 			"password hash failed: (%s)",
 			scheme,
-			buf);
+			reason);
 		TALLOC_FREE(frame);
 		return LDB_ERR_OPERATIONS_ERROR;
 	}
@@ -2045,7 +2060,12 @@ static int setup_supplemental_field(struct setup_password_fields_io *io)
 		num_packages++;
 	}
 
-	if (io->ac->userPassword_schemes) {
+	/*
+	 * Don't generate crypt() or similar password for the krbtgt account.
+	 * It's unnecessary, and the length of the cleartext in UTF-8 form
+	 * exceeds the maximum (CRYPT_MAX_PASSPHRASE_SIZE) allowed by crypt().
+	 */
+	if (io->ac->userPassword_schemes && !io->u.is_krbtgt) {
 		/*
 		 * setup 'Primary:userPassword' element
 		 */
@@ -3008,7 +3028,6 @@ static int check_password_restrictions_and_log(struct setup_password_fields_io *
 		 * logs are consistent, even if some elements are always NULL.
 		 */
 		struct auth_usersupplied_info ui = {
-			.mapped_state = true,
 			.was_mapped = true,
 			.client = {
 				.account_name = io->u.sAMAccountName,

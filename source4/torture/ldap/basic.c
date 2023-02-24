@@ -1,5 +1,5 @@
 /* 
-   Unix SMB/CIFS mplementation.
+   Unix SMB/CIFS Implementation.
    LDAP protocol helper functions for SAMBA
    
    Copyright (C) Stefan Metzmacher 2004
@@ -24,24 +24,12 @@
 #include "includes.h"
 #include "ldb_wrap.h"
 #include "libcli/ldap/ldap_client.h"
-#include "lib/cmdline/popt_common.h"
+#include "lib/cmdline/cmdline.h"
 
 #include "torture/torture.h"
 #include "torture/ldap/proto.h"
 
-
-static bool test_bind_simple(struct ldap_connection *conn, const char *userdn, const char *password)
-{
-	NTSTATUS status;
-	bool ret = true;
-
-	status = torture_ldap_bind(conn, userdn, password);
-	if (!NT_STATUS_IS_OK(status)) {
-		ret = false;
-	}
-
-	return ret;
-}
+#undef strcasecmp
 
 static bool test_bind_sasl(struct torture_context *tctx,
 			   struct ldap_connection *conn, struct cli_credentials *creds)
@@ -61,22 +49,31 @@ static bool test_bind_sasl(struct torture_context *tctx,
 
 static bool test_multibind(struct ldap_connection *conn, const char *userdn, const char *password)
 {
-	bool ret = true;
+	NTSTATUS status, expected;
+	bool ok;
 
 	printf("Testing multiple binds on a single connection as anonymous and user\n");
 
-	ret = test_bind_simple(conn, NULL, NULL);
-	if (!ret) {
-		printf("1st bind as anonymous failed\n");
-		return ret;
+	status = torture_ldap_bind(conn, NULL, NULL);
+	if (!NT_STATUS_IS_OK(status)) {
+		printf("1st bind as anonymous failed with %s\n",
+		       nt_errstr(status));
+		return false;
 	}
 
-	ret = test_bind_simple(conn, userdn, password);
-	if (!ret) {
-		printf("2nd bind as authenticated user failed\n");
+	expected = NT_STATUS_LDAP(LDAP_STRONG_AUTH_REQUIRED);
+	status = torture_ldap_bind(conn, userdn, password);
+
+	ok = NT_STATUS_EQUAL(status, expected);
+	if (!ok) {
+		printf("2nd bind as authenticated user should have "
+		       "failed with: %s, got %s\n",
+		       nt_errstr(expected),
+		       nt_errstr(status));
+		return false;
 	}
 
-	return ret;
+	return true;
 }
 
 static bool test_search_rootDSE(struct ldap_connection *conn, const char **basedn,
@@ -131,7 +128,7 @@ static bool test_search_rootDSE(struct ldap_connection *conn, const char **based
 		
 	DEBUG(1,("\tdn: %s\n", r->dn));
 	for (i=0; i<r->num_attributes; i++) {
-		int j;
+		unsigned int j;
 		for (j=0; j<r->attributes[i].num_values; j++) {
 			DEBUG(1,("\t%s: %d %.*s\n", r->attributes[i].name,
 				 (int)r->attributes[i].values[j].length,
@@ -724,7 +721,7 @@ static bool test_referrals(struct torture_context *tctx, TALLOC_CTX *mem_ctx,
 	}
 
 	ldb = ldb_wrap_connect(mem_ctx, tctx->ev, tctx->lp_ctx, url,
-			       NULL, popt_get_cmdline_credentials(), 0);
+			       NULL, samba_cmdline_get_creds(), 0);
 
 	/* "partitions[i]" are the partitions for which we search the parents */
 	for (i = 1; partitions[i] != NULL; i++) {
@@ -968,7 +965,7 @@ bool torture_ldap_basic(struct torture_context *torture)
 		ret = false;
 	}
 
-	if (!test_bind_sasl(torture, conn, popt_get_cmdline_credentials())) {
+	if (!test_bind_sasl(torture, conn, samba_cmdline_get_creds())) {
 		ret = false;
 	}
 
@@ -999,6 +996,8 @@ bool torture_ldap_basic(struct torture_context *torture)
 	/* if there are no more tests we are closing */
 	torture_ldap_close(conn);
 	talloc_free(mem_ctx);
+
+	torture_assert(torture, ret, "torture_ldap_basic failed");
 
 	return ret;
 }

@@ -15,8 +15,6 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
-
-from __future__ import print_function
 """Tests process restarting in the pre-fork process model.
    NOTE: As this test kills samba processes it won't play nicely with other
          tests, so needs to be run in it's own environment.
@@ -33,7 +31,7 @@ from samba.dcerpc import echo, netlogon
 from samba.messaging import Messaging
 from samba.samdb import SamDB
 from samba.credentials import Credentials, DONT_USE_KERBEROS
-from samba.compat import get_string
+from samba.common import get_string
 from samba.dsdb import (
     UF_WORKSTATION_TRUST_ACCOUNT,
     UF_PASSWD_NOTREQD)

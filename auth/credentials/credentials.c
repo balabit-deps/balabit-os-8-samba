@@ -30,6 +30,7 @@
 #include "tevent.h"
 #include "param/param.h"
 #include "system/filesys.h"
+#include "system/passwd.h"
 
 /**
  * Create a new credentials structure
@@ -44,7 +45,48 @@ _PUBLIC_ struct cli_credentials *cli_credentials_init(TALLOC_CTX *mem_ctx)
 
 	cred->winbind_separator = '\\';
 
+	cred->kerberos_state = CRED_USE_KERBEROS_DESIRED;
+
+	cred->signing_state = SMB_SIGNING_DEFAULT;
+
+	/*
+	 * The default value of lpcfg_client_ipc_signing() is REQUIRED, so use
+	 * the same value here.
+	 */
+	cred->ipc_signing_state = SMB_SIGNING_REQUIRED;
+	cred->encryption_state = SMB_ENCRYPTION_DEFAULT;
+
 	return cred;
+}
+
+_PUBLIC_
+struct cli_credentials *cli_credentials_init_server(TALLOC_CTX *mem_ctx,
+						    struct loadparm_context *lp_ctx)
+{
+	struct cli_credentials *server_creds = NULL;
+	NTSTATUS status;
+	bool ok;
+
+	server_creds = cli_credentials_init(mem_ctx);
+	if (server_creds == NULL) {
+		return NULL;
+	}
+
+	ok = cli_credentials_set_conf(server_creds, lp_ctx);
+	if (!ok) {
+		TALLOC_FREE(server_creds);
+		return NULL;
+	}
+
+	status = cli_credentials_set_machine_account(server_creds, lp_ctx);
+	if (!NT_STATUS_IS_OK(status)) {
+		DEBUG(1, ("Failed to obtain server credentials: %s\n",
+			  nt_errstr(status)));
+		TALLOC_FREE(server_creds);
+		return NULL;
+	}
+
+	return server_creds;
 }
 
 _PUBLIC_ void cli_credentials_set_callback_data(struct cli_credentials *cred,
@@ -72,10 +114,18 @@ _PUBLIC_ struct cli_credentials *cli_credentials_init_anon(TALLOC_CTX *mem_ctx)
 	return anon_credentials;
 }
 
-_PUBLIC_ void cli_credentials_set_kerberos_state(struct cli_credentials *creds, 
-					enum credentials_use_kerberos use_kerberos)
+_PUBLIC_ bool cli_credentials_set_kerberos_state(struct cli_credentials *creds,
+						 enum credentials_use_kerberos kerberos_state,
+						 enum credentials_obtained obtained)
 {
-	creds->use_kerberos = use_kerberos;
+	if (obtained >= creds->kerberos_state_obtained) {
+		creds->kerberos_state = kerberos_state;
+		creds->kerberos_state_obtained = obtained;
+
+		return true;
+	}
+
+	return false;
 }
 
 _PUBLIC_ void cli_credentials_set_forced_sasl_mech(struct cli_credentials *creds,
@@ -93,7 +143,7 @@ _PUBLIC_ void cli_credentials_set_krb_forwardable(struct cli_credentials *creds,
 
 _PUBLIC_ enum credentials_use_kerberos cli_credentials_get_kerberos_state(struct cli_credentials *creds)
 {
-	return creds->use_kerberos;
+	return creds->kerberos_state;
 }
 
 _PUBLIC_ const char *cli_credentials_get_forced_sasl_mech(struct cli_credentials *creds)
@@ -106,9 +156,18 @@ _PUBLIC_ enum credentials_krb_forwardable cli_credentials_get_krb_forwardable(st
 	return creds->krb_forwardable;
 }
 
-_PUBLIC_ void cli_credentials_set_gensec_features(struct cli_credentials *creds, uint32_t gensec_features)
+_PUBLIC_ bool cli_credentials_set_gensec_features(struct cli_credentials *creds,
+						  uint32_t gensec_features,
+						  enum credentials_obtained obtained)
 {
-	creds->gensec_features = gensec_features;
+	if (obtained >= creds->gensec_features_obtained) {
+		creds->gensec_features_obtained = obtained;
+		creds->gensec_features = gensec_features;
+
+		return true;
+	}
+
+	return false;
 }
 
 _PUBLIC_ uint32_t cli_credentials_get_gensec_features(struct cli_credentials *creds)
@@ -142,6 +201,26 @@ _PUBLIC_ const char *cli_credentials_get_username(struct cli_credentials *cred)
 	}
 
 	return cred->username;
+}
+
+/**
+ * @brief Obtain the username for this credentials context.
+ *
+ * @param[in]  cred  The credential context.
+ *
+ * @param[in]  obtained  A pointer to store the obtained information.
+ *
+ * return The user name or NULL if an error occured.
+ */
+_PUBLIC_ const char *
+cli_credentials_get_username_and_obtained(struct cli_credentials *cred,
+					  enum credentials_obtained *obtained)
+{
+	if (obtained != NULL) {
+		*obtained = cred->username_obtained;
+	}
+
+	return cli_credentials_get_username(cred);
 }
 
 _PUBLIC_ bool cli_credentials_set_username(struct cli_credentials *cred, 
@@ -326,7 +405,7 @@ _PUBLIC_ bool cli_credentials_authentication_requested(struct cli_credentials *c
 		return true;
 	}
 
-	if (cli_credentials_get_kerberos_state(cred) == CRED_MUST_USE_KERBEROS) {
+	if (cli_credentials_get_kerberos_state(cred) == CRED_USE_KERBEROS_REQUIRED) {
 		return true;
 	}
 
@@ -371,6 +450,26 @@ _PUBLIC_ const char *cli_credentials_get_password(struct cli_credentials *cred)
 	}
 
 	return cred->password;
+}
+
+/**
+ * @brief Obtain the password for this credentials context.
+ *
+ * @param[in]  cred  The credential context.
+ *
+ * @param[in]  obtained  A pointer to store the obtained information.
+ *
+ * return The user name or NULL if an error occured.
+ */
+_PUBLIC_ const char *
+cli_credentials_get_password_and_obtained(struct cli_credentials *cred,
+					  enum credentials_obtained *obtained)
+{
+	if (obtained != NULL) {
+		*obtained = cred->password_obtained;
+	}
+
+	return cli_credentials_get_password(cred);
 }
 
 /* Set a password on the credentials context, including an indication
@@ -788,6 +887,7 @@ bool cli_credentials_set_workstation_callback(struct cli_credentials *cred,
 _PUBLIC_ void cli_credentials_parse_string(struct cli_credentials *credentials, const char *data, enum credentials_obtained obtained)
 {
 	char *uname, *p;
+	char *uname_free = NULL;
 
 	if (strcmp("%",data) == 0) {
 		cli_credentials_set_anonymous(credentials);
@@ -795,6 +895,8 @@ _PUBLIC_ void cli_credentials_parse_string(struct cli_credentials *credentials, 
 	}
 
 	uname = talloc_strdup(credentials, data); 
+	uname_free = uname;
+
 	if ((p = strchr_m(uname,'%'))) {
 		*p = 0;
 		cli_credentials_set_password(credentials, p+1, obtained);
@@ -812,6 +914,7 @@ _PUBLIC_ void cli_credentials_parse_string(struct cli_credentials *credentials, 
 		cli_credentials_set_principal(credentials, uname, obtained);
 		*p = 0;
 		cli_credentials_set_realm(credentials, p+1, obtained);
+		TALLOC_FREE(uname_free);
 		return;
 	} else if ((p = strchr_m(uname,'\\'))
 		   || (p = strchr_m(uname, '/'))
@@ -853,6 +956,8 @@ _PUBLIC_ void cli_credentials_parse_string(struct cli_credentials *credentials, 
 		credentials->principal = NULL;
 	}
 	cli_credentials_set_username(credentials, uname, obtained);
+
+	TALLOC_FREE(uname_free);
 }
 
 /**
@@ -886,42 +991,162 @@ _PUBLIC_ char *cli_credentials_get_unparsed_name(struct cli_credentials *credent
 	return name;
 }
 
+
 /**
  * Specifies default values for domain, workstation and realm
  * from the smb.conf configuration file
  *
  * @param cred Credentials structure to fill in
+ *
+ * @return true on success, false on error.
  */
-_PUBLIC_ void cli_credentials_set_conf(struct cli_credentials *cred, 
-			      struct loadparm_context *lp_ctx)
+_PUBLIC_ bool cli_credentials_set_conf(struct cli_credentials *cred,
+				       struct loadparm_context *lp_ctx)
 {
 	const char *sep = NULL;
 	const char *realm = lpcfg_realm(lp_ctx);
+	enum credentials_client_protection protection =
+		lpcfg_client_protection(lp_ctx);
+	const char *workgroup = lpcfg_workgroup(lp_ctx);
+	const char *netbios_name = lpcfg_netbios_name(lp_ctx);
+	bool ok;
 
-	cli_credentials_set_username(cred, "", CRED_UNINITIALISED);
-	if (lpcfg_parm_is_cmdline(lp_ctx, "workgroup")) {
-		cli_credentials_set_domain(cred, lpcfg_workgroup(lp_ctx), CRED_SPECIFIED);
-	} else {
-		cli_credentials_set_domain(cred, lpcfg_workgroup(lp_ctx), CRED_UNINITIALISED);
+	(void)cli_credentials_set_username(cred, "", CRED_UNINITIALISED);
+
+	if (workgroup != NULL && strlen(workgroup) == 0) {
+		workgroup = NULL;
 	}
-	if (lpcfg_parm_is_cmdline(lp_ctx, "netbios name")) {
-		cli_credentials_set_workstation(cred, lpcfg_netbios_name(lp_ctx), CRED_SPECIFIED);
-	} else {
-		cli_credentials_set_workstation(cred, lpcfg_netbios_name(lp_ctx), CRED_UNINITIALISED);
+
+	if (workgroup != NULL) {
+		if (lpcfg_parm_is_cmdline(lp_ctx, "workgroup")) {
+			ok = cli_credentials_set_domain(cred,
+							workgroup,
+							CRED_SPECIFIED);
+			if (!ok) {
+				DBG_ERR("Failed to set domain!\n");
+				return false;
+			}
+		} else {
+			(void)cli_credentials_set_domain(cred,
+							 workgroup,
+							 CRED_SMB_CONF);
+		}
 	}
+
+	if (netbios_name != NULL && strlen(netbios_name) == 0) {
+		netbios_name = NULL;
+	}
+
+	if (netbios_name != NULL) {
+		if (lpcfg_parm_is_cmdline(lp_ctx, "netbios name")) {
+			ok = cli_credentials_set_workstation(cred,
+							     netbios_name,
+							     CRED_SPECIFIED);
+			if (!ok) {
+				DBG_ERR("Failed to set workstation!\n");
+				return false;
+			}
+		} else {
+			(void)cli_credentials_set_workstation(cred,
+							      netbios_name,
+							      CRED_SMB_CONF);
+		}
+	}
+
 	if (realm != NULL && strlen(realm) == 0) {
 		realm = NULL;
 	}
-	if (lpcfg_parm_is_cmdline(lp_ctx, "realm")) {
-		cli_credentials_set_realm(cred, realm, CRED_SPECIFIED);
-	} else {
-		cli_credentials_set_realm(cred, realm, CRED_UNINITIALISED);
+
+	if (realm != NULL) {
+		if (lpcfg_parm_is_cmdline(lp_ctx, "realm")) {
+			ok = cli_credentials_set_realm(cred,
+						       realm,
+						       CRED_SPECIFIED);
+			if (!ok) {
+				DBG_ERR("Failed to set realm!\n");
+				return false;
+			}
+		} else {
+			(void)cli_credentials_set_realm(cred,
+							realm,
+							CRED_SMB_CONF);
+		}
 	}
 
 	sep = lpcfg_winbind_separator(lp_ctx);
 	if (sep != NULL && sep[0] != '\0') {
 		cred->winbind_separator = *lpcfg_winbind_separator(lp_ctx);
 	}
+
+	if (cred->signing_state_obtained <= CRED_SMB_CONF) {
+		/* Will be set to default for invalid smb.conf values */
+		cred->signing_state = lpcfg_client_signing(lp_ctx);
+		if (cred->signing_state == SMB_SIGNING_DEFAULT) {
+			switch (protection) {
+			case CRED_CLIENT_PROTECTION_DEFAULT:
+				break;
+			case CRED_CLIENT_PROTECTION_PLAIN:
+				cred->signing_state = SMB_SIGNING_OFF;
+				break;
+			case CRED_CLIENT_PROTECTION_SIGN:
+			case CRED_CLIENT_PROTECTION_ENCRYPT:
+				cred->signing_state = SMB_SIGNING_REQUIRED;
+				break;
+			}
+		}
+
+		cred->signing_state_obtained = CRED_SMB_CONF;
+	}
+
+	if (cred->ipc_signing_state_obtained <= CRED_SMB_CONF) {
+		/* Will be set to required for invalid smb.conf values */
+		cred->ipc_signing_state = lpcfg_client_ipc_signing(lp_ctx);
+		cred->ipc_signing_state_obtained = CRED_SMB_CONF;
+	}
+
+	if (cred->encryption_state_obtained <= CRED_SMB_CONF) {
+		/* Will be set to default for invalid smb.conf values */
+		cred->encryption_state = lpcfg_client_smb_encrypt(lp_ctx);
+		if (cred->encryption_state == SMB_ENCRYPTION_DEFAULT) {
+			switch (protection) {
+			case CRED_CLIENT_PROTECTION_DEFAULT:
+				break;
+			case CRED_CLIENT_PROTECTION_PLAIN:
+			case CRED_CLIENT_PROTECTION_SIGN:
+				cred->encryption_state = SMB_ENCRYPTION_OFF;
+				break;
+			case CRED_CLIENT_PROTECTION_ENCRYPT:
+				cred->encryption_state = SMB_ENCRYPTION_REQUIRED;
+				break;
+			}
+		}
+	}
+
+	if (cred->kerberos_state_obtained <= CRED_SMB_CONF) {
+		/* Will be set to default for invalid smb.conf values */
+		cred->kerberos_state = lpcfg_client_use_kerberos(lp_ctx);
+		cred->kerberos_state_obtained = CRED_SMB_CONF;
+	}
+
+	if (cred->gensec_features_obtained <= CRED_SMB_CONF) {
+		switch (protection) {
+		case CRED_CLIENT_PROTECTION_DEFAULT:
+			break;
+		case CRED_CLIENT_PROTECTION_PLAIN:
+			cred->gensec_features = 0;
+			break;
+		case CRED_CLIENT_PROTECTION_SIGN:
+			cred->gensec_features = GENSEC_FEATURE_SIGN;
+			break;
+		case CRED_CLIENT_PROTECTION_ENCRYPT:
+			cred->gensec_features =
+				GENSEC_FEATURE_SIGN|GENSEC_FEATURE_SEAL;
+			break;
+		}
+		cred->gensec_features_obtained = CRED_SMB_CONF;
+	}
+
+	return true;
 }
 
 /**
@@ -930,46 +1155,104 @@ _PUBLIC_ void cli_credentials_set_conf(struct cli_credentials *cred,
  * 
  * @param cred Credentials structure to fill in
  */
-_PUBLIC_ void cli_credentials_guess(struct cli_credentials *cred,
-			   struct loadparm_context *lp_ctx)
+_PUBLIC_ bool cli_credentials_guess(struct cli_credentials *cred,
+				    struct loadparm_context *lp_ctx)
 {
-	char *p;
 	const char *error_string;
+	const char *env = NULL;
+	struct passwd *pwd = NULL;
+	bool ok;
 
 	if (lp_ctx != NULL) {
-		cli_credentials_set_conf(cred, lp_ctx);
-	}
-	
-	if (getenv("LOGNAME")) {
-		cli_credentials_set_username(cred, getenv("LOGNAME"), CRED_GUESS_ENV);
-	}
-
-	if (getenv("USER")) {
-		cli_credentials_parse_string(cred, getenv("USER"), CRED_GUESS_ENV);
-		if ((p = strchr_m(getenv("USER"),'%'))) {
-			memset(p,0,strlen(cred->password));
+		ok = cli_credentials_set_conf(cred, lp_ctx);
+		if (!ok) {
+			return false;
 		}
 	}
 
-	if (getenv("PASSWD")) {
-		cli_credentials_set_password(cred, getenv("PASSWD"), CRED_GUESS_ENV);
+	pwd = getpwuid(getuid());
+	if (pwd != NULL) {
+		size_t len = strlen(pwd->pw_name);
+
+		if (len > 0 && len <= 1024) {
+			(void)cli_credentials_parse_string(cred,
+							   pwd->pw_name,
+							   CRED_GUESS_ENV);
+		}
 	}
 
-	if (getenv("PASSWD_FD")) {
-		cli_credentials_parse_password_fd(cred, atoi(getenv("PASSWD_FD")), 
-						  CRED_GUESS_FILE);
+	env = getenv("LOGNAME");
+	if (env != NULL) {
+		size_t len = strlen(env);
+
+		if (len > 0 && len <= 1024) {
+			(void)cli_credentials_set_username(cred,
+							   env,
+							   CRED_GUESS_ENV);
+		}
 	}
-	
-	p = getenv("PASSWD_FILE");
-	if (p && p[0]) {
-		cli_credentials_parse_password_file(cred, p, CRED_GUESS_FILE);
+
+	env = getenv("USER");
+	if (env != NULL) {
+		size_t len = strlen(env);
+
+		if (len > 0 && len <= 1024) {
+			char *p = NULL;
+
+			(void)cli_credentials_parse_string(cred,
+							   env,
+							   CRED_GUESS_ENV);
+			if ((p = strchr_m(env, '%'))) {
+				memset(p, '\0', strlen(cred->password));
+			}
+		}
 	}
-	
+
+	env = getenv("PASSWD");
+	if (env != NULL) {
+		size_t len = strlen(env);
+
+		if (len > 0 && len <= 1024) {
+			(void)cli_credentials_set_password(cred,
+							   env,
+							   CRED_GUESS_ENV);
+		}
+	}
+
+	env = getenv("PASSWD_FD");
+	if (env != NULL) {
+		size_t len = strlen(env);
+
+		if (len > 0 && len <= 1024) {
+			int fd = atoi(env);
+
+			(void)cli_credentials_parse_password_fd(cred,
+								fd,
+								CRED_GUESS_FILE);
+		}
+	}
+
+	env = getenv("PASSWD_FILE");
+	if (env != NULL) {
+		size_t len = strlen(env);
+
+		if (len > 0 && len <= 4096) {
+			(void)cli_credentials_parse_password_file(cred,
+								  env,
+								  CRED_GUESS_FILE);
+		}
+	}
+
 	if (lp_ctx != NULL &&
-	    cli_credentials_get_kerberos_state(cred) != CRED_DONT_USE_KERBEROS) {
-		cli_credentials_set_ccache(cred, lp_ctx, NULL, CRED_GUESS_FILE,
-					   &error_string);
+	    cli_credentials_get_kerberos_state(cred) != CRED_USE_KERBEROS_DISABLED) {
+		(void)cli_credentials_set_ccache(cred,
+						 lp_ctx,
+						 NULL,
+						 CRED_GUESS_FILE,
+						 &error_string);
 	}
+
+	return true;
 }
 
 /**
@@ -1045,7 +1328,9 @@ _PUBLIC_ void cli_credentials_set_anonymous(struct cli_credentials *cred)
 	cli_credentials_set_principal(cred, NULL, CRED_SPECIFIED);
 	cli_credentials_set_realm(cred, NULL, CRED_SPECIFIED);
 	cli_credentials_set_workstation(cred, "", CRED_UNINITIALISED);
-	cli_credentials_set_kerberos_state(cred, CRED_DONT_USE_KERBEROS);
+	cli_credentials_set_kerberos_state(cred,
+					   CRED_USE_KERBEROS_DISABLED,
+					   CRED_SPECIFIED);
 }
 
 /**
@@ -1304,6 +1589,282 @@ _PUBLIC_ bool cli_credentials_parse_password_fd(struct cli_credentials *credenti
 	return true;
 }
 
+/**
+ * @brief Set the SMB signing state to request for a SMB connection.
+ *
+ * @param[in]  creds          The credentials structure to update.
+ *
+ * @param[in]  signing_state  The signing state to set.
+ *
+ * @param obtained            This way the described signing state was specified.
+ *
+ * @return true if we could set the signing state, false otherwise.
+ */
+_PUBLIC_ bool cli_credentials_set_smb_signing(struct cli_credentials *creds,
+					      enum smb_signing_setting signing_state,
+					      enum credentials_obtained obtained)
+{
+	if (obtained >= creds->signing_state_obtained) {
+		creds->signing_state_obtained = obtained;
+		creds->signing_state = signing_state;
+		return true;
+	}
+
+	return false;
+}
+
+/**
+ * @brief Obtain the SMB signing state from a credentials structure.
+ *
+ * @param[in]  creds  The credential structure to obtain the SMB signing state
+ *                    from.
+ *
+ * @return The SMB singing state.
+ */
+_PUBLIC_ enum smb_signing_setting
+cli_credentials_get_smb_signing(struct cli_credentials *creds)
+{
+	return creds->signing_state;
+}
+
+/**
+ * @brief Set the SMB IPC signing state to request for a SMB connection.
+ *
+ * @param[in]  creds          The credentials structure to update.
+ *
+ * @param[in]  signing_state  The signing state to set.
+ *
+ * @param obtained            This way the described signing state was specified.
+ *
+ * @return true if we could set the signing state, false otherwise.
+ */
+_PUBLIC_ bool
+cli_credentials_set_smb_ipc_signing(struct cli_credentials *creds,
+				    enum smb_signing_setting ipc_signing_state,
+				    enum credentials_obtained obtained)
+{
+	if (obtained >= creds->ipc_signing_state_obtained) {
+		creds->ipc_signing_state_obtained = obtained;
+		creds->ipc_signing_state = ipc_signing_state;
+		return true;
+	}
+
+	return false;
+}
+
+/**
+ * @brief Obtain the SMB IPC signing state from a credentials structure.
+ *
+ * @param[in]  creds  The credential structure to obtain the SMB IPC signing
+ *                    state from.
+ *
+ * @return The SMB singing state.
+ */
+_PUBLIC_ enum smb_signing_setting
+cli_credentials_get_smb_ipc_signing(struct cli_credentials *creds)
+{
+	return creds->ipc_signing_state;
+}
+
+/**
+ * @brief Set the SMB encryption state to request for a SMB connection.
+ *
+ * @param[in]  creds  The credentials structure to update.
+ *
+ * @param[in]  encryption_state  The encryption state to set.
+ *
+ * @param obtained  This way the described encryption state was specified.
+ *
+ * @return true if we could set the encryption state, false otherwise.
+ */
+_PUBLIC_ bool cli_credentials_set_smb_encryption(struct cli_credentials *creds,
+						 enum smb_encryption_setting encryption_state,
+						 enum credentials_obtained obtained)
+{
+	if (obtained >= creds->encryption_state_obtained) {
+		creds->encryption_state_obtained = obtained;
+		creds->encryption_state = encryption_state;
+		return true;
+	}
+
+	return false;
+}
+
+static const char *obtained_to_str(enum credentials_obtained obtained)
+{
+	switch (obtained) {
+	case CRED_UNINITIALISED:
+		return "CRED_UNINITIALISED";
+	case CRED_SMB_CONF:
+		return "CRED_SMB_CONF";
+	case CRED_CALLBACK:
+		return "CRED_CALLBACK";
+	case CRED_GUESS_ENV:
+		return "CRED_GUESS_ENV";
+	case CRED_GUESS_FILE:
+		return "CRED_GUESS_FILE";
+	case CRED_CALLBACK_RESULT:
+		return "CRED_CALLBACK_RESULT";
+	case CRED_SPECIFIED:
+		return "CRED_SPECIFIED";
+	}
+
+	/* Never reached */
+	return "";
+}
+
+static const char *krb5_state_to_str(enum credentials_use_kerberos krb5_state)
+{
+	switch (krb5_state) {
+	case CRED_USE_KERBEROS_DISABLED:
+		return "CRED_USE_KERBEROS_DISABLED";
+	case CRED_USE_KERBEROS_DESIRED:
+		return "CRED_USE_KERBEROS_DESIRED";
+	case CRED_USE_KERBEROS_REQUIRED:
+		return "CRED_USE_KERBEROS_REQUIRED";
+	}
+
+	/* Never reached */
+	return "";
+}
+
+static const char *krb5_fwd_to_str(enum credentials_krb_forwardable krb5_fwd)
+{
+	switch (krb5_fwd) {
+	case CRED_AUTO_KRB_FORWARDABLE:
+		return "CRED_AUTO_KRB_FORWARDABLE";
+	case CRED_NO_KRB_FORWARDABLE:
+		return "CRED_NO_KRB_FORWARDABLE";
+	case CRED_FORCE_KRB_FORWARDABLE:
+		return "CRED_FORCE_KRB_FORWARDABLE";
+	}
+
+	/* Never reached */
+	return "";
+}
+
+static const char *signing_state_to_str(enum smb_signing_setting signing_state)
+{
+	switch(signing_state) {
+	case SMB_SIGNING_IPC_DEFAULT:
+		return "SMB_SIGNING_IPC_DEFAULT";
+	case SMB_SIGNING_DEFAULT:
+		return "SMB_SIGNING_DEFAULT";
+	case SMB_SIGNING_OFF:
+		return "SMB_SIGNING_OFF";
+	case SMB_SIGNING_IF_REQUIRED:
+		return "SMB_SIGNING_IF_REQUIRED";
+	case SMB_SIGNING_DESIRED:
+		return "SMB_SIGNING_DESIRED";
+	case SMB_SIGNING_REQUIRED:
+		return "SMB_SIGNING_REQUIRED";
+	}
+
+	/* Never reached */
+	return "";
+}
+
+static const char *encryption_state_to_str(enum smb_encryption_setting encryption_state)
+{
+	switch(encryption_state) {
+	case SMB_ENCRYPTION_DEFAULT:
+		return "SMB_ENCRYPTION_DEFAULT";
+	case SMB_ENCRYPTION_OFF:
+		return "SMB_ENCRYPTION_OFF";
+	case SMB_ENCRYPTION_IF_REQUIRED:
+		return "SMB_ENCRYPTION_IF_REQUIRED";
+	case SMB_ENCRYPTION_DESIRED:
+		return "SMB_ENCRYPTION_DESIRED";
+	case SMB_ENCRYPTION_REQUIRED:
+		return "SMB_ENCRYPTION_REQUIRED";
+	}
+
+	/* Never reached */
+	return "";
+}
+
+_PUBLIC_ void cli_credentials_dump(struct cli_credentials *creds)
+{
+	DBG_ERR("CLI_CREDENTIALS:\n");
+	DBG_ERR("\n");
+	DBG_ERR("  Username: %s - %s\n",
+		creds->username,
+		obtained_to_str(creds->username_obtained));
+	DBG_ERR("  Workstation: %s - %s\n",
+		creds->workstation,
+		obtained_to_str(creds->workstation_obtained));
+	DBG_ERR("  Domain: %s - %s\n",
+		creds->domain,
+		obtained_to_str(creds->domain_obtained));
+	DBG_ERR("  Password: %s - %s\n",
+		creds->password != NULL ? "*SECRET*" : "NULL",
+		obtained_to_str(creds->password_obtained));
+	DBG_ERR("  Old password: %s\n",
+		creds->old_password != NULL ? "*SECRET*" : "NULL");
+	DBG_ERR("  Password tries: %u\n",
+		creds->password_tries);
+	DBG_ERR("  Realm: %s - %s\n",
+		creds->realm,
+		obtained_to_str(creds->realm_obtained));
+	DBG_ERR("  Principal: %s - %s\n",
+		creds->principal,
+		obtained_to_str(creds->principal_obtained));
+	DBG_ERR("  Salt principal: %s\n",
+		creds->salt_principal);
+	DBG_ERR("  Impersonate principal: %s\n",
+		creds->impersonate_principal);
+	DBG_ERR("  Self service: %s\n",
+		creds->self_service);
+	DBG_ERR("  Target service: %s\n",
+		creds->target_service);
+	DBG_ERR("  Kerberos state: %s - %s\n",
+		krb5_state_to_str(creds->kerberos_state),
+		obtained_to_str(creds->kerberos_state_obtained));
+	DBG_ERR("  Kerberos forwardable ticket: %s\n",
+		krb5_fwd_to_str(creds->krb_forwardable));
+	DBG_ERR("  Signing state: %s - %s\n",
+		signing_state_to_str(creds->signing_state),
+		obtained_to_str(creds->signing_state_obtained));
+	DBG_ERR("  IPC signing state: %s - %s\n",
+		signing_state_to_str(creds->ipc_signing_state),
+		obtained_to_str(creds->ipc_signing_state_obtained));
+	DBG_ERR("  Encryption state: %s - %s\n",
+		encryption_state_to_str(creds->encryption_state),
+		obtained_to_str(creds->encryption_state_obtained));
+	DBG_ERR("  Gensec features: %#X\n",
+		creds->gensec_features);
+	DBG_ERR("  Forced sasl mech: %s\n",
+		creds->forced_sasl_mech);
+	DBG_ERR("  CCACHE: %p - %s\n",
+		creds->ccache,
+		obtained_to_str(creds->ccache_obtained));
+	DBG_ERR("  CLIENT_GSS_CREDS: %p - %s\n",
+		creds->client_gss_creds,
+		obtained_to_str(creds->client_gss_creds_obtained));
+	DBG_ERR("  SERVER_GSS_CREDS: %p - %s\n",
+		creds->server_gss_creds,
+		obtained_to_str(creds->server_gss_creds_obtained));
+	DBG_ERR("  KEYTAB: %p - %s\n",
+		creds->keytab,
+		obtained_to_str(creds->keytab_obtained));
+	DBG_ERR("  KVNO: %u\n",
+		creds->kvno);
+	DBG_ERR("\n");
+}
+
+/**
+ * @brief Obtain the SMB encryption state from a credentials structure.
+ *
+ * @param[in]  creds  The credential structure to obtain the SMB encryption state
+ *                    from.
+ *
+ * @return The SMB singing state.
+ */
+_PUBLIC_ enum smb_encryption_setting
+cli_credentials_get_smb_encryption(struct cli_credentials *creds)
+{
+	return creds->encryption_state;
+}
 
 /**
  * Encrypt a data blob using the session key and the negotiated encryption

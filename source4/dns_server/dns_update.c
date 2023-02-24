@@ -29,7 +29,7 @@
 #include "param/loadparm.h"
 #include "dsdb/samdb/samdb.h"
 #include "dsdb/common/util.h"
-#include "smbd/service_task.h"
+#include "samba/service_task.h"
 #include "dns_server/dns_server.h"
 #include "auth/auth.h"
 
@@ -186,7 +186,7 @@ static WERROR check_one_prerequisite(struct dns_server *dns,
 	W_ERROR_NOT_OK_RETURN(werror);
 
 	for (i = 0; i < acount; i++) {
-		if (dns_records_match(rec, &ans[i])) {
+		if (dns_record_match(rec, &ans[i])) {
 			found = true;
 			break;
 		}
@@ -302,7 +302,6 @@ static WERROR dns_rr_to_dnsp(TALLOC_CTX *mem_ctx,
 			     bool name_is_static)
 {
 	enum ndr_err_code ndr_err;
-	NTTIME t;
 
 	if (rrec->rr_type == DNS_QTYPE_ALL) {
 		return DNS_ERR(FORMAT_ERROR);
@@ -316,10 +315,7 @@ static WERROR dns_rr_to_dnsp(TALLOC_CTX *mem_ctx,
 	if (name_is_static) {
 		r->dwTimeStamp = 0;
 	} else {
-		unix_to_nt_time(&t, time(NULL));
-		t /= 10 * 1000 * 1000;
-		t /= 3600;
-		r->dwTimeStamp = t;
+		r->dwTimeStamp = unix_to_dns_timestamp(time(NULL));
 	}
 
 	/* If we get QCLASS_ANY, we're done here */
@@ -413,6 +409,7 @@ static WERROR handle_one_update(struct dns_server *dns,
 	case DNS_QTYPE_AAAA:
 	case DNS_QTYPE_SRV:
 	case DNS_QTYPE_TXT:
+	case DNS_QTYPE_ALL:
 		break;
 	default:
 		DEBUG(0, ("Can't handle updates of type %u yet\n",
@@ -434,8 +431,18 @@ static WERROR handle_one_update(struct dns_server *dns,
 	if (tombstoned) {
 		/*
 		 * we need to keep the existing tombstone record
-		 * and ignore it
+		 * and ignore it.
+		 *
+		 * There *should* only be a single record of type TOMBSTONE,
+		 * but we don't insist.
 		 */
+		if (rcount != 1) {
+			DBG_WARNING("Tombstoned dnsNode has %u records, "
+				    "expected 1\n", rcount);
+			if (DEBUGLVL(1)) {
+				NDR_PRINT_DEBUG(dns_res_rec, discard_const(update));
+			}
+		}
 		first = rcount;
 	}
 
@@ -522,11 +529,20 @@ static WERROR handle_one_update(struct dns_server *dns,
 			    mem_ctx, update, &recs[i], name_is_static);
 			W_ERROR_NOT_OK_RETURN(werror);
 
+			/*
+			 * There should only be one SOA, which we have already
+			 * found and replaced. We now check for and tombstone
+			 * any others.
+			 */
 			for (i++; i < rcount; i++) {
 				if (recs[i].wType != DNS_TYPE_SOA) {
 					continue;
 				}
-
+				DBG_ERR("Duplicate SOA records found.\n");
+				if (DEBUGLVL(0)) {
+					NDR_PRINT_DEBUG(dns_res_rec,
+							discard_const(update));
+				}
 				recs[i] = (struct dnsp_DnssrvRpcRecord) {
 					.wType = DNS_TYPE_TOMBSTONE,
 				};
@@ -538,7 +554,7 @@ static WERROR handle_one_update(struct dns_server *dns,
 
 			return WERR_OK;
 		}
-
+		/* All but CNAME, SOA */
 		recs = talloc_realloc(mem_ctx, recs,
 				struct dnsp_DnssrvRpcRecord, rcount+1);
 		W_ERROR_HAVE_NO_MEMORY(recs);
@@ -548,7 +564,7 @@ static WERROR handle_one_update(struct dns_server *dns,
 		W_ERROR_NOT_OK_RETURN(werror);
 
 		for (i = first; i < rcount; i++) {
-			if (!dns_records_match(&recs[i], &recs[rcount])) {
+			if (!dns_record_match(&recs[i], &recs[rcount])) {
 				continue;
 			}
 
@@ -556,20 +572,26 @@ static WERROR handle_one_update(struct dns_server *dns,
 			recs[i].wType = recs[rcount].wType;
 			recs[i].dwTtlSeconds = recs[rcount].dwTtlSeconds;
 			recs[i].rank = recs[rcount].rank;
-
+			recs[i].dwReserved = 0;
+			recs[i].flags = 0;
 			werror = dns_replace_records(dns, mem_ctx, dn,
 						     needs_add, recs, rcount);
 			W_ERROR_NOT_OK_RETURN(werror);
 
 			return WERR_OK;
 		}
-
+		/* we did not find a matching record. This is new. */
 		werror = dns_replace_records(dns, mem_ctx, dn,
 					     needs_add, recs, rcount+1);
 		W_ERROR_NOT_OK_RETURN(werror);
 
 		return WERR_OK;
 	} else if (update->rr_class == DNS_QCLASS_ANY) {
+		/*
+		 * Mass-deleting records by type, which we do by adding a
+		 * tombstone with zero timestamp. dns_replace_records() will
+		 * work out if the node as a whole needs tombstoning.
+		 */
 		if (update->rr_type == DNS_QTYPE_ALL) {
 			if (dns_name_equal(update->name, zone->name)) {
 				for (i = first; i < rcount; i++) {
@@ -619,6 +641,7 @@ static WERROR handle_one_update(struct dns_server *dns,
 
 		return WERR_OK;
 	} else if (update->rr_class == DNS_QCLASS_NONE) {
+		/* deleting individual records */
 		struct dnsp_DnssrvRpcRecord *del_rec;
 
 		if (update->rr_type == DNS_QTYPE_SOA) {
@@ -635,7 +658,7 @@ static WERROR handle_one_update(struct dns_server *dns,
 			W_ERROR_NOT_OK_RETURN(werror);
 
 			for (i = first; i < rcount; i++) {
-				if (dns_records_match(ns_rec, &recs[i])) {
+				if (dns_record_match(ns_rec, &recs[i])) {
 					found = true;
 					break;
 				}
@@ -653,7 +676,7 @@ static WERROR handle_one_update(struct dns_server *dns,
 		W_ERROR_NOT_OK_RETURN(werror);
 
 		for (i = first; i < rcount; i++) {
-			if (dns_records_match(del_rec, &recs[i])) {
+			if (dns_record_match(del_rec, &recs[i])) {
 				recs[i] = (struct dnsp_DnssrvRpcRecord) {
 					.wType = DNS_TYPE_TOMBSTONE,
 				};

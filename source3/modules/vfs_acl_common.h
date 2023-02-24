@@ -29,6 +29,10 @@ struct acl_common_config {
 	enum default_acl_style default_acl_style;
 };
 
+struct acl_common_fsp_ext {
+	bool setting_nt_acl;
+};
+
 bool init_acl_common_config(vfs_handle_struct *handle,
 			    const char *module_name);
 
@@ -39,9 +43,6 @@ int unlink_acl_common(struct vfs_handle_struct *handle,
 			struct files_struct *dirfsp,
 			const struct smb_filename *smb_fname,
 			int flags);
-int chmod_acl_module_common(struct vfs_handle_struct *handle,
-			    const struct smb_filename *smb_fname,
-			    mode_t mode);
 int fchmod_acl_module_common(struct vfs_handle_struct *handle,
 			     struct files_struct *fsp, mode_t mode);
 int chmod_acl_acl_module_common(struct vfs_handle_struct *handle,

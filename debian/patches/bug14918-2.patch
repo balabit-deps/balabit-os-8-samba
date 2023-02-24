@@ -13,7 +13,7 @@ Signed-off-by: Douglas Bagnall <douglas.bagnall@catalyst.net.nz>
 
 --- a/python/samba/netcmd/domain_backup.py
 +++ b/python/samba/netcmd/domain_backup.py
-@@ -1104,9 +1104,9 @@ class cmd_domain_backup_offline(samba.ne
+@@ -1128,9 +1128,9 @@ class cmd_domain_backup_offline(samba.ne
                      # duplicates if one backup dir is a subdirectory of another,
                      # or if backup dirs contain hardlinks.
                      try:

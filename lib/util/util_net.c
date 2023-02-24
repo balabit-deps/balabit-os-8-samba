@@ -28,7 +28,9 @@
 #include "system/locale.h"
 #include "system/filesys.h"
 #include "lib/util/util_net.h"
+
 #undef strcasecmp
+#undef strncasecmp
 
 /*******************************************************************
  Set an address to INADDR_ANY.
@@ -558,8 +560,9 @@ bool is_ipaddress_v6(const char *str)
 	}
 
 	return true;
-#endif
+#else
 	return false;
+#endif
 }
 
 /**
@@ -717,7 +720,7 @@ bool same_net(const struct sockaddr *ip1,
 		char *p1 = (char *)&ip1_6.sin6_addr;
 		char *p2 = (char *)&ip2_6.sin6_addr;
 		char *m = (char *)&mask_6.sin6_addr;
-		int i;
+		size_t i;
 
 		for (i = 0; i < sizeof(struct in6_addr); i++) {
 			*p1++ &= *m;
@@ -894,77 +897,6 @@ char *print_canonical_sockaddr(TALLOC_CTX *ctx,
 	return dest;
 }
 
-/****************************************************************************
- Return the port number we've bound to on a socket.
-****************************************************************************/
-
-int get_socket_port(int fd)
-{
-	struct sockaddr_storage sa;
-	socklen_t length = sizeof(sa);
-
-	if (fd == -1) {
-		return -1;
-	}
-
-	if (getsockname(fd, (struct sockaddr *)&sa, &length) < 0) {
-		int level = (errno == ENOTCONN) ? 2 : 0;
-		DEBUG(level, ("getsockname failed. Error was %s\n",
-			       strerror(errno)));
-		return -1;
-	}
-
-#if defined(HAVE_IPV6)
-	if (sa.ss_family == AF_INET6) {
-		struct sockaddr_in6 *sa_in6 = (struct sockaddr_in6 *)&sa;
-		return ntohs(sa_in6->sin6_port);
-	}
-#endif
-	if (sa.ss_family == AF_INET) {
-		struct sockaddr_in *sa_in = (struct sockaddr_in *)&sa;
-		return ntohs(sa_in->sin_port);
-	}
-	return -1;
-}
-
-/****************************************************************************
- Return the string of an IP address (IPv4 or IPv6).
-****************************************************************************/
-
-static const char *get_socket_addr(int fd, char *addr_buf, size_t addr_len)
-{
-	struct sockaddr_storage sa;
-	socklen_t length = sizeof(sa);
-
-	/* Ok, returning a hard coded IPv4 address
-	 * is bogus, but it's just as bogus as a
-	 * zero IPv6 address. No good choice here.
-	 */
-
-	if (strlcpy(addr_buf, "0.0.0.0", addr_len) >= addr_len) {
-		/* Truncate ! */
-		return NULL;
-	}
-
-	if (fd == -1) {
-		return addr_buf;
-	}
-
-	if (getsockname(fd, (struct sockaddr *)&sa, &length) < 0) {
-		DEBUG(0,("getsockname failed. Error was %s\n",
-			strerror(errno) ));
-		return addr_buf;
-	}
-
-	return print_sockaddr_len(addr_buf, addr_len, (struct sockaddr *)&sa, length);
-}
-
-const char *client_socket_addr(int fd, char *addr, size_t addr_len)
-{
-	return get_socket_addr(fd, addr, addr_len);
-}
-
-
 enum SOCK_OPT_TYPES {OPT_BOOL,OPT_INT,OPT_ON};
 
 typedef struct smb_socket_option {
@@ -1047,26 +979,48 @@ static const smb_socket_option socket_options[] = {
 
 static void print_socket_options(int s)
 {
-	int value;
-	socklen_t vlen = 4;
+	TALLOC_CTX *frame = NULL;
 	const smb_socket_option *p = &socket_options[0];
+	char *str = NULL;
 
-	/* wrapped in if statement to prevent streams
-	 * leak in SCO Openserver 5.0 */
-	/* reported on samba-technical  --jerry */
-	if ( DEBUGLEVEL >= 5 ) {
-		DEBUG(5,("Socket options:\n"));
-		for (; p->name != NULL; p++) {
-			if (getsockopt(s, p->level, p->option,
-						(void *)&value, &vlen) == -1) {
-				DEBUGADD(5,("\tCould not test socket option %s.\n",
-							p->name));
-			} else {
-				DEBUGADD(5,("\t%s = %d\n",
-							p->name,value));
-			}
+	if (DEBUGLEVEL < 5) {
+		return;
+	}
+
+	frame = talloc_stackframe();
+
+	str = talloc_strdup(frame, "");
+	if (str == NULL) {
+		DBG_WARNING("talloc failed\n");
+		goto done;
+	}
+
+	for (; p->name != NULL; p++) {
+		int ret, val;
+		socklen_t vlen = sizeof(val);
+
+		ret = getsockopt(s, p->level, p->option, (void *)&val, &vlen);
+		if (ret == -1) {
+			DBG_INFO("Could not test socket option %s: %s.\n",
+				 p->name, strerror(errno));
+			continue;
+		}
+
+		str = talloc_asprintf_append_buffer(
+			str,
+			"%s%s=%d",
+			str[0] != '\0' ? ", " : "",
+			p->name,
+			val);
+		if (str == NULL) {
+			DBG_WARNING("talloc_asprintf_append_buffer failed\n");
+			goto done;
 		}
 	}
+
+	DEBUG(5, ("socket options: %s\n", str));
+done:
+	TALLOC_FREE(frame);
  }
 
 /****************************************************************************
@@ -1132,4 +1086,60 @@ void set_socket_options(int fd, const char *options)
 
 	TALLOC_FREE(ctx);
 	print_socket_options(fd);
+}
+
+/*
+ * Utility function that copes only with AF_INET and AF_INET6
+ * as that's all we're going to get out of DNS / NetBIOS / WINS
+ * name resolution functions.
+ */
+
+bool sockaddr_storage_to_samba_sockaddr(
+	struct samba_sockaddr *sa, const struct sockaddr_storage *ss)
+{
+	sa->u.ss = *ss;
+
+	switch (ss->ss_family) {
+	case AF_INET:
+		sa->sa_socklen = sizeof(struct sockaddr_in);
+		break;
+#ifdef HAVE_IPV6
+	case AF_INET6:
+		sa->sa_socklen = sizeof(struct sockaddr_in6);
+		break;
+#endif
+	default:
+		return false;
+	}
+	return true;
+}
+
+bool samba_sockaddr_set_port(struct samba_sockaddr *sa, uint16_t port)
+{
+	if (sa->u.sa.sa_family == AF_INET) {
+		sa->u.in.sin_port = htons(port);
+		return true;
+	}
+#ifdef HAVE_IPV6
+	if (sa->u.sa.sa_family == AF_INET6) {
+		sa->u.in6.sin6_port = htons(port);
+		return true;
+	}
+#endif
+	return false;
+}
+
+bool samba_sockaddr_get_port(const struct samba_sockaddr *sa, uint16_t *port)
+{
+	if (sa->u.sa.sa_family == AF_INET) {
+		*port = ntohs(sa->u.in.sin_port);
+		return true;
+	}
+#ifdef HAVE_IPV6
+	if (sa->u.sa.sa_family == AF_INET6) {
+		*port = ntohs(sa->u.in6.sin6_port);
+		return true;
+	}
+#endif
+	return false;
 }

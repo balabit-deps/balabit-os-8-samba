@@ -39,6 +39,7 @@
 #include "libds/common/roles.h"
 #include "lib/crypto/md4.h"
 #include "auth/credentials/credentials.h"
+#include "lib/param/loadparm.h"
 
 struct netlogon_creds_cli_locked_state;
 
@@ -201,8 +202,11 @@ static NTSTATUS netlogon_creds_cli_context_common(
 
 static struct db_context *netlogon_creds_cli_global_db;
 
-NTSTATUS netlogon_creds_cli_set_global_db(struct db_context **db)
+NTSTATUS netlogon_creds_cli_set_global_db(struct loadparm_context *lp_ctx,
+					  struct db_context **db)
 {
+	netlogon_creds_cli_warn_options(lp_ctx);
+
 	if (netlogon_creds_cli_global_db != NULL) {
 		return NT_STATUS_INVALID_PARAMETER_MIX;
 	}
@@ -216,6 +220,8 @@ NTSTATUS netlogon_creds_cli_open_global_db(struct loadparm_context *lp_ctx)
 	char *fname;
 	struct db_context *global_db;
 	int hash_size, tdb_flags;
+
+	netlogon_creds_cli_warn_options(lp_ctx);
 
 	if (netlogon_creds_cli_global_db != NULL) {
 		return NT_STATUS_OK;
@@ -257,6 +263,83 @@ void netlogon_creds_cli_close_global_db(void)
 	TALLOC_FREE(netlogon_creds_cli_global_db);
 }
 
+void netlogon_creds_cli_warn_options(struct loadparm_context *lp_ctx)
+{
+	bool global_reject_md5_servers = lpcfg_reject_md5_servers(lp_ctx);
+	bool global_require_strong_key = lpcfg_require_strong_key(lp_ctx);
+	int global_client_schannel = lpcfg_client_schannel(lp_ctx);
+	bool global_seal_secure_channel = lpcfg_winbind_sealed_pipes(lp_ctx);
+	int global_kerberos_enctypes = lpcfg_kerberos_encryption_types(lp_ctx);
+	static bool warned_global_reject_md5_servers = false;
+	static bool warned_global_require_strong_key = false;
+	static bool warned_global_client_schannel = false;
+	static bool warned_global_seal_secure_channel = false;
+	static bool warned_global_kerberos_encryption_types = false;
+	static int warned_global_pid = 0;
+	int current_pid = getpid();
+
+	if (warned_global_pid != current_pid) {
+		warned_global_reject_md5_servers = false;
+		warned_global_require_strong_key = false;
+		warned_global_client_schannel = false;
+		warned_global_seal_secure_channel = false;
+		warned_global_kerberos_encryption_types = false;
+		warned_global_pid = current_pid;
+	}
+
+	if (!global_reject_md5_servers && !warned_global_reject_md5_servers) {
+		/*
+		 * We want admins to notice their misconfiguration!
+		 */
+		DBG_ERR("CVE-2022-38023 (and others): "
+			"Please configure 'reject md5 servers = yes' (the default), "
+			"See https://bugzilla.samba.org/show_bug.cgi?id=15240\n");
+		warned_global_reject_md5_servers = true;
+	}
+
+	if (!global_require_strong_key && !warned_global_require_strong_key) {
+		/*
+		 * We want admins to notice their misconfiguration!
+		 */
+		DBG_ERR("CVE-2022-38023 (and others): "
+			"Please configure 'require strong key = yes' (the default), "
+			"See https://bugzilla.samba.org/show_bug.cgi?id=15240\n");
+		warned_global_require_strong_key = true;
+	}
+
+	if (global_client_schannel != true && !warned_global_client_schannel) {
+		/*
+		 * We want admins to notice their misconfiguration!
+		 */
+		DBG_ERR("CVE-2022-38023 (and others): "
+			"Please configure 'client schannel = yes' (the default), "
+			"See https://bugzilla.samba.org/show_bug.cgi?id=15240\n");
+		warned_global_client_schannel = true;
+	}
+
+	if (!global_seal_secure_channel && !warned_global_seal_secure_channel) {
+		/*
+		 * We want admins to notice their misconfiguration!
+		 */
+		DBG_ERR("CVE-2022-38023 (and others): "
+			"Please configure 'winbind sealed pipes = yes' (the default), "
+			"See https://bugzilla.samba.org/show_bug.cgi?id=15240\n");
+		warned_global_seal_secure_channel = true;
+	}
+
+	if (global_kerberos_enctypes == KERBEROS_ETYPES_LEGACY &&
+	    !warned_global_kerberos_encryption_types)
+	{
+		/*
+		 * We want admins to notice their misconfiguration!
+		 */
+		DBG_ERR("CVE-2022-37966: "
+			"Please void 'kerberos encryption types = legacy', "
+			"See https://bugzilla.samba.org/show_bug.cgi?id=15237\n");
+		warned_global_kerberos_encryption_types = true;
+	}
+}
+
 NTSTATUS netlogon_creds_cli_context_global(struct loadparm_context *lp_ctx,
 				struct messaging_context *msg_ctx,
 				const char *client_account,
@@ -273,8 +356,8 @@ NTSTATUS netlogon_creds_cli_context_global(struct loadparm_context *lp_ctx,
 	const char *client_computer;
 	uint32_t proposed_flags;
 	uint32_t required_flags = 0;
-	bool reject_md5_servers = false;
-	bool require_strong_key = false;
+	bool reject_md5_servers = true;
+	bool require_strong_key = true;
 	int require_sign_or_seal = true;
 	bool seal_secure_channel = true;
 	enum dcerpc_AuthLevel auth_level = DCERPC_AUTH_LEVEL_NONE;
@@ -504,9 +587,33 @@ enum dcerpc_AuthLevel netlogon_creds_cli_auth_level(
 	return context->client.auth_level;
 }
 
+static bool netlogon_creds_cli_downgraded(uint32_t negotiated_flags,
+					  uint32_t proposed_flags,
+					  uint32_t required_flags)
+{
+	uint32_t req_flags = required_flags;
+	uint32_t tmp_flags;
+
+	req_flags = required_flags;
+	if ((negotiated_flags & NETLOGON_NEG_SUPPORTS_AES) &&
+	    (proposed_flags & NETLOGON_NEG_SUPPORTS_AES))
+	{
+		req_flags &= ~NETLOGON_NEG_ARCFOUR|NETLOGON_NEG_STRONG_KEYS;
+	}
+
+	tmp_flags = negotiated_flags;
+	tmp_flags &= req_flags;
+	if (tmp_flags != req_flags) {
+		return true;
+	}
+
+	return false;
+}
+
 struct netlogon_creds_cli_fetch_state {
 	TALLOC_CTX *mem_ctx;
 	struct netlogon_creds_CredentialState *creds;
+	uint32_t proposed_flags;
 	uint32_t required_flags;
 	NTSTATUS status;
 };
@@ -518,7 +625,7 @@ static void netlogon_creds_cli_fetch_parser(TDB_DATA key, TDB_DATA data,
 		(struct netlogon_creds_cli_fetch_state *)private_data;
 	enum ndr_err_code ndr_err;
 	DATA_BLOB blob;
-	uint32_t tmp_flags;
+	bool downgraded;
 
 	state->creds = talloc_zero(state->mem_ctx,
 				   struct netlogon_creds_CredentialState);
@@ -542,9 +649,11 @@ static void netlogon_creds_cli_fetch_parser(TDB_DATA key, TDB_DATA data,
 		NDR_PRINT_DEBUG(netlogon_creds_CredentialState, state->creds);
 	}
 
-	tmp_flags = state->creds->negotiate_flags;
-	tmp_flags &= state->required_flags;
-	if (tmp_flags != state->required_flags) {
+	downgraded = netlogon_creds_cli_downgraded(
+			state->creds->negotiate_flags,
+			state->proposed_flags,
+			state->required_flags);
+	if (downgraded) {
 		TALLOC_FREE(state->creds);
 		state->status = NT_STATUS_DOWNGRADE_DETECTED;
 		return;
@@ -815,6 +924,7 @@ static NTSTATUS netlogon_creds_cli_get_internal(
 {
 	struct netlogon_creds_cli_fetch_state fstate = {
 		.status = NT_STATUS_INTERNAL_ERROR,
+		.proposed_flags = context->client.proposed_flags,
 		.required_flags = context->client.required_flags,
 	};
 	NTSTATUS status;
@@ -1297,7 +1407,7 @@ static void netlogon_creds_cli_auth_srvauth_done(struct tevent_req *subreq)
 	enum ndr_err_code ndr_err;
 	DATA_BLOB blob;
 	TDB_DATA data;
-	uint32_t tmp_flags;
+	bool downgraded;
 
 	if (state->try_auth3) {
 		status = dcerpc_netr_ServerAuthenticate3_recv(subreq, state,
@@ -1344,9 +1454,11 @@ static void netlogon_creds_cli_auth_srvauth_done(struct tevent_req *subreq)
 		return;
 	}
 
-	tmp_flags = state->creds->negotiate_flags;
-	tmp_flags &= state->context->client.required_flags;
-	if (tmp_flags != state->context->client.required_flags) {
+	downgraded = netlogon_creds_cli_downgraded(
+			state->creds->negotiate_flags,
+			state->context->client.proposed_flags,
+			state->context->client.required_flags);
+	if (downgraded) {
 		if (NT_STATUS_IS_OK(result)) {
 			tevent_req_nterror(req, NT_STATUS_DOWNGRADE_DETECTED);
 			return;
@@ -1356,8 +1468,7 @@ static void netlogon_creds_cli_auth_srvauth_done(struct tevent_req *subreq)
 	}
 
 	if (NT_STATUS_EQUAL(result, NT_STATUS_ACCESS_DENIED)) {
-
-		tmp_flags = state->context->client.proposed_flags;
+		uint32_t tmp_flags = state->context->client.proposed_flags;
 		if ((state->current_flags == tmp_flags) &&
 		    (state->creds->negotiate_flags != tmp_flags))
 		{

@@ -238,12 +238,8 @@ static int add_kt_entry_etypes(krb5_context context, TALLOC_CTX *tmpctx,
 	char *princ_s = NULL;
 	char *short_princ_s = NULL;
 	krb5_enctype enctypes[4] = {
-#ifdef HAVE_ENCTYPE_AES256_CTS_HMAC_SHA1_96
 		ENCTYPE_AES256_CTS_HMAC_SHA1_96,
-#endif
-#ifdef HAVE_ENCTYPE_AES128_CTS_HMAC_SHA1_96
 		ENCTYPE_AES128_CTS_HMAC_SHA1_96,
-#endif
 		ENCTYPE_ARCFOUR_HMAC,
 		0
 	};
@@ -853,7 +849,7 @@ int ads_keytab_list(const char *keytab_name)
 
 		ret = smb_krb5_enctype_to_string(context, enctype, &etype_s);
 		if (ret &&
-		    (asprintf(&etype_s, "UNKNOWN: %d\n", enctype) == -1)) {
+		    (asprintf(&etype_s, "UNKNOWN: %d", enctype) == -1)) {
 			TALLOC_FREE(princ_s);
 			goto out;
 		}

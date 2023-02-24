@@ -20,14 +20,13 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-from __future__ import print_function
 """Generate LDIF from Github documentation."""
 
 import re
 import os
 import markdown
 import xml.etree.ElementTree as ET
-from samba.compat import get_string
+from samba.common import get_string
 
 
 # Display specifier updates or otherwise (ignored in forest_update.py)
@@ -195,7 +194,7 @@ def innertext(tag):
         (tag.tail or '')
 
 
-def read_ms_markdown(in_file, out_folder=None, out_dict={}):
+def read_ms_markdown(in_file, out_folder=None, out_dict=None):
     """
     Read Github documentation to produce forest wide udpates
     :param in_file: Forest-Wide-Updates.md

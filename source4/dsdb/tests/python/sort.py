@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # Originally based on ./sam.py
-from __future__ import print_function
 from unicodedata import normalize
 import locale
 locale.setlocale(locale.LC_ALL, ('en_US', 'UTF-8'))
@@ -14,9 +13,8 @@ import re
 sys.path.insert(0, "bin/python")
 import samba
 from samba.tests.subunitrun import SubunitOptions, TestProgram
-from samba.compat import cmp_fn
-from samba.compat import cmp_to_key_fn
-from samba.compat import text_type
+from samba.common import cmp
+from functools import cmp_to_key
 import samba.getopt as options
 
 from samba.auth import system_session
@@ -57,7 +55,7 @@ creds = credopts.get_credentials(lp)
 
 
 def norm(x):
-    if not isinstance(x, text_type):
+    if not isinstance(x, str):
         x = x.decode('utf8')
     return normalize('NFKC', x).upper()
 
@@ -286,10 +284,10 @@ class BaseSortTests(samba.tests.TestCase):
             return locale.strcoll(a[0], b[0])
 
         def cmp_binary(a, b):
-            return cmp_fn(a[0], b[0])
+            return cmp(a[0], b[0])
 
         def cmp_numeric(a, b):
-            return cmp_fn(int(a[0]), int(b[0]))
+            return cmp(int(a[0]), int(b[0]))
 
         # For testing simplicity, the attributes in here need to be
         # unique for each user. Otherwise there are multiple possible
@@ -304,7 +302,7 @@ class BaseSortTests(samba.tests.TestCase):
         for sort_attr, result_attr in attr_pairs:
             forward = sorted(((norm(x[sort_attr]), norm(x[result_attr]))
                              for x in self.users),
-                             key=cmp_to_key_fn(sort_functions[sort_attr]))
+                             key=cmp_to_key(sort_functions[sort_attr]))
             reverse = list(reversed(forward))
 
             for rev in (0, 1):

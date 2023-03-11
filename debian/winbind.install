@@ -4,6 +4,7 @@ usr/bin/ntlm_auth
 usr/bin/wbinfo
 usr/lib/*/samba/idmap
 usr/lib/*/samba/krb5/winbind_krb5_locator.so
+usr/lib/*/samba/krb5/async_dns_krb5_locator.so
 usr/lib/*/samba/libidmap.so.*
 usr/lib/*/samba/nss_info/hash.so
 usr/lib/*/samba/nss_info/rfc2307.so

@@ -22,7 +22,7 @@
 */
 
 #include "includes.h"
-#include "smbd/process_model.h"
+#include "samba/process_model.h"
 #include "lib/tsocket/tsocket.h"
 #include "lib/messaging/irpc.h"
 #include "librpc/gen_ndr/ndr_irpc.h"
@@ -388,24 +388,17 @@ static void kdc_post_fork(struct task_server *task, struct process_details *pd)
 	kdc_config->num_db = 1;
 
 	/*
-	 * This restores the behavior before
-	 * commit 255e3e18e00f717d99f3bc57c8a8895ff624f3c3
-	 * s4:heimdal: import lorikeet-heimdal-201107150856
-	 * (commit 48936803fae4a2fb362c79365d31f420c917b85b)
+	 * Note with the CVE-2022-37966 patches,
+	 * see https://bugzilla.samba.org/show_bug.cgi?id=15219
+	 * and https://bugzilla.samba.org/show_bug.cgi?id=15237
+	 * we want to use the strongest keys for everything.
 	 *
-	 * as_use_strongest_session_key,preauth_use_strongest_session_key
-	 * and tgs_use_strongest_session_key are input to the
-	 * _kdc_find_etype() function. The old bahavior is in
-	 * the use_strongest_session_key=FALSE code path.
-	 * (The only remaining difference in _kdc_find_etype()
-	 *  is the is_preauth parameter.)
-	 *
-	 * The old behavior in the _kdc_get_preferred_key()
-	 * function is use_strongest_server_key=TRUE.
+	 * Some of these don't have any real effect anymore,
+	 * but it is better to have them as true...
 	 */
-	kdc_config->as_use_strongest_session_key = false;
-	kdc_config->preauth_use_strongest_session_key = false;
-	kdc_config->tgs_use_strongest_session_key = false;
+	kdc_config->as_use_strongest_session_key = true;
+	kdc_config->preauth_use_strongest_session_key = true;
+	kdc_config->tgs_use_strongest_session_key = true;
 	kdc_config->use_strongest_server_key = true;
 
 	kdc_config->autodetect_referrals = false;
@@ -444,8 +437,8 @@ static void kdc_post_fork(struct task_server *task, struct process_details *pd)
 		return;
 	}
 
-	kdc->keytab_name = talloc_asprintf(kdc, "HDB:samba4&%p", kdc->base_ctx);
-	if (kdc->keytab_name == NULL) {
+	kdc->kpasswd_keytab_name = talloc_asprintf(kdc, "HDB:samba4&%p", kdc->base_ctx);
+	if (kdc->kpasswd_keytab_name == NULL) {
 		task_server_terminate(task,
 				      "kdc: Failed to set keytab name",
 				      true);

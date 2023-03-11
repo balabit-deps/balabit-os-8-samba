@@ -22,7 +22,6 @@
 #include "python/modules.h"
 #include "pycredentials.h"
 #include "param/param.h"
-#include "lib/cmdline/credentials.h"
 #include "auth/credentials/credentials_internal.h"
 #include "librpc/gen_ndr/samr.h" /* for struct samr_Password */
 #include "librpc/gen_ndr/netlogon.h"
@@ -31,9 +30,9 @@
 #include "param/pyparam.h"
 #include <tevent.h>
 #include "libcli/auth/libcli_auth.h"
-#include "auth/credentials/credentials_internal.h"
 #include "system/kerberos.h"
 #include "auth/kerberos/kerberos.h"
+#include "libcli/smb/smb_constants.h"
 
 void initcredentials(void);
 
@@ -570,7 +569,7 @@ static PyObject *py_creds_set_kerberos_state(PyObject *self, PyObject *args)
 	if (!PyArg_ParseTuple(args, "i", &state))
 		return NULL;
 
-	cli_credentials_set_kerberos_state(creds, state);
+	cli_credentials_set_kerberos_state(creds, state, CRED_SPECIFIED);
 	Py_RETURN_NONE;
 }
 
@@ -617,12 +616,52 @@ static PyObject *py_creds_set_forced_sasl_mech(PyObject *self, PyObject *args)
 	Py_RETURN_NONE;
 }
 
+static PyObject *py_creds_set_conf(PyObject *self, PyObject *args)
+{
+	PyObject *py_lp_ctx = Py_None;
+	struct loadparm_context *lp_ctx;
+	TALLOC_CTX *mem_ctx;
+	struct cli_credentials *creds;
+	bool ok;
+
+	creds = PyCredentials_AsCliCredentials(self);
+	if (creds == NULL) {
+		PyErr_Format(PyExc_TypeError, "Credentials expected");
+		return NULL;
+	}
+
+	if (!PyArg_ParseTuple(args, "|O", &py_lp_ctx)) {
+		return NULL;
+	}
+
+	mem_ctx = talloc_new(NULL);
+	if (mem_ctx == NULL) {
+		PyErr_NoMemory();
+		return NULL;
+	}
+
+	lp_ctx = lpcfg_from_py_object(mem_ctx, py_lp_ctx);
+	if (lp_ctx == NULL) {
+		talloc_free(mem_ctx);
+		return NULL;
+	}
+
+	ok = cli_credentials_set_conf(creds, lp_ctx);
+	talloc_free(mem_ctx);
+	if (!ok) {
+		return NULL;
+	}
+
+	Py_RETURN_NONE;
+}
+
 static PyObject *py_creds_guess(PyObject *self, PyObject *args)
 {
 	PyObject *py_lp_ctx = Py_None;
 	struct loadparm_context *lp_ctx;
 	TALLOC_CTX *mem_ctx;
 	struct cli_credentials *creds;
+	bool ok;
 
 	creds = PyCredentials_AsCliCredentials(self);
 	if (creds == NULL) {
@@ -645,9 +684,11 @@ static PyObject *py_creds_guess(PyObject *self, PyObject *args)
 		return NULL;
 	}
 
-	cli_credentials_guess(creds, lp_ctx);
-
+	ok = cli_credentials_guess(creds, lp_ctx);
 	talloc_free(mem_ctx);
+	if (!ok) {
+		return NULL;
+	}
 
 	Py_RETURN_NONE;
 }
@@ -805,7 +846,9 @@ static PyObject *py_creds_set_gensec_features(PyObject *self, PyObject *args)
 	if (!PyArg_ParseTuple(args, "I", &gensec_features))
 		return NULL;
 
-	cli_credentials_set_gensec_features(creds, gensec_features);
+	cli_credentials_set_gensec_features(creds,
+					    gensec_features,
+					    CRED_SPECIFIED);
 
 	Py_RETURN_NONE;
 }
@@ -924,6 +967,144 @@ static PyObject *py_creds_encrypt_netr_crypt_password(PyObject *self,
 
 	PyErr_NTSTATUS_IS_ERR_RAISE(status);
 
+	Py_RETURN_NONE;
+}
+
+static PyObject *py_creds_get_smb_signing(PyObject *self, PyObject *unused)
+{
+	enum smb_signing_setting signing_state;
+	struct cli_credentials *creds = NULL;
+
+	creds = PyCredentials_AsCliCredentials(self);
+	if (creds == NULL) {
+		PyErr_Format(PyExc_TypeError, "Credentials expected");
+		return NULL;
+	}
+
+	signing_state = cli_credentials_get_smb_signing(creds);
+	return PyLong_FromLong(signing_state);
+}
+
+static PyObject *py_creds_set_smb_signing(PyObject *self, PyObject *args)
+{
+	enum smb_signing_setting signing_state;
+	struct cli_credentials *creds = NULL;
+	enum credentials_obtained obt = CRED_SPECIFIED;
+
+	creds = PyCredentials_AsCliCredentials(self);
+	if (creds == NULL) {
+		PyErr_Format(PyExc_TypeError, "Credentials expected");
+		return NULL;
+	}
+	if (!PyArg_ParseTuple(args, "i|i", &signing_state, &obt)) {
+		return NULL;
+	}
+
+	switch (signing_state) {
+	case SMB_SIGNING_DEFAULT:
+	case SMB_SIGNING_OFF:
+	case SMB_SIGNING_IF_REQUIRED:
+	case SMB_SIGNING_DESIRED:
+	case SMB_SIGNING_REQUIRED:
+		break;
+	default:
+		PyErr_Format(PyExc_TypeError, "Invalid signing state value");
+		return NULL;
+	}
+
+	cli_credentials_set_smb_signing(creds, signing_state, obt);
+	Py_RETURN_NONE;
+}
+
+static PyObject *py_creds_get_smb_ipc_signing(PyObject *self, PyObject *unused)
+{
+	enum smb_signing_setting signing_state;
+	struct cli_credentials *creds = NULL;
+
+	creds = PyCredentials_AsCliCredentials(self);
+	if (creds == NULL) {
+		PyErr_Format(PyExc_TypeError, "Credentials expected");
+		return NULL;
+	}
+
+	signing_state = cli_credentials_get_smb_ipc_signing(creds);
+	return PyLong_FromLong(signing_state);
+}
+
+static PyObject *py_creds_set_smb_ipc_signing(PyObject *self, PyObject *args)
+{
+	enum smb_signing_setting signing_state;
+	struct cli_credentials *creds = NULL;
+	enum credentials_obtained obt = CRED_SPECIFIED;
+
+	creds = PyCredentials_AsCliCredentials(self);
+	if (creds == NULL) {
+		PyErr_Format(PyExc_TypeError, "Credentials expected");
+		return NULL;
+	}
+	if (!PyArg_ParseTuple(args, "i|i", &signing_state, &obt)) {
+		return NULL;
+	}
+
+	switch (signing_state) {
+	case SMB_SIGNING_DEFAULT:
+	case SMB_SIGNING_OFF:
+	case SMB_SIGNING_IF_REQUIRED:
+	case SMB_SIGNING_DESIRED:
+	case SMB_SIGNING_REQUIRED:
+		break;
+	default:
+		PyErr_Format(PyExc_TypeError, "Invalid signing state value");
+		return NULL;
+	}
+
+	cli_credentials_set_smb_ipc_signing(creds, signing_state, obt);
+	Py_RETURN_NONE;
+}
+
+static PyObject *py_creds_get_smb_encryption(PyObject *self, PyObject *unused)
+{
+	enum smb_encryption_setting encryption_state;
+	struct cli_credentials *creds = NULL;
+
+	creds = PyCredentials_AsCliCredentials(self);
+	if (creds == NULL) {
+		PyErr_Format(PyExc_TypeError, "Credentials expected");
+		return NULL;
+	}
+
+	encryption_state = cli_credentials_get_smb_encryption(creds);
+	return PyLong_FromLong(encryption_state);
+}
+
+static PyObject *py_creds_set_smb_encryption(PyObject *self, PyObject *args)
+{
+	enum smb_encryption_setting encryption_state;
+	struct cli_credentials *creds = NULL;
+	enum credentials_obtained obt = CRED_SPECIFIED;
+
+	creds = PyCredentials_AsCliCredentials(self);
+	if (creds == NULL) {
+		PyErr_Format(PyExc_TypeError, "Credentials expected");
+		return NULL;
+	}
+	if (!PyArg_ParseTuple(args, "i|i", &encryption_state, &obt)) {
+		return NULL;
+	}
+
+	switch (encryption_state) {
+	case SMB_ENCRYPTION_DEFAULT:
+	case SMB_ENCRYPTION_OFF:
+	case SMB_ENCRYPTION_IF_REQUIRED:
+	case SMB_ENCRYPTION_DESIRED:
+	case SMB_ENCRYPTION_REQUIRED:
+		break;
+	default:
+		PyErr_Format(PyExc_TypeError, "Invalid encryption state value");
+		return NULL;
+	}
+
+	cli_credentials_set_smb_encryption(creds, encryption_state, obt);
 	Py_RETURN_NONE;
 }
 
@@ -1139,6 +1320,11 @@ static PyMethodDef py_creds_methods[] = {
 		.ml_flags = METH_VARARGS,
 	},
 	{
+		.ml_name  = "set_conf",
+		.ml_meth  = py_creds_set_conf,
+		.ml_flags = METH_VARARGS,
+	},
+	{
 		.ml_name  = "guess",
 		.ml_meth  = py_creds_guess,
 		.ml_flags = METH_VARARGS,
@@ -1207,6 +1393,36 @@ static PyMethodDef py_creds_methods[] = {
 			    "Encrypt the supplied password using the session key and\n"
 			    "the negotiated encryption algorithm in place\n"
 			    "i.e. it overwrites the original data"},
+	{
+		.ml_name  = "get_smb_signing",
+		.ml_meth  = py_creds_get_smb_signing,
+		.ml_flags = METH_NOARGS,
+	},
+	{
+		.ml_name  = "set_smb_signing",
+		.ml_meth  = py_creds_set_smb_signing,
+		.ml_flags = METH_VARARGS,
+	},
+	{
+		.ml_name  = "get_smb_ipc_signing",
+		.ml_meth  = py_creds_get_smb_ipc_signing,
+		.ml_flags = METH_NOARGS,
+	},
+	{
+		.ml_name  = "set_smb_ipc_signing",
+		.ml_meth  = py_creds_set_smb_ipc_signing,
+		.ml_flags = METH_VARARGS,
+	},
+	{
+		.ml_name  = "get_smb_encryption",
+		.ml_meth  = py_creds_get_smb_encryption,
+		.ml_flags = METH_NOARGS,
+	},
+	{
+		.ml_name  = "set_smb_encryption",
+		.ml_meth  = py_creds_set_smb_encryption,
+		.ml_flags = METH_VARARGS,
+	},
 	{ .ml_name = NULL }
 };
 
@@ -1273,15 +1489,16 @@ MODULE_INIT_FUNC(credentials)
 		return NULL;
 
 	PyModule_AddObject(m, "UNINITIALISED", PyLong_FromLong(CRED_UNINITIALISED));
+	PyModule_AddObject(m, "SMB_CONF", PyLong_FromLong(CRED_SMB_CONF));
 	PyModule_AddObject(m, "CALLBACK", PyLong_FromLong(CRED_CALLBACK));
 	PyModule_AddObject(m, "GUESS_ENV", PyLong_FromLong(CRED_GUESS_ENV));
 	PyModule_AddObject(m, "GUESS_FILE", PyLong_FromLong(CRED_GUESS_FILE));
 	PyModule_AddObject(m, "CALLBACK_RESULT", PyLong_FromLong(CRED_CALLBACK_RESULT));
 	PyModule_AddObject(m, "SPECIFIED", PyLong_FromLong(CRED_SPECIFIED));
 
-	PyModule_AddObject(m, "AUTO_USE_KERBEROS", PyLong_FromLong(CRED_AUTO_USE_KERBEROS));
-	PyModule_AddObject(m, "DONT_USE_KERBEROS", PyLong_FromLong(CRED_DONT_USE_KERBEROS));
-	PyModule_AddObject(m, "MUST_USE_KERBEROS", PyLong_FromLong(CRED_MUST_USE_KERBEROS));
+	PyModule_AddObject(m, "AUTO_USE_KERBEROS", PyLong_FromLong(CRED_USE_KERBEROS_DESIRED));
+	PyModule_AddObject(m, "DONT_USE_KERBEROS", PyLong_FromLong(CRED_USE_KERBEROS_DISABLED));
+	PyModule_AddObject(m, "MUST_USE_KERBEROS", PyLong_FromLong(CRED_USE_KERBEROS_REQUIRED));
 
 	PyModule_AddObject(m, "AUTO_KRB_FORWARDABLE",  PyLong_FromLong(CRED_AUTO_KRB_FORWARDABLE));
 	PyModule_AddObject(m, "NO_KRB_FORWARDABLE",    PyLong_FromLong(CRED_NO_KRB_FORWARDABLE));
@@ -1291,6 +1508,18 @@ MODULE_INIT_FUNC(credentials)
 	PyModule_AddObject(m, "CLI_CRED_LANMAN_AUTH", PyLong_FromLong(CLI_CRED_LANMAN_AUTH));
 	PyModule_AddObject(m, "CLI_CRED_NTLM_AUTH", PyLong_FromLong(CLI_CRED_NTLM_AUTH));
 	PyModule_AddObject(m, "CLI_CRED_CLEAR_AUTH", PyLong_FromLong(CLI_CRED_CLEAR_AUTH));
+
+	PyModule_AddObject(m, "SMB_SIGNING_DEFAULT", PyLong_FromLong(SMB_SIGNING_DEFAULT));
+	PyModule_AddObject(m, "SMB_SIGNING_OFF", PyLong_FromLong(SMB_SIGNING_OFF));
+	PyModule_AddObject(m, "SMB_SIGNING_IF_REQUIRED", PyLong_FromLong(SMB_SIGNING_IF_REQUIRED));
+	PyModule_AddObject(m, "SMB_SIGNING_DESIRED", PyLong_FromLong(SMB_SIGNING_DESIRED));
+	PyModule_AddObject(m, "SMB_SIGNING_REQUIRED", PyLong_FromLong(SMB_SIGNING_REQUIRED));
+
+	PyModule_AddObject(m, "SMB_ENCRYPTION_DEFAULT", PyLong_FromLong(SMB_ENCRYPTION_DEFAULT));
+	PyModule_AddObject(m, "SMB_ENCRYPTION_OFF", PyLong_FromLong(SMB_ENCRYPTION_OFF));
+	PyModule_AddObject(m, "SMB_ENCRYPTION_IF_REQUIRED", PyLong_FromLong(SMB_ENCRYPTION_IF_REQUIRED));
+	PyModule_AddObject(m, "SMB_ENCRYPTION_DESIRED", PyLong_FromLong(SMB_ENCRYPTION_DESIRED));
+	PyModule_AddObject(m, "SMB_ENCRYPTION_REQUIRED", PyLong_FromLong(SMB_ENCRYPTION_REQUIRED));
 
 	Py_INCREF(&PyCredentials);
 	PyModule_AddObject(m, "Credentials", (PyObject *)&PyCredentials);

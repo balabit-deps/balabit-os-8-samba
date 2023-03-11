@@ -26,13 +26,14 @@
 #include "auth/gensec/gensec_internal.h" /* TODO: remove this */
 #include "auth/common_auth.h"
 #include "param/param.h"
-#include "smbd/service_stream.h"
+#include "samba/service_stream.h"
 #include "dsdb/samdb/samdb.h"
 #include <ldb_errors.h>
 #include <ldb_module.h>
 #include "ldb_wrap.h"
 #include "lib/tsocket/tsocket.h"
 #include "libcli/ldap/ldap_proto.h"
+#include "source4/auth/auth.h"
 
 static int map_ldb_error(TALLOC_CTX *mem_ctx, int ldb_err,
 	const char *add_err_string, const char **errstring)
@@ -199,37 +200,33 @@ int ldapsrv_backend_Init(struct ldapsrv_connection *conn,
 	}
 
 	if (conn->server_credentials) {
-		char **sasl_mechs = NULL;
-		const struct gensec_security_ops * const *backends = gensec_security_all();
-		const struct gensec_security_ops **ops
-			= gensec_use_kerberos_mechs(conn, backends, conn->server_credentials);
-		unsigned int i, j = 0;
-		for (i = 0; ops && ops[i]; i++) {
-			if (!lpcfg_parm_bool(conn->lp_ctx,  NULL, "gensec", ops[i]->name, ops[i]->enabled))
-				continue;
+		struct gensec_security *gensec_security = NULL;
+		const char **sasl_mechs = NULL;
+		NTSTATUS status;
 
-			if (ops[i]->sasl_name && ops[i]->server_start) {
-				char *sasl_name = talloc_strdup(conn, ops[i]->sasl_name);
-
-				if (!sasl_name) {
-					return LDB_ERR_OPERATIONS_ERROR;
-				}
-				sasl_mechs = talloc_realloc(conn, sasl_mechs, char *, j + 2);
-				if (!sasl_mechs) {
-					return LDB_ERR_OPERATIONS_ERROR;
-				}
-				sasl_mechs[j] = sasl_name;
-				talloc_steal(sasl_mechs, sasl_name);
-				sasl_mechs[j+1] = NULL;
-				j++;
-			}
+		status = samba_server_gensec_start(conn,
+						   conn->connection->event.ctx,
+						   conn->connection->msg_ctx,
+						   conn->lp_ctx,
+						   conn->server_credentials,
+						   "ldap",
+						   &gensec_security);
+		if (!NT_STATUS_IS_OK(status)) {
+			DBG_ERR("samba_server_gensec_start failed: %s\n",
+				nt_errstr(status));
+			return LDB_ERR_OPERATIONS_ERROR;
 		}
-		talloc_unlink(conn, ops);
 
 		/* ldb can have a different lifetime to conn, so we
 		   need to ensure that sasl_mechs lives as long as the
 		   ldb does */
-		talloc_steal(conn->ldb, sasl_mechs);
+		sasl_mechs = gensec_security_sasl_names(gensec_security,
+							conn->ldb);
+		TALLOC_FREE(gensec_security);
+		if (sasl_mechs == NULL) {
+			DBG_ERR("Failed to get sasl mechs!\n");
+			return LDB_ERR_OPERATIONS_ERROR;
+		}
 
 		ldb_set_opaque(conn->ldb, "supportedSASLMechanisms", sasl_mechs);
 	}
@@ -732,9 +729,15 @@ static NTSTATUS ldapsrv_SearchRequest(struct ldapsrv_call *call)
 	unsigned int i;
 	int extended_type = 1;
 
-	DEBUG(10, ("SearchRequest"));
-	DEBUGADD(10, (" basedn: %s", req->basedn));
-	DEBUGADD(10, (" filter: %s\n", ldb_filter_from_tree(call, req->tree)));
+	/*
+	 * Warn for searches that are longer than 1/4 of the
+	 * search_timeout, being 30sec by default
+	 */
+	struct timeval start_time = timeval_current();
+	struct timeval warning_time
+		= timeval_add(&start_time,
+			      call->conn->limits.search_timeout / 4,
+			      0);
 
 	local_ctx = talloc_new(call);
 	NT_STATUS_HAVE_NO_MEMORY(local_ctx);
@@ -742,29 +745,27 @@ static NTSTATUS ldapsrv_SearchRequest(struct ldapsrv_call *call)
 	basedn = ldb_dn_new(local_ctx, samdb, req->basedn);
 	NT_STATUS_HAVE_NO_MEMORY(basedn);
 
-	DEBUG(10, ("SearchRequest: basedn: [%s]\n", req->basedn));
-	DEBUG(10, ("SearchRequest: filter: [%s]\n", ldb_filter_from_tree(call, req->tree)));
-
 	switch (req->scope) {
-		case LDAP_SEARCH_SCOPE_BASE:
-			scope_str = "BASE";
-			scope = LDB_SCOPE_BASE;
-			break;
-		case LDAP_SEARCH_SCOPE_SINGLE:
-			scope_str = "ONE";
-			scope = LDB_SCOPE_ONELEVEL;
-			break;
-		case LDAP_SEARCH_SCOPE_SUB:
-			scope_str = "SUB";
-			scope = LDB_SCOPE_SUBTREE;
-			break;
-	        default:
-			result = LDAP_PROTOCOL_ERROR;
-			map_ldb_error(local_ctx, LDB_ERR_PROTOCOL_ERROR, NULL,
-				&errstr);
-			errstr = talloc_asprintf(local_ctx,
-				"%s. Invalid scope", errstr);
-			goto reply;
+	case LDAP_SEARCH_SCOPE_BASE:
+		scope_str = "BASE";
+		scope = LDB_SCOPE_BASE;
+		break;
+	case LDAP_SEARCH_SCOPE_SINGLE:
+		scope_str = "ONE";
+		scope = LDB_SCOPE_ONELEVEL;
+		break;
+	case LDAP_SEARCH_SCOPE_SUB:
+		scope_str = "SUB";
+		scope = LDB_SCOPE_SUBTREE;
+		break;
+	default:
+		result = LDAP_PROTOCOL_ERROR;
+		map_ldb_error(local_ctx, LDB_ERR_PROTOCOL_ERROR, NULL,
+			      &errstr);
+		scope_str = "<Invalid scope>";
+		errstr = talloc_asprintf(local_ctx,
+					 "%s. Invalid scope", errstr);
+		goto reply;
 	}
 	DEBUG(10,("SearchRequest: scope: [%s]\n", scope_str));
 
@@ -872,7 +873,17 @@ static NTSTATUS ldapsrv_SearchRequest(struct ldapsrv_call *call)
 		}
 	}
 
-	ldb_set_timeout(samdb, lreq, req->timelimit);
+	{
+		time_t timeout = call->conn->limits.search_timeout;
+
+		if (timeout == 0
+		    || (req->timelimit != 0
+			&& req->timelimit < timeout))
+		{
+			timeout = req->timelimit;
+		}
+		ldb_set_timeout(samdb, lreq, timeout);
+	}
 
 	if (!call->conn->is_privileged) {
 		ldb_req_mark_untrusted(lreq);
@@ -907,6 +918,76 @@ static NTSTATUS ldapsrv_SearchRequest(struct ldapsrv_call *call)
 	}
 
 reply:
+
+	/*
+	 * This looks like duplicated code - because it is - but
+	 * otherwise the work in the parameters will be done
+	 * regardless, this way the functions only execuate when the
+	 * log level is set.
+	 *
+	 * The basedn is re-obtained as a string to escape it
+	 */
+	if ((req->timelimit == 0 || call->conn->limits.search_timeout < req->timelimit)
+	    && ldb_ret == LDB_ERR_TIME_LIMIT_EXCEEDED) {
+		struct dom_sid_buf sid_buf;
+		DBG_WARNING("MaxQueryDuration(%d) timeout exceeded "
+			    "in SearchRequest by %s from %s filter: [%s] "
+			    "basedn: [%s] "
+			    "scope: [%s]\n",
+			    call->conn->limits.search_timeout,
+			    dom_sid_str_buf(&call->conn->session_info->security_token->sids[0],
+					    &sid_buf),
+			    tsocket_address_string(call->conn->connection->remote_address,
+						   call),
+			    ldb_filter_from_tree(call, req->tree),
+			    ldb_dn_get_extended_linearized(call, basedn, 1),
+			    scope_str);
+		for (i=0; i < req->num_attributes; i++) {
+			DBG_WARNING("MaxQueryDuration timeout exceeded attrs: [%s]\n",
+				    req->attributes[i]);
+		}
+
+	} else if (timeval_expired(&warning_time)) {
+		struct dom_sid_buf sid_buf;
+		DBG_NOTICE("Long LDAP Query: Duration was %.2fs, "
+			   "MaxQueryDuration(%d)/4 == %d "
+			   "in SearchRequest by %s from %s filter: [%s] "
+			   "basedn: [%s] "
+			   "scope: [%s] "
+			   "result: %s\n",
+			   timeval_elapsed(&start_time),
+			   call->conn->limits.search_timeout,
+			   call->conn->limits.search_timeout / 4,
+			   dom_sid_str_buf(&call->conn->session_info->security_token->sids[0],
+					   &sid_buf),
+			   tsocket_address_string(call->conn->connection->remote_address,
+						  call),
+			   ldb_filter_from_tree(call, req->tree),
+			   ldb_dn_get_extended_linearized(call, basedn, 1),
+			   scope_str,
+			   ldb_strerror(ldb_ret));
+		for (i=0; i < req->num_attributes; i++) {
+			DBG_NOTICE("Long LDAP Query attrs: [%s]\n",
+				   req->attributes[i]);
+		}
+	} else {
+		struct dom_sid_buf sid_buf;
+		DBG_INFO("LDAP Query: Duration was %.2fs, "
+			 "SearchRequest by %s from %s filter: [%s] "
+			 "basedn: [%s] "
+			 "scope: [%s] "
+			 "result: %s\n",
+			 timeval_elapsed(&start_time),
+			 dom_sid_str_buf(&call->conn->session_info->security_token->sids[0],
+					 &sid_buf),
+			 tsocket_address_string(call->conn->connection->remote_address,
+						call),
+			 ldb_filter_from_tree(call, req->tree),
+			 ldb_dn_get_extended_linearized(call, basedn, 1),
+			 scope_str,
+			 ldb_strerror(ldb_ret));
+	}
+
 	DLIST_REMOVE(call->conn->pending_calls, call);
 	call->notification.busy = false;
 

@@ -7,7 +7,6 @@
 # Copyright Stefan Metzmacher 2014
 #
 
-from __future__ import print_function
 import optparse
 import sys
 import base64
@@ -17,6 +16,7 @@ sys.path.insert(0, "bin/python")
 import samba
 
 from samba.tests.subunitrun import TestProgram, SubunitOptions
+from samba.netcmd.main import cmd_sambatool
 
 import samba.getopt as options
 
@@ -68,7 +68,8 @@ import password_lockout_base
 class PasswordTests(password_lockout_base.BasePasswordTestCase):
     def setUp(self):
         self.host = host
-        self.host_url = host_url
+        self.host_url = "ldap://%s" % host
+        self.host_url_ldaps = "ldaps://%s" % host
         self.lp = lp
         self.global_creds = global_creds
         self.ldb = SamDB(url=self.host_url, session_info=system_session(self.lp),
@@ -133,6 +134,17 @@ replace: lockoutTime
 lockoutTime: 0
 """)
 
+    def _reset_samba_tool(self, res):
+        username = res[0]["sAMAccountName"][0]
+
+        cmd = cmd_sambatool.subcommands['user'].subcommands['unlock']
+        result = cmd._run("samba-tool user unlock",
+                          username,
+                          "-H%s" % self.host_url,
+                          "-U%s%%%s" % (global_creds.get_username(),
+                                        global_creds.get_password()))
+        self.assertEqual(result, None)
+
     def _reset_ldap_userAccountControl(self, res):
         self.assertTrue("userAccountControl" in res[0])
         self.assertTrue("msDS-User-Account-Control-Computed" in res[0])
@@ -157,6 +169,8 @@ userAccountControl: %d
             self._reset_ldap_lockoutTime(res)
         elif method == "samr":
             self._reset_samr(res)
+        elif method == "samba-tool":
+            self._reset_samba_tool(res)
         else:
             self.assertTrue(False, msg="Invalid reset method[%s]" % method)
 
@@ -634,6 +648,12 @@ userPassword: thatsAcomplPASS2XYZ
                                                           self.lockout2ntlm_ldb,
                                                           "samr",
                                                           initial_lastlogon_relation='greater')
+
+    # just test "samba-tool user unlock" command once
+    def test_userPassword_lockout_with_clear_change_krb5_ldap_samba_tool(self):
+        self._test_userPassword_lockout_with_clear_change(self.lockout1krb5_creds,
+                                                          self.lockout2krb5_ldb,
+                                                          "samba-tool")
 
     def test_multiple_logon_krb5(self):
         self._test_multiple_logon(self.lockout1krb5_creds)
@@ -1401,7 +1421,5 @@ class PasswordTestsWithDefaults(PasswordTests):
         self.use_pso_lockout_settings(self.lockout1ntlm_creds)
         self._test_login_lockout(self.lockout1ntlm_creds,
                                  wait_lockout_duration=False)
-
-host_url = "ldap://%s" % host
 
 TestProgram(module=__name__, opts=subunitopts)

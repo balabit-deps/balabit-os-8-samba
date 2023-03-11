@@ -20,7 +20,6 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 
-from __future__ import print_function
 import os
 import sys
 from optparse import OptionParser
@@ -35,7 +34,7 @@ from samba.drs_utils import drs_DsBind
 from samba.samdb import SamDB
 from samba.auth import system_session
 from samba.ndr import ndr_pack, ndr_unpack
-from samba.compat import text_type
+
 
 def _samdb_fetch_pfm(samdb):
     """Fetch prefixMap stored in SamDB using LDB connection"""
@@ -78,7 +77,7 @@ def _drs_fetch_pfm(server, samdb, creds, lp):
     req8.destination_dsa_guid = dest_dsa
     req8.source_dsa_invocation_id = misc.GUID(samdb.get_invocation_id())
     req8.naming_context = drsuapi.DsReplicaObjectIdentifier()
-    req8.naming_context.dn = text_type(samdb.get_schema_basedn())
+    req8.naming_context.dn = samdb.get_schema_basedn()
     req8.highwatermark = drsuapi.DsReplicaHighWaterMark()
     req8.highwatermark.tmp_highest_usn = 0
     req8.highwatermark.reserved_usn = 0

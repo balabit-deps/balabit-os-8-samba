@@ -43,6 +43,9 @@
 #include "system/kerberos.h"
 #include "auth/kerberos/kerberos.h"
 
+#undef strcasecmp
+#undef strncasecmp
+
 struct extended_access_check_attribute {
 	const char *oa_name;
 	const uint32_t requires_rights;
@@ -731,8 +734,9 @@ static int acl_check_spn(TALLOC_CTX *mem_ctx,
 		 * If not add or replace (eg delete),
 		 * return success
 		 */
-		if ((el->flags
-		     & (LDB_FLAG_MOD_ADD|LDB_FLAG_MOD_REPLACE)) == 0) {
+		if (LDB_FLAG_MOD_TYPE(el->flags) != LDB_FLAG_MOD_ADD &&
+		    LDB_FLAG_MOD_TYPE(el->flags) != LDB_FLAG_MOD_REPLACE)
+		{
 			talloc_free(tmp_ctx);
 			return LDB_SUCCESS;
 		}

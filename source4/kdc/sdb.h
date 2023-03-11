@@ -45,6 +45,11 @@ struct sdb_event {
 	time_t time;
 };
 
+struct sdb_etypes {
+	unsigned len;
+	krb5_enctype *val;
+};
+
 struct SDBFlags {
 	unsigned int initial:1;
 	unsigned int forwardable:1;
@@ -84,6 +89,8 @@ struct sdb_entry {
 	krb5_principal principal;
 	unsigned int kvno;
 	struct sdb_keys keys;
+	struct sdb_etypes *etypes;
+	struct sdb_etypes *session_etypes;
 	struct sdb_event created_by;
 	struct sdb_event *modified_by;
 	time_t *valid_start;
@@ -104,6 +111,8 @@ struct sdb_entry_ex {
 #define SDB_ERR_NOT_FOUND_HERE 36150287
 #define SDB_ERR_WRONG_REALM 36150289
 
+/* These must match the values in hdb.h */
+
 #define SDB_F_DECRYPT		1	/* decrypt keys */
 #define SDB_F_GET_CLIENT	4	/* fetch client */
 #define SDB_F_GET_SERVER	8	/* fetch server */
@@ -114,9 +123,15 @@ struct sdb_entry_ex {
 #define SDB_F_KVNO_SPECIFIED	128	/* we want a particular KVNO */
 #define SDB_F_FOR_AS_REQ	4096	/* fetch is for a AS REQ */
 #define SDB_F_FOR_TGS_REQ	8192	/* fetch is for a TGS REQ */
+#define SDB_F_FORCE_CANON	16384	/* force canonicalition */
 
 void sdb_free_entry(struct sdb_entry_ex *e);
 void free_sdb_entry(struct sdb_entry *s);
 struct SDBFlags int2SDBFlags(unsigned n);
+krb5_error_code sdb_entry_set_etypes(struct sdb_entry *s);
+krb5_error_code sdb_entry_set_session_etypes(struct sdb_entry *s,
+					     bool add_aes256,
+					     bool add_aes128,
+					     bool add_rc4);
 
 #endif /* _KDC_SDB_H_ */

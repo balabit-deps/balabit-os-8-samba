@@ -1,4 +1,4 @@
-/* 
+/*
    Unix SMB/CIFS implementation.
    kerberos utility library
    Copyright (C) Andrew Tridgell 2001
@@ -37,11 +37,11 @@
 #define LIBADS_CCACHE_NAME "MEMORY:libads"
 
 /*
-  we use a prompter to avoid a crash bug in the kerberos libs when 
+  we use a prompter to avoid a crash bug in the kerberos libs when
   dealing with empty passwords
   this prompter is just a string copy ...
 */
-static krb5_error_code 
+static krb5_error_code
 kerb_prompter(krb5_context ctx, void *data,
 	       const char *name,
 	       const char *banner,
@@ -192,7 +192,7 @@ int kerberos_kinit_password_ext(const char *given_principal,
 		krb5_get_init_creds_opt_set_address_list(opt, addr->addrs);
 	}
 
-	if ((code = krb5_get_init_creds_password(ctx, &my_creds, me, discard_const_p(char,password), 
+	if ((code = krb5_get_init_creds_password(ctx, &my_creds, me, discard_const_p(char,password),
 						 kerb_prompter, discard_const_p(char, password),
 						 0, NULL, opt))) {
 		goto out;
@@ -299,7 +299,7 @@ int ads_kdestroy(const char *cc_name)
 	}
 
 	if ((code = krb5_cc_destroy (ctx, cc))) {
-		DEBUG(3, ("ads_kdestroy: krb5_cc_destroy failed: %s\n", 
+		DEBUG(3, ("ads_kdestroy: krb5_cc_destroy failed: %s\n",
 			error_message(code)));
 	}
 
@@ -348,10 +348,10 @@ int kerberos_kinit_password(const char *principal,
 			    int time_offset,
 			    const char *cache_name)
 {
-	return kerberos_kinit_password_ext(principal, 
-					   password, 
-					   time_offset, 
-					   0, 
+	return kerberos_kinit_password_ext(principal,
+					   password,
+					   time_offset,
+					   0,
 					   0,
 					   cache_name,
 					   False,
@@ -421,23 +421,39 @@ static char *get_kdc_ip_string(char *mem_ctx,
 {
 	TALLOC_CTX *frame = talloc_stackframe();
 	size_t i;
-	struct ip_service *ip_srv_site = NULL;
-	struct ip_service *ip_srv_nonsite = NULL;
-	int count_site = 0;
-	int count_nonsite;
+	struct samba_sockaddr *ip_sa_site = NULL;
+	struct samba_sockaddr *ip_sa_nonsite = NULL;
+	struct samba_sockaddr sa = {0};
+	size_t count_site = 0;
+	size_t count_nonsite;
 	size_t num_dcs;
-	struct sockaddr_storage *dc_addrs;
+	struct sockaddr_storage *dc_addrs = NULL;
 	struct tsocket_address **dc_addrs2 = NULL;
 	const struct tsocket_address * const *dc_addrs3 = NULL;
 	char *result = NULL;
 	struct netlogon_samlogon_response **responses = NULL;
 	NTSTATUS status;
-	char *kdc_str = talloc_asprintf(mem_ctx, "%s\t\tkdc = %s\n", "",
-					print_canonical_sockaddr_with_port(mem_ctx, pss));
+	bool ok;
+	char *kdc_str = NULL;
+	char *canon_sockaddr = NULL;
 
+	SMB_ASSERT(pss != NULL);
+
+	canon_sockaddr = print_canonical_sockaddr_with_port(frame, pss);
+	if (canon_sockaddr == NULL) {
+		goto out;
+	}
+
+	kdc_str = talloc_asprintf(frame,
+				  "\t\tkdc = %s\n",
+				  canon_sockaddr);
 	if (kdc_str == NULL) {
-		TALLOC_FREE(frame);
-		return NULL;
+		goto out;
+	}
+
+	ok = sockaddr_storage_to_samba_sockaddr(&sa, pss);
+	if (!ok) {
+		goto out;
 	}
 
 	/*
@@ -446,15 +462,41 @@ static char *get_kdc_ip_string(char *mem_ctx,
 	 */
 
 	if (sitename) {
-		get_kdc_list(realm, sitename, &ip_srv_site, &count_site);
-		DEBUG(10, ("got %d addresses from site %s search\n", count_site,
-			   sitename));
+		status = get_kdc_list(frame,
+					realm,
+					sitename,
+					&ip_sa_site,
+					&count_site);
+		if (!NT_STATUS_IS_OK(status)) {
+			DBG_ERR("get_kdc_list fail %s\n",
+				nt_errstr(status));
+			goto out;
+		}
+		DBG_DEBUG("got %zu addresses from site %s search\n",
+			count_site,
+			sitename);
 	}
 
 	/* Get all KDC's. */
 
-	get_kdc_list(realm, NULL, &ip_srv_nonsite, &count_nonsite);
-	DEBUG(10, ("got %d addresses from site-less search\n", count_nonsite));
+	status = get_kdc_list(frame,
+					realm,
+					NULL,
+					&ip_sa_nonsite,
+					&count_nonsite);
+	if (!NT_STATUS_IS_OK(status)) {
+		DBG_ERR("get_kdc_list (site-less) fail %s\n",
+			nt_errstr(status));
+		goto out;
+	}
+	DBG_DEBUG("got %zu addresses from site-less search\n", count_nonsite);
+
+	if (count_site + count_nonsite < count_site) {
+		/* Wrap check. */
+		DBG_ERR("get_kdc_list_talloc (site-less) fail wrap error\n");
+		goto out;
+	}
+
 
 	dc_addrs = talloc_array(talloc_tos(), struct sockaddr_storage,
 				count_site + count_nonsite);
@@ -465,31 +507,32 @@ static char *get_kdc_ip_string(char *mem_ctx,
 	num_dcs = 0;
 
 	for (i = 0; i < count_site; i++) {
-		if (!sockaddr_equal(
-			(const struct sockaddr *)pss,
-			(const struct sockaddr *)&ip_srv_site[i].ss)) {
+		if (!sockaddr_equal(&sa.u.sa, &ip_sa_site[i].u.sa)) {
 			add_sockaddr_unique(dc_addrs, &num_dcs,
-					    &ip_srv_site[i].ss);
+					    &ip_sa_site[i].u.ss);
 		}
 	}
 
 	for (i = 0; i < count_nonsite; i++) {
-		if (!sockaddr_equal(
-			(const struct sockaddr *)pss,
-			(const struct sockaddr *)&ip_srv_nonsite[i].ss)) {
+		if (!sockaddr_equal(&sa.u.sa, &ip_sa_nonsite[i].u.sa)) {
 			add_sockaddr_unique(dc_addrs, &num_dcs,
-					    &ip_srv_nonsite[i].ss);
+					    &ip_sa_nonsite[i].u.ss);
 		}
+	}
+
+	DBG_DEBUG("%zu additional KDCs to test\n", num_dcs);
+	if (num_dcs == 0) {
+		/*
+		 * We do not have additional KDCs, but we have the one passed
+		 * in via `pss`. So just use that one and leave.
+		 */
+		result = talloc_move(mem_ctx, &kdc_str);
+		goto out;
 	}
 
 	dc_addrs2 = talloc_zero_array(talloc_tos(),
 				      struct tsocket_address *,
 				      num_dcs);
-
-	DBG_DEBUG("%zu additional KDCs to test\n", num_dcs);
-	if (num_dcs == 0) {
-		goto out;
-	}
 	if (dc_addrs2 == NULL) {
 		goto out;
 	}
@@ -535,22 +578,25 @@ static char *get_kdc_ip_string(char *mem_ctx,
 		}
 
 		/* Append to the string - inefficient but not done often. */
-		new_kdc_str = talloc_asprintf(mem_ctx, "%s\t\tkdc = %s\n",
-					      kdc_str,
-					      print_canonical_sockaddr_with_port(mem_ctx, &dc_addrs[i]));
+		new_kdc_str = talloc_asprintf_append(
+				kdc_str,
+				"\t\tkdc = %s\n",
+				print_canonical_sockaddr_with_port(
+					mem_ctx, &dc_addrs[i]));
 		if (new_kdc_str == NULL) {
 			goto out;
 		}
-		TALLOC_FREE(kdc_str);
 		kdc_str = new_kdc_str;
 	}
 
+	result = talloc_move(mem_ctx, &kdc_str);
 out:
-	DEBUG(10, ("get_kdc_ip_string: Returning %s\n", kdc_str));
+	if (result != NULL) {
+		DBG_DEBUG("Returning\n%s\n", kdc_str);
+	} else {
+		DBG_NOTICE("Failed to get KDC ip address\n");
+	}
 
-	result = kdc_str;
-	SAFE_FREE(ip_srv_site);
-	SAFE_FREE(ip_srv_nonsite);
 	TALLOC_FREE(frame);
 	return result;
 }
@@ -576,20 +622,16 @@ static char *get_enctypes(TALLOC_CTX *mem_ctx)
 
 	if (lp_kerberos_encryption_types() == KERBEROS_ETYPES_ALL ||
 	    lp_kerberos_encryption_types() == KERBEROS_ETYPES_STRONG) {
-#ifdef HAVE_ENCTYPE_AES256_CTS_HMAC_SHA1_96
 		aes_enctypes = talloc_asprintf_append(
 		    aes_enctypes, "%s", "aes256-cts-hmac-sha1-96 ");
 		if (aes_enctypes == NULL) {
 			goto done;
 		}
-#endif
-#ifdef HAVE_ENCTYPE_AES128_CTS_HMAC_SHA1_96
 		aes_enctypes = talloc_asprintf_append(
 		    aes_enctypes, "%s", "aes128-cts-hmac-sha1-96");
 		if (aes_enctypes == NULL) {
 			goto done;
 		}
-#endif
 	}
 
 	if (lp_weak_crypto() == SAMBA_WEAK_CRYPTO_ALLOWED &&
@@ -623,7 +665,7 @@ static char *get_enctypes(TALLOC_CTX *mem_ctx)
 
 	if (lp_kerberos_encryption_types() == KERBEROS_ETYPES_ALL ||
 	    lp_kerberos_encryption_types() == KERBEROS_ETYPES_LEGACY) {
-		legacy_enctypes = "arcfour-hmac-md5 des-cbc-crc des-cbc-md5";
+		legacy_enctypes = "arcfour-hmac-md5";
 	}
 
 	enctypes = talloc_asprintf(mem_ctx, "\tdefault_etypes = %s %s\n",
@@ -786,9 +828,8 @@ bool create_local_private_krb5_conf_for_domain(const char *realm,
 		goto done;
 	}
 
-	DEBUG(5,("create_local_private_krb5_conf_for_domain: wrote "
-		"file %s with realm %s KDC list = %s\n",
-		fname, realm_upper, kdc_ip_string));
+	DBG_INFO("wrote file %s with realm %s KDC list:\n%s\n",
+		 fname, realm_upper, kdc_ip_string);
 
 	/* Set the environment variable to this file. */
 	setenv("KRB5_CONFIG", fname, 1);

@@ -25,6 +25,7 @@
 #include "param/param.h"
 #include "dsdb/samdb/samdb.h"
 #include "system/kerberos.h"
+#include <com_err.h>
 #include <kdb.h>
 #include <kadm5/kadm_err.h>
 #include "kdc/sdb.h"
@@ -40,6 +41,9 @@
 
 #include "mit_samba.h"
 
+#undef DBGC_CLASS
+#define DBGC_CLASS DBGC_KERBEROS
+
 void mit_samba_context_free(struct mit_samba_context *ctx)
 {
 	/* free heimdal's krb5_context */
@@ -49,6 +53,22 @@ void mit_samba_context_free(struct mit_samba_context *ctx)
 
 	/* then free everything else */
 	talloc_free(ctx);
+}
+
+/*
+ * Implemant a callback to log to the MIT KDC log facility
+ *
+ * http://web.mit.edu/kerberos/krb5-devel/doc/plugindev/general.html#logging-from-kdc-and-kadmind-plugin-modules
+ */
+static void mit_samba_debug(void *private_ptr, int msg_level, const char *msg)
+{
+	int is_error = 1;
+
+	if (msg_level > 0) {
+		is_error = 0;
+	}
+
+	com_err("", is_error, "%s", msg);
 }
 
 int mit_samba_context_init(struct mit_samba_context **_ctx)
@@ -77,12 +97,18 @@ int mit_samba_context_init(struct mit_samba_context **_ctx)
 		goto done;
 	}
 
-	setup_logging("mitkdc", DEBUG_DEFAULT_STDOUT);
+	debug_set_callback(NULL, mit_samba_debug);
 
 	/* init s4 configuration */
 	s4_conf_file = lpcfg_configfile(base_ctx.lp_ctx);
-	if (s4_conf_file) {
-		lpcfg_load(base_ctx.lp_ctx, s4_conf_file);
+	if (s4_conf_file != NULL) {
+		char *p = talloc_strdup(ctx, s4_conf_file);
+		if (p == NULL) {
+			ret = ENOMEM;
+			goto done;
+		}
+		lpcfg_load(base_ctx.lp_ctx, p);
+		TALLOC_FREE(p);
 	} else {
 		lpcfg_load_default(base_ctx.lp_ctx);
 	}
@@ -194,6 +220,14 @@ int mit_samba_get_principal(struct mit_samba_context *ctx,
 	if (kentry == NULL) {
 		return ENOMEM;
 	}
+
+#if KRB5_KDB_API_VERSION >= 10
+	/*
+	 * The MIT KDC code that wants the canonical name in all lookups, and
+	 * takes care to canonicalize only when appropriate.
+	 */
+	sflags |= SDB_F_FORCE_CANON;
+#endif
 
 	if (kflags & KRB5_KDB_FLAG_CANONICALIZE) {
 		sflags |= SDB_F_CANON;
@@ -399,6 +433,7 @@ int mit_samba_get_nextkey(struct mit_samba_context *ctx,
 int mit_samba_get_pac(struct mit_samba_context *smb_ctx,
 		      krb5_context context,
 		      krb5_db_entry *client,
+		      krb5_db_entry *server,
 		      krb5_keyblock *client_key,
 		      krb5_pac *pac)
 {
@@ -409,9 +444,12 @@ int mit_samba_get_pac(struct mit_samba_context *smb_ctx,
 	DATA_BLOB **cred_ndr_ptr = NULL;
 	DATA_BLOB cred_blob = data_blob_null;
 	DATA_BLOB *pcred_blob = NULL;
+	DATA_BLOB *pac_attrs_blob = NULL;
+	DATA_BLOB *requester_sid_blob = NULL;
 	NTSTATUS nt_status;
 	krb5_error_code code;
 	struct samba_kdc_entry *skdc_entry;
+	bool is_krbtgt;
 
 	skdc_entry = talloc_get_type_abort(client->e_data,
 					   struct samba_kdc_entry);
@@ -430,12 +468,16 @@ int mit_samba_get_pac(struct mit_samba_context *smb_ctx,
 	}
 #endif
 
+	is_krbtgt = ks_is_tgs_principal(smb_ctx, server->princ);
+
 	nt_status = samba_kdc_get_pac_blobs(tmp_ctx,
 					    skdc_entry,
 					    &logon_info_blob,
 					    cred_ndr_ptr,
 					    &upn_dns_info_blob,
-					    NULL, NULL, NULL,
+					    is_krbtgt ? &pac_attrs_blob : NULL,
+					    NULL,
+					    is_krbtgt ? &requester_sid_blob : NULL,
 					    NULL);
 	if (!NT_STATUS_IS_OK(nt_status)) {
 		talloc_free(tmp_ctx);
@@ -463,8 +505,8 @@ int mit_samba_get_pac(struct mit_samba_context *smb_ctx,
 				   logon_info_blob,
 				   pcred_blob,
 				   upn_dns_info_blob,
-				   NULL,
-				   NULL,
+				   pac_attrs_blob,
+				   requester_sid_blob,
 				   NULL,
 				   pac);
 
@@ -488,6 +530,7 @@ krb5_error_code mit_samba_reget_pac(struct mit_samba_context *ctx,
 	DATA_BLOB *pac_blob = NULL;
 	DATA_BLOB *upn_blob = NULL;
 	DATA_BLOB *deleg_blob = NULL;
+	DATA_BLOB *requester_sid_blob = NULL;
 	struct samba_kdc_entry *client_skdc_entry = NULL;
 	struct samba_kdc_entry *krbtgt_skdc_entry = NULL;
 	struct samba_kdc_entry *server_skdc_entry = NULL;
@@ -503,14 +546,20 @@ krb5_error_code mit_samba_reget_pac(struct mit_samba_context *ctx,
 	ssize_t upn_dns_info_idx = -1;
 	ssize_t srv_checksum_idx = -1;
 	ssize_t kdc_checksum_idx = -1;
+	ssize_t tkt_checksum_idx = -1;
+	ssize_t attrs_info_idx = -1;
+	ssize_t requester_sid_idx = -1;
 	krb5_pac new_pac = NULL;
 	bool ok;
+	bool is_krbtgt;
 
 	/* Create a memory context early so code can use talloc_stackframe() */
 	tmp_ctx = talloc_named(ctx, 0, "mit_samba_reget_pac context");
 	if (tmp_ctx == NULL) {
 		return ENOMEM;
 	}
+
+	is_krbtgt = ks_is_tgs_principal(ctx, server->princ);
 
 	if (client != NULL) {
 		client_skdc_entry =
@@ -570,7 +619,7 @@ krb5_error_code mit_samba_reget_pac(struct mit_samba_context *ctx,
 						    NULL,
 						    &upn_blob,
 						    NULL, NULL,
-						    NULL,
+						    &requester_sid_blob,
 						    NULL);
 		if (!NT_STATUS_IS_OK(nt_status)) {
 			code = EINVAL;
@@ -729,6 +778,45 @@ krb5_error_code mit_samba_reget_pac(struct mit_samba_context *ctx,
 			}
 			kdc_checksum_idx = i;
 			break;
+		case PAC_TYPE_TICKET_CHECKSUM:
+			if (tkt_checksum_idx != -1) {
+				DBG_WARNING("ticket checksum type[%u] twice "
+					    "[%zd] and [%zu]: \n",
+					    types[i],
+					    tkt_checksum_idx,
+					    i);
+				SAFE_FREE(types);
+				code = EINVAL;
+				goto done;
+			}
+			tkt_checksum_idx = i;
+			break;
+		case PAC_TYPE_ATTRIBUTES_INFO:
+			if (attrs_info_idx != -1) {
+				DBG_WARNING("attributes info type[%u] twice "
+					    "[%zd] and [%zu]: \n",
+					    types[i],
+					    attrs_info_idx,
+					    i);
+				SAFE_FREE(types);
+				code = EINVAL;
+				goto done;
+			}
+			attrs_info_idx = i;
+			break;
+		case PAC_TYPE_REQUESTER_SID:
+			if (requester_sid_idx != -1) {
+				DBG_WARNING("requester sid type[%u] twice"
+					    "[%zd] and [%zu]: \n",
+					    types[i],
+					    requester_sid_idx,
+					    i);
+				SAFE_FREE(types);
+				code = EINVAL;
+				goto done;
+			}
+			requester_sid_idx = i;
+			break;
 		default:
 			continue;
 		}
@@ -756,6 +844,13 @@ krb5_error_code mit_samba_reget_pac(struct mit_samba_context *ctx,
 		DEBUG(1, ("PAC_TYPE_KDC_CHECKSUM missing\n"));
 		SAFE_FREE(types);
 		code = EINVAL;
+		goto done;
+	}
+	if (!(flags & KRB5_KDB_FLAG_CONSTRAINED_DELEGATION) &&
+	    requester_sid_idx == -1) {
+		DEBUG(1, ("PAC_TYPE_REQUESTER_SID missing\n"));
+		SAFE_FREE(types);
+		code = KRB5KDC_ERR_TGT_REVOKED;
 		goto done;
 	}
 
@@ -823,6 +918,10 @@ krb5_error_code mit_samba_reget_pac(struct mit_samba_context *ctx,
 			}
 			break;
 		case PAC_TYPE_SRV_CHECKSUM:
+			if (requester_sid_idx == -1 && requester_sid_blob != NULL) {
+				/* inject REQUESTER_SID */
+				forced_next_type = PAC_TYPE_REQUESTER_SID;
+			}
 			/*
 			 * This is generated in the main KDC code
 			 */
@@ -832,6 +931,26 @@ krb5_error_code mit_samba_reget_pac(struct mit_samba_context *ctx,
 			 * This is generated in the main KDC code
 			 */
 			continue;
+		case PAC_TYPE_ATTRIBUTES_INFO:
+			if (!is_untrusted && is_krbtgt) {
+				/* just copy... */
+				break;
+			}
+
+			continue;
+		case PAC_TYPE_REQUESTER_SID:
+			if (!is_krbtgt) {
+				continue;
+			}
+
+			/*
+			 * Replace in the RODC case, otherwise
+			 * requester_sid_blob is NULL and we just copy.
+			 */
+			if (requester_sid_blob != NULL) {
+				type_blob = *requester_sid_blob;
+			}
+			break;
 		default:
 			/* just copy... */
 			break;
@@ -1074,7 +1193,8 @@ int mit_samba_kpasswd_change_password(struct mit_samba_context *ctx,
 	struct samr_DomInfo1 *dominfo;
 	const char *error_string = NULL;
 	struct auth_user_info_dc *user_info_dc;
-	struct samba_kdc_entry *p;
+	struct samba_kdc_entry *p =
+		talloc_get_type_abort(db_entry->e_data, struct samba_kdc_entry);
 	krb5_error_code code = 0;
 
 #ifdef DEBUG_PASSWORD
@@ -1085,8 +1205,6 @@ int mit_samba_kpasswd_change_password(struct mit_samba_context *ctx,
 	if (tmp_ctx == NULL) {
 		return ENOMEM;
 	}
-
-	p = (struct samba_kdc_entry *)db_entry->e_data;
 
 	status = authsam_make_user_info_dc(tmp_ctx,
 					   ctx->db_ctx->samdb,
@@ -1163,10 +1281,9 @@ out:
 void mit_samba_zero_bad_password_count(krb5_db_entry *db_entry)
 {
 	struct netr_SendToSamBase *send_to_sam = NULL;
-	struct samba_kdc_entry *p;
+	struct samba_kdc_entry *p =
+		talloc_get_type_abort(db_entry->e_data, struct samba_kdc_entry);
 	struct ldb_dn *domain_dn;
-
-	p = (struct samba_kdc_entry *)db_entry->e_data;
 
 	domain_dn = ldb_get_default_basedn(p->kdc_db_ctx->samdb);
 
@@ -1181,9 +1298,8 @@ void mit_samba_zero_bad_password_count(krb5_db_entry *db_entry)
 
 void mit_samba_update_bad_password_count(krb5_db_entry *db_entry)
 {
-	struct samba_kdc_entry *p;
-
-	p = (struct samba_kdc_entry *)db_entry->e_data;
+	struct samba_kdc_entry *p =
+		talloc_get_type_abort(db_entry->e_data, struct samba_kdc_entry);
 
 	authsam_update_bad_pwd_count(p->kdc_db_ctx->samdb,
 				     p->msg,

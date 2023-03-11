@@ -23,6 +23,7 @@
 #include "libsmb/libsmb.h"
 #include "libsmb/nmblib.h"
 #include "../libcli/smb/smbXcli_base.h"
+#include "lib/util/string_wrappers.h"
 
 static fstring password;
 static fstring username;
@@ -237,8 +238,10 @@ struct rn_state {
 	char *short_name;
 };
 
-static NTSTATUS listfn(const char *mnt, struct file_info *f, const char *s,
-		   void *private_data)
+static NTSTATUS listfn(
+	struct file_info *f,
+	const char *s,
+	void *private_data)
 {
 	struct rn_state *state = (struct rn_state *)private_data;
 	if (strcmp(f->name,".") == 0) {
@@ -352,9 +355,8 @@ static void test_mask(int argc, char *argv[],
 	int fc_len = strlen(filechars);
 	TALLOC_CTX *ctx = talloc_tos();
 
+	torture_deltree(cli, "\\masktest");
 	cli_mkdir(cli, "\\masktest");
-
-	cli_unlink(cli, "\\masktest\\*", FILE_ATTRIBUTE_SYSTEM | FILE_ATTRIBUTE_HIDDEN);
 
 	if (argc >= 2) {
 		while (argc >= 2) {

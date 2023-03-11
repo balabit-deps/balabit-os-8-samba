@@ -465,7 +465,7 @@ int rep_dlclose(void *handle);
 #endif
 
 #ifndef _DEPRECATED_
-#ifdef HAVE___ATTRIBUTE__
+#if __has_attribute(deprecated) || (__GNUC__ >= 3)
 #define _DEPRECATED_ __attribute__ ((deprecated))
 #else
 #define _DEPRECATED_
@@ -963,6 +963,16 @@ int rep_memset_s(void *dest, size_t destsz, int ch, size_t count);
 #define getprogname rep_getprogname
 const char *rep_getprogname(void);
 #endif
+
+#ifndef HAVE_COPY_FILE_RANGE
+#define copy_file_range rep_copy_file_range
+ssize_t rep_copy_file_range(int fd_in,
+			    loff_t *off_in,
+			    int fd_out,
+			    loff_t *off_out,
+			    size_t len,
+			    unsigned int flags);
+#endif /* HAVE_COPY_FILE_RANGE */
 
 #ifndef FALL_THROUGH
 # ifdef HAVE_FALLTHROUGH_ATTRIBUTE

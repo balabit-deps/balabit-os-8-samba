@@ -22,7 +22,7 @@
 */
 
 #include "includes.h"
-#include "lib/cmdline/popt_common.h"
+#include "lib/cmdline/cmdline.h"
 #include "librpc/gen_ndr/ndr_drsuapi_c.h"
 #include "torture/rpc/torture_rpc.h"
 #include "libcli/security/dom_sid.h"
@@ -779,7 +779,7 @@ bool torture_drsuapi_tcase_setup_common(struct torture_context *tctx, struct DsP
 
 	torture_assert(tctx, priv, "Invalid argument");
 
-	priv->admin_credentials = popt_get_cmdline_credentials();
+	priv->admin_credentials = samba_cmdline_get_creds();
 
 	torture_comment(tctx, "Create DRSUAPI pipe\n");
 	status = torture_rpc_connection(tctx,

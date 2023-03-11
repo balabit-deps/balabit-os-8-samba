@@ -54,6 +54,9 @@
 #include "librpc/gen_ndr/idmap.h"
 #include "lib/param/loadparm.h"
 #include "lib/util_sid_passdb.h"
+#include "lib/util/smb_strtox.h"
+#include "lib/util/string_wrappers.h"
+#include "source3/lib/substitute.h"
 
 #undef DBGC_CLASS
 #define DBGC_CLASS DBGC_PASSDB

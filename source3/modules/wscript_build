@@ -219,6 +219,11 @@ bld.SAMBA3_MODULE('vfs_posixacl',
                  internal_module=bld.SAMBA3_IS_STATIC_MODULE('vfs_posixacl'),
                  enabled=bld.SAMBA3_IS_ENABLED_MODULE('vfs_posixacl'))
 
+bld.SAMBA3_BINARY('test_vfs_posixacl',
+                  source='test_vfs_posixacl.c',
+                  deps='smbd_base cmocka',
+                  for_selftest=True)
+
 bld.SAMBA3_MODULE('vfs_aixacl',
                  subsystem='vfs',
                  source='vfs_aixacl.c',
@@ -302,13 +307,6 @@ bld.SAMBA3_MODULE('vfs_hpuxacl',
                  internal_module=bld.SAMBA3_IS_STATIC_MODULE('vfs_hpuxacl'),
                  enabled=bld.SAMBA3_IS_ENABLED_MODULE('vfs_hpuxacl'))
 
-bld.SAMBA3_MODULE('vfs_tru64acl',
-                 subsystem='vfs',
-                 source='vfs_tru64acl.c',
-                 init_function='',
-                 internal_module=bld.SAMBA3_IS_STATIC_MODULE('vfs_true64acl'),
-                 enabled=bld.SAMBA3_IS_ENABLED_MODULE('vfs_true64acl'))
-
 bld.SAMBA3_MODULE('vfs_catia',
                  subsystem='vfs',
                  source='vfs_catia.c',
@@ -365,6 +363,13 @@ bld.SAMBA3_MODULE('vfs_gpfs',
                  internal_module=bld.SAMBA3_IS_STATIC_MODULE('vfs_gpfs'),
                  enabled=bld.SAMBA3_IS_ENABLED_MODULE('vfs_gpfs'),
                  includes=bld.CONFIG_GET('CPPPATH_GPFS'))
+
+bld.SAMBA3_BINARY('test_vfs_gpfs',
+                  source='test_vfs_gpfs.c',
+                  deps='NFS4_ACLS non_posix_acls gpfswrap cmocka',
+                  for_selftest=True,
+                  enabled=bld.SAMBA3_IS_ENABLED_MODULE('vfs_gpfs'),
+                  includes=bld.CONFIG_GET('CPPPATH_GPFS'))
 
 bld.SAMBA3_MODULE('vfs_readahead',
                  subsystem='vfs',
@@ -586,6 +591,7 @@ bld.SAMBA3_MODULE('vfs_virusfilter',
                  vfs_virusfilter_sophos.c
                  vfs_virusfilter_fsav.c
                  vfs_virusfilter_clamav.c
+                 vfs_virusfilter_dummy.c
                  ''',
                  deps='samba-util VFS_VIRUSFILTER_UTILS',
                  init_function='',

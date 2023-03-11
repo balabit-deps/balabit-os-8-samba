@@ -2,7 +2,6 @@
 # -*- coding: utf-8 -*-
 # This is unit with tests for LDAP access checks
 
-from __future__ import print_function
 import optparse
 import sys
 import base64
@@ -12,7 +11,7 @@ import samba
 
 from samba.tests import DynamicTestCase
 from samba.tests.subunitrun import SubunitOptions, TestProgram
-from samba.compat import get_string
+from samba.common import get_string
 
 import samba.getopt as options
 from samba.join import DCJoinContext
@@ -2285,6 +2284,32 @@ class AclSPNTests(AclTests):
             self.assertEqual(num, ERR_CONSTRAINT_VIOLATION)
         else:
             self.fail(f'able to add disallowed SPN {not_allowed_spn}')
+
+    def test_delete_disallowed_spn(self):
+        # Grant Validated-SPN property.
+        mod = f'(OA;;SW;{security.GUID_DRS_VALIDATE_SPN};;{self.user_sid1})'
+        self.sd_utils.dacl_add_ace(self.computerdn, mod)
+
+        spn_base = f'HOST/{self.computername}'
+
+        not_allowed_spn = f'{spn_base}/{self.dcctx.get_domain_name()}'
+
+        # Add a disallowed SPN as admin.
+        msg = Message(Dn(self.ldb_admin, self.computerdn))
+        msg['servicePrincipalName'] = MessageElement(not_allowed_spn,
+                                                     FLAG_MOD_ADD,
+                                                     'servicePrincipalName')
+        self.ldb_admin.modify(msg)
+
+        # Ensure we are able to delete a disallowed SPN.
+        msg = Message(Dn(self.ldb_user1, self.computerdn))
+        msg['servicePrincipalName'] = MessageElement(not_allowed_spn,
+                                                     FLAG_MOD_DELETE,
+                                                     'servicePrincipalName')
+        try:
+            self.ldb_user1.modify(msg)
+        except LdbError:
+            self.fail(f'unable to delete disallowed SPN {not_allowed_spn}')
 
 
 # tests SEC_ADS_LIST vs. SEC_ADS_LIST_OBJECT

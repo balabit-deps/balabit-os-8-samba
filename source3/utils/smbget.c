@@ -18,7 +18,7 @@
 
 #include "includes.h"
 #include "system/filesys.h"
-#include "popt_common_cmdline.h"
+#include "lib/cmdline/cmdline.h"
 #include "libsmbclient.h"
 #include "cmdline_contexts.h"
 
@@ -129,7 +129,7 @@ static void get_auth_data(const char *srv, const char *shr, char *wg, int wglen,
 
 		rc = asprintf(&prompt,
 			      "Password for [%s] connecting to //%s/%s: ",
-			      un, shr, srv);
+			      un, srv, shr);
 		if (rc == -1) {
 			return;
 		}
@@ -974,6 +974,11 @@ int main(int argc, char **argv)
 		case 'v':
 			opt.verbose = true;
 			break;
+		case POPT_ERROR_BADOPT:
+			fprintf(stderr, "\nInvalid option %s: %s\n\n",
+				poptBadOption(pc, 0), poptStrerror(c));
+			poptPrintUsage(pc, stderr, 0);
+			exit(1);
 		}
 	}
 
@@ -1005,7 +1010,7 @@ int main(int argc, char **argv)
 		goto done;
 	}
 
-	popt_burn_cmdline_password(argc, argv);
+	samba_cmdline_burn(argc, argv);
 
 	if (smbc_init(get_auth_data, opt.debuglevel) < 0) {
 		fprintf(stderr, "Unable to initialize libsmbclient\n");

@@ -74,6 +74,9 @@
 #include "source4/lib/tls/tls.h"
 #include "libcli/auth/ntlm_check.h"
 #include "lib/crypto/gnutls_helpers.h"
+#include "lib/util/string_wrappers.h"
+#include "auth/credentials/credentials.h"
+#include "source3/lib/substitute.h"
 
 #ifdef HAVE_SYS_SYSCTL_H
 #include <sys/sysctl.h>
@@ -195,6 +198,7 @@ static const struct loadparm_service _sDefault =
 	.map_hidden = false,
 	.map_archive = true,
 	.store_dos_attributes = true,
+	.smbd_max_xattr_size = 65536,
 	.dmapi_support = false,
 	.locking = true,
 	.strict_locking = Auto,
@@ -237,11 +241,12 @@ static const struct loadparm_service _sDefault =
 	.acl_map_full_control = true,
 	.acl_group_control = false,
 	.acl_allow_execute_always = false,
+	.acl_flag_inherited_canonicalization = true,
 	.aio_read_size = 1,
 	.aio_write_size = 1,
 	.map_readonly = MAP_READONLY_NO,
 	.directory_name_cache_size = 100,
-	.smb_encrypt = SMB_SIGNING_DEFAULT,
+	.server_smb_encrypt = SMB_ENCRYPTION_DEFAULT,
 	.kernel_share_modes = true,
 	.durable_handles = true,
 	.check_parent_directory_delete_on_close = false,
@@ -249,6 +254,7 @@ static const struct loadparm_service _sDefault =
 	.smbd_search_ask_sharemode = true,
 	.smbd_getinfo_ask_sharemode = true,
 	.spotlight_backend = SPOTLIGHT_BACKEND_NOINDEX,
+	.honor_change_notify_privilege = false,
 	.dummy = ""
 };
 
@@ -658,7 +664,10 @@ static void init_globals(struct loadparm_context *lp_ctx, bool reinit_globals)
 	Globals.client_schannel = true;
 	Globals.winbind_sealed_pipes = true;
 	Globals.require_strong_key = true;
+	Globals.reject_md5_servers = true;
 	Globals.server_schannel = true;
+	Globals.server_schannel_require_seal = true;
+	Globals.reject_md5_clients = true;
 	Globals.read_raw = true;
 	Globals.write_raw = true;
 	Globals.null_passwords = false;
@@ -680,15 +689,6 @@ static void init_globals(struct loadparm_context *lp_ctx, bool reinit_globals)
 	Globals.machine_password_timeout = 60 * 60 * 24 * 7;	/* 7 days default. */
 	Globals.lm_announce = Auto;	/* = Auto: send only if LM clients found */
 	Globals.lm_interval = 60;
-#if (defined(HAVE_NETGROUP) && defined(WITH_AUTOMOUNT))
-	Globals.nis_homedir = false;
-#ifdef WITH_NISPLUS_HOME
-	lpcfg_string_set(Globals.ctx, &Globals.homedir_map,
-			 "auto_home.org_dir");
-#else
-	lpcfg_string_set(Globals.ctx, &Globals.homedir_map, "auto.home");
-#endif
-#endif
 	Globals.time_server = false;
 	Globals.bind_interfaces_only = false;
 	Globals.unix_password_sync = false;
@@ -821,7 +821,7 @@ static void init_globals(struct loadparm_context *lp_ctx, bool reinit_globals)
 	Globals.winbind_nss_info = str_list_make_v3_const(NULL, "template", NULL);
 	Globals.winbind_refresh_tickets = false;
 	Globals.winbind_offline_logon = false;
-	Globals.winbind_scan_trusted_domains = true;
+	Globals.winbind_scan_trusted_domains = false;
 
 	Globals.idmap_cache_time = 86400 * 7; /* a week by default */
 	Globals.idmap_negative_cache_time = 120; /* 2 minutes by default */
@@ -871,6 +871,7 @@ static void init_globals(struct loadparm_context *lp_ctx, bool reinit_globals)
 	Globals.smb2_max_trans = DEFAULT_SMB2_MAX_TRANSACT;
 	Globals.smb2_max_credits = DEFAULT_SMB2_MAX_CREDITS;
 	Globals.smb2_leases = true;
+	Globals.server_multi_channel_support = true;
 
 	lpcfg_string_set(Globals.ctx, &Globals.ncalrpc_dir,
 			 get_dyn_NCALRPCDIR());
@@ -888,8 +889,6 @@ static void init_globals(struct loadparm_context *lp_ctx, bool reinit_globals)
 	lpcfg_string_set(Globals.ctx,
 			 &Globals.tls_priority,
 			 "NORMAL:-VERS-SSL3.0");
-
-	lpcfg_string_set(Globals.ctx, &Globals.share_backend, "classic");
 
 	Globals._preferred_master = Auto;
 
@@ -959,6 +958,27 @@ static void init_globals(struct loadparm_context *lp_ctx, bool reinit_globals)
 	Globals.ldap_max_anonymous_request_size = 256000;
 	Globals.ldap_max_authenticated_request_size = 16777216;
 	Globals.ldap_max_search_request_size = 256000;
+
+	/* Async DNS query timeout (in seconds). */
+	Globals.async_dns_timeout = 10;
+
+	Globals.client_smb_encrypt = SMB_ENCRYPTION_DEFAULT;
+
+	Globals._client_use_kerberos = CRED_USE_KERBEROS_DESIRED;
+
+	Globals.client_protection = CRED_CLIENT_PROTECTION_DEFAULT;
+
+	Globals.winbind_use_krb5_enterprise_principals = true;
+
+	Globals.client_smb3_signing_algorithms =
+		str_list_make_v3_const(NULL, DEFAULT_SMB3_SIGNING_ALGORITHMS, NULL);
+	Globals.server_smb3_signing_algorithms =
+		str_list_make_v3_const(NULL, DEFAULT_SMB3_SIGNING_ALGORITHMS, NULL);
+
+	Globals.client_smb3_encryption_algorithms =
+		str_list_make_v3_const(NULL, DEFAULT_SMB3_ENCRYPTION_ALGORITHMS, NULL);
+	Globals.server_smb3_encryption_algorithms =
+		str_list_make_v3_const(NULL, DEFAULT_SMB3_ENCRYPTION_ALGORITHMS, NULL);
 
 	Globals.min_domain_uid = 1000;
 
@@ -2115,7 +2135,7 @@ struct loadparm_service *lp_servicebynum(int snum)
 	return ServicePtrs[snum];
 }
 
-struct loadparm_service *lp_default_loadparm_service()
+struct loadparm_service *lp_default_loadparm_service(void)
 {
 	return &sDefault;
 }
@@ -4716,6 +4736,16 @@ int lp_client_ipc_signing(void)
 	return client_ipc_signing;
 }
 
+enum credentials_use_kerberos lp_client_use_kerberos(void)
+{
+	if (lp_weak_crypto() == SAMBA_WEAK_CRYPTO_DISALLOWED) {
+		return CRED_USE_KERBEROS_REQUIRED;
+	}
+
+	return lp__client_use_kerberos();
+}
+
+
 int lp_rpc_low_port(void)
 {
 	return Globals.rpc_low_port;
@@ -4756,7 +4786,7 @@ unsigned int * get_flags(void)
 	return flags_list;
 }
 
-enum samba_weak_crypto lp_weak_crypto()
+enum samba_weak_crypto lp_weak_crypto(void)
 {
 	if (Globals.weak_crypto == SAMBA_WEAK_CRYPTO_UNKNOWN) {
 		Globals.weak_crypto = SAMBA_WEAK_CRYPTO_DISALLOWED;
@@ -4767,4 +4797,13 @@ enum samba_weak_crypto lp_weak_crypto()
 	}
 
 	return Globals.weak_crypto;
+}
+
+uint32_t lp_get_async_dns_timeout(void)
+{
+	/*
+	 * Clamp minimum async dns timeout to 1 second
+	 * as per the man page.
+	 */
+	return MAX(Globals.async_dns_timeout, 1);
 }

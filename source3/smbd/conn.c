@@ -24,6 +24,25 @@
 #include "smbd/globals.h"
 #include "lib/util/bitmap.h"
 
+static void conn_free_internal(connection_struct *conn);
+
+/****************************************************************************
+ * Remove a conn struct from conn->sconn->connections
+ * if not already done.
+****************************************************************************/
+
+static int conn_struct_destructor(connection_struct *conn)
+{
+        if (conn->sconn != NULL) {
+		DLIST_REMOVE(conn->sconn->connections, conn);
+		SMB_ASSERT(conn->sconn->num_connections > 0);
+		conn->sconn->num_connections--;
+		conn->sconn = NULL;
+	}
+	conn_free_internal(conn);
+	return 0;
+}
+
 /****************************************************************************
  Return the number of open connections.
 ****************************************************************************/
@@ -100,7 +119,7 @@ connection_struct *conn_new(struct smbd_server_connection *sconn)
 		TALLOC_FREE(conn);
 		return NULL;
 	}
-	conn->cwd_fsp->fh = talloc_zero(conn->cwd_fsp, struct fd_handle);
+	conn->cwd_fsp->fh = fd_handle_create(conn->cwd_fsp);
 	if (conn->cwd_fsp->fh == NULL) {
 		DBG_ERR("talloc_zero failed\n");
 		TALLOC_FREE(conn);
@@ -108,13 +127,18 @@ connection_struct *conn_new(struct smbd_server_connection *sconn)
 	}
 	conn->sconn = sconn;
 	conn->force_group_gid = (gid_t)-1;
-	conn->cwd_fsp->fh->fd = -1;
+	fsp_set_fd(conn->cwd_fsp, -1);
 	conn->cwd_fsp->fnum = FNUM_FIELD_INVALID;
 	conn->cwd_fsp->conn = conn;
 
 	DLIST_ADD(sconn->connections, conn);
 	sconn->num_connections++;
 
+	/*
+	 * Catches the case where someone forgets to call
+	 * conn_free().
+	 */
+	talloc_set_destructor(conn, conn_struct_destructor);
 	return conn;
 }
 
@@ -212,7 +236,6 @@ static void conn_free_internal(connection_struct *conn)
 	free_namearray(conn->aio_write_behind_list);
 
 	ZERO_STRUCTP(conn);
-	talloc_destroy(conn);
 }
 
 /****************************************************************************
@@ -221,16 +244,7 @@ static void conn_free_internal(connection_struct *conn)
 
 void conn_free(connection_struct *conn)
 {
-	if (conn->sconn == NULL) {
-		conn_free_internal(conn);
-		return;
-	}
-
-	DLIST_REMOVE(conn->sconn->connections, conn);
-	SMB_ASSERT(conn->sconn->num_connections > 0);
-	conn->sconn->num_connections--;
-
-	conn_free_internal(conn);
+	TALLOC_FREE(conn);
 }
 
 /*

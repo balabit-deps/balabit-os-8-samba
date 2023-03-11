@@ -58,8 +58,11 @@ struct samba_kdc_entry {
 	bool is_rodc;
 	bool is_trust;
 	void *entry_ex;
+	uint32_t supported_enctypes;
 };
 
 extern struct hdb_method hdb_samba4_interface;
+
+#define CHANGEPW_LIFETIME 60*2 /* 2 minutes */
 
 #endif /* _SAMBA_KDC_H_ */

@@ -1,7 +1,7 @@
 The packaging is kept in https://salsa.debian.org/samba-team/samba.
 
 The version in unstable is on the `master` branch, with the corresponding
-upstream version in the `upstream_4.11` branch (with `pristine-tar` information
+upstream version in the `upstream_4.15` branch (with `pristine-tar` information
 in the `pristine-tar` branch).
 
 It should be possible to build the package by just running `gbp buildpackage`.
@@ -11,7 +11,7 @@ Building
 
 The first time:
 
-    sudo apt install git-buildpackage pristine-tar cowbuilder
+    sudo apt install git-buildpackage pristine-tar cowbuilder dh-python
     DIST=sid ARCH=amd64 git-pbuilder create
     git clone https://salsa.debian.org/samba-team/samba.git
 
@@ -28,7 +28,7 @@ Merging minor upstream releases
 Importing a new upstream version can be done like this:
 
     # set target version
-    upstream_version=4.11.1
+    upstream_version=4.15.5
     # go to git repo
     cd $GIT_DIR
     # Import upstream

@@ -1,3 +1,25 @@
+samba (2:4.15.13+dfsg-0ubuntu0.20.04.1) focal-security; urgency=medium
+
+  * Update to 4.15.13 as a security update
+    - Removed patches included in new version:
+      + CVE-*.patch
+      + win-22H2-fix*.patch
+      + Rename-mdfind-to-mdsearch.patch
+      + lp-1951490-fix-printing-KB5006743.patch
+    - d/rules: remove --with-dnsupdate, it was merged with --with-ads.
+    - debian/control: bump libldb-dev Build-Depends to 2.4.4, bump
+      libtalloc to 2.3.3, libtdb to 1.4.4, and libtevent to 0.11.0.
+    - debian/control: added python3-markdown to Build-Depends.
+    - debian/{gpb.conf,watch,README.source}: updated for 4.15.
+    - debian/{*.install,*.symbols,*.lintian-overrides}: updated for 4.15.
+    - debian/rules: drop fixing of findsmb shebang.
+    - debian/rules: drop removal of ctdb tests, they are no longer
+      installed.
+    - CVE-2022-3437, CVE-2022-37966, CVE-2022-37967, CVE-2022-38023,
+      CVE-2022-42898, CVE-2022-45141
+
+ -- Marc Deslauriers <marc.deslauriers@ubuntu.com>  Fri, 24 Feb 2023 07:31:43 -0500
+
 samba (2:4.13.17~dfsg-0ubuntu1.20.04.5bb1) focal; urgency=medium
 
   * Balabit patched version

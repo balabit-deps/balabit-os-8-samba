@@ -38,10 +38,13 @@ struct gssapi_creds_container;
 struct smb_krb5_context;
 struct keytab_container;
 struct db_context;
+enum smb_signing_setting;
+enum smb_encryption_setting;
 
 /* In order of priority */
 enum credentials_obtained { 
 	CRED_UNINITIALISED = 0,  /* We don't even have a guess yet */
+	CRED_SMB_CONF,           /* Current value should be used, which comes from smb.conf */
 	CRED_CALLBACK, 		 /* Callback should be used to obtain value */
 	CRED_GUESS_ENV,	         /* Current value should be used, which was guessed */
 	CRED_GUESS_FILE,	 /* A guess from a file (or file pointed at in env variable) */
@@ -50,9 +53,19 @@ enum credentials_obtained {
 };
 
 enum credentials_use_kerberos {
-	CRED_AUTO_USE_KERBEROS = 0, /* Default, we try kerberos if available */
-	CRED_DONT_USE_KERBEROS,     /* Sometimes trying kerberos just does 'bad things', so don't */
-	CRED_MUST_USE_KERBEROS      /* Sometimes administrators are parinoid, so always do kerberos */
+	/** Sometimes trying kerberos just does 'bad things', so don't */
+	CRED_USE_KERBEROS_DISABLED = 0,
+	/** Default, we try kerberos if available */
+	CRED_USE_KERBEROS_DESIRED,
+	/** Sometimes administrators are paranoid, so always do kerberos */
+	CRED_USE_KERBEROS_REQUIRED,
+};
+
+enum credentials_client_protection {
+	CRED_CLIENT_PROTECTION_DEFAULT = -1,
+	CRED_CLIENT_PROTECTION_PLAIN = 0,
+	CRED_CLIENT_PROTECTION_SIGN,
+	CRED_CLIENT_PROTECTION_ENCRYPT,
 };
 
 enum credentials_krb_forwardable {
@@ -73,9 +86,13 @@ bool cli_credentials_set_workstation(struct cli_credentials *cred,
 				     enum credentials_obtained obtained);
 bool cli_credentials_is_anonymous(struct cli_credentials *cred);
 struct cli_credentials *cli_credentials_init(TALLOC_CTX *mem_ctx);
+struct cli_credentials *cli_credentials_init_server(TALLOC_CTX *mem_ctx,
+						    struct loadparm_context *lp_ctx);
 void cli_credentials_set_anonymous(struct cli_credentials *cred);
 bool cli_credentials_wrong_password(struct cli_credentials *cred);
 const char *cli_credentials_get_password(struct cli_credentials *cred);
+const char *cli_credentials_get_password_and_obtained(struct cli_credentials *cred,
+						      enum credentials_obtained *obtained);
 void cli_credentials_get_ntlm_username_domain(struct cli_credentials *cred, TALLOC_CTX *mem_ctx, 
 					      const char **username, 
 					      const char **domain);
@@ -88,6 +105,8 @@ NTSTATUS cli_credentials_get_ntlm_response(struct cli_credentials *cred, TALLOC_
 					   DATA_BLOB *_lm_session_key, DATA_BLOB *_session_key);
 const char *cli_credentials_get_realm(struct cli_credentials *cred);
 const char *cli_credentials_get_username(struct cli_credentials *cred);
+const char *cli_credentials_get_username_and_obtained(struct cli_credentials *cred,
+						      enum credentials_obtained *obtained);
 int cli_credentials_get_krb5_context(struct cli_credentials *cred, 
 				     struct loadparm_context *lp_ctx,
 				     struct smb_krb5_context **smb_krb5_context);
@@ -111,7 +130,7 @@ const char *cli_credentials_get_domain(struct cli_credentials *cred);
 struct netlogon_creds_CredentialState *cli_credentials_get_netlogon_creds(struct cli_credentials *cred);
 void cli_credentials_set_machine_account_pending(struct cli_credentials *cred,
 						 struct loadparm_context *lp_ctx);
-void cli_credentials_set_conf(struct cli_credentials *cred, 
+bool cli_credentials_set_conf(struct cli_credentials *cred,
 			      struct loadparm_context *lp_ctx);
 char *cli_credentials_get_principal(struct cli_credentials *cred, TALLOC_CTX *mem_ctx);
 int cli_credentials_get_server_gss_creds(struct cli_credentials *cred, 
@@ -124,8 +143,9 @@ int cli_credentials_get_client_gss_creds(struct cli_credentials *cred,
 					 const char **error_string);
 void cli_credentials_set_forced_sasl_mech(struct cli_credentials *creds,
 					  const char *sasl_mech);
-void cli_credentials_set_kerberos_state(struct cli_credentials *creds, 
-					enum credentials_use_kerberos use_kerberos);
+bool cli_credentials_set_kerberos_state(struct cli_credentials *creds,
+					enum credentials_use_kerberos kerberos_state,
+					enum credentials_obtained obtained);
 void cli_credentials_set_krb_forwardable(struct cli_credentials *creds,
 					 enum credentials_krb_forwardable krb_forwardable);
 bool cli_credentials_set_domain(struct cli_credentials *cred, 
@@ -184,7 +204,7 @@ NTSTATUS cli_credentials_set_machine_account_db_ctx(struct cli_credentials *cred
 						    struct db_context *db_ctx);
 
 bool cli_credentials_authentication_requested(struct cli_credentials *cred);
-void cli_credentials_guess(struct cli_credentials *cred,
+bool cli_credentials_guess(struct cli_credentials *cred,
 			   struct loadparm_context *lp_ctx);
 bool cli_credentials_set_bind_dn(struct cli_credentials *cred, 
 				 const char *bind_dn);
@@ -210,14 +230,18 @@ bool cli_credentials_set_nt_hash(struct cli_credentials *cred,
 bool cli_credentials_set_old_nt_hash(struct cli_credentials *cred,
 				     const struct samr_Password *nt_hash);
 bool cli_credentials_set_ntlm_response(struct cli_credentials *cred,
-				       const DATA_BLOB *lm_response, 
-				       const DATA_BLOB *nt_response, 
+				       const DATA_BLOB *lm_response,
+				       const DATA_BLOB *lm_session_key,
+				       const DATA_BLOB *nt_response,
+				       const DATA_BLOB *nt_session_key,
 				       enum credentials_obtained obtained);
 int cli_credentials_set_keytab_name(struct cli_credentials *cred, 
 				    struct loadparm_context *lp_ctx,
 				    const char *keytab_name, 
 				    enum credentials_obtained obtained);
-void cli_credentials_set_gensec_features(struct cli_credentials *creds, uint32_t gensec_features);
+bool cli_credentials_set_gensec_features(struct cli_credentials *creds,
+					 uint32_t gensec_features,
+					 enum credentials_obtained obtained);
 uint32_t cli_credentials_get_gensec_features(struct cli_credentials *creds);
 int cli_credentials_set_ccache(struct cli_credentials *cred, 
 			       struct loadparm_context *lp_ctx,
@@ -289,6 +313,28 @@ void *_cli_credentials_callback_data(struct cli_credentials *cred);
 #define cli_credentials_callback_data_void(_cred) \
 	_cli_credentials_callback_data(_cred)
 
+bool cli_credentials_set_smb_signing(struct cli_credentials *cred,
+				     enum smb_signing_setting signing_state,
+				     enum credentials_obtained obtained);
+enum smb_signing_setting
+cli_credentials_get_smb_signing(struct cli_credentials *cred);
+
+bool cli_credentials_set_smb_ipc_signing(struct cli_credentials *cred,
+					 enum smb_signing_setting ipc_signing_state,
+					 enum credentials_obtained obtained);
+enum smb_signing_setting
+cli_credentials_get_smb_ipc_signing(struct cli_credentials *cred);
+
+bool cli_credentials_set_smb_encryption(struct cli_credentials *cred,
+					enum smb_encryption_setting encryption_state,
+					enum credentials_obtained obtained);
+enum smb_encryption_setting
+cli_credentials_get_smb_encryption(struct cli_credentials *cred);
+
+bool cli_credentials_set_cmdline_callbacks(struct cli_credentials *cred);
+
+void cli_credentials_dump(struct cli_credentials *creds);
+
 /**
  * Return attached NETLOGON credentials 
  */
@@ -297,5 +343,12 @@ struct netlogon_creds_CredentialState *cli_credentials_get_netlogon_creds(struct
 NTSTATUS netlogon_creds_session_encrypt(
 	struct netlogon_creds_CredentialState *state,
 	DATA_BLOB data);
+
+int cli_credentials_get_aes256_key(struct cli_credentials *cred,
+				   TALLOC_CTX *mem_ctx,
+				   struct loadparm_context *lp_ctx,
+				   const char *password,
+				   const char *salt,
+				   DATA_BLOB *aes_256);
 
 #endif /* __CREDENTIALS_H__ */

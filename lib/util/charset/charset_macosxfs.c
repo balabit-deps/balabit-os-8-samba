@@ -29,8 +29,10 @@
  * source.
  */
 
-#include "includes.h"
+#include "replace.h"
+#include "charset.h"
 #include "charset_proto.h"
+#include "lib/util/debug.h"
 #undef realloc
 
 #ifdef DARWINOS
@@ -377,7 +379,7 @@ size_t macosxfs_encoding_push(
 	charsconverted = CFStringGetBytes(
 		cfstring, CFRangeMake(0,cfsize),
 		script_code, 0, false,
-		*outbuf, *outbytesleft, &outsize);
+		*(UInt8 **)outbuf, *outbytesleft, &outsize);
 
 	if (0 == charsconverted) {
 		debug_out("String conversion: "

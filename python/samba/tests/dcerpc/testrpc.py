@@ -14,7 +14,6 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
-from __future__ import print_function
 import sys
 
 sys.path.insert(0, "bin/python")
@@ -22,7 +21,6 @@ sys.path.insert(0, "bin/python")
 import samba
 import samba.tests
 from samba.dcerpc import drsuapi
-from samba.compat import integer_types
 import talloc
 
 talloc.enable_null_tracking()
@@ -99,7 +97,7 @@ class RpcTests(object):
             if isinstance(value, str):
                 # print "%s=\"%s\"" % (n, value)
                 pass
-            elif isinstance(value, integer_types):
+            elif isinstance(value, int):
                 # print "%s=%d" % (n, value)
                 pass
             elif isinstance(value, type):

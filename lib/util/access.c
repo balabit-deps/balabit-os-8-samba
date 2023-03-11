@@ -21,10 +21,7 @@
 #include "lib/util/memory.h"
 #include "lib/util/access.h"
 #include "lib/util/unix_match.h"
-
-#if defined(HAVE_NETGROUP)
-#include "system/nis.h"
-#endif
+#include "lib/util/smb_strtox.h"
 
 #define NAME_INDEX 0
 #define ADDR_INDEX 1
@@ -118,11 +115,12 @@ static bool string_match(const char *tok,const char *s)
 			return true;
 		}
 	} else if (tok[0] == '@') { /* netgroup: look it up */
-#ifdef	HAVE_NETGROUP
+#ifdef HAVE_NETGROUP
 		DATA_BLOB tmp;
 		char *mydomain = NULL;
 		char *hostname = NULL;
 		bool netgroup_ok = false;
+		char nis_domain_buf[256];
 
 		if (memcache_lookup(
 			    NULL, SINGLETON_CACHE,
@@ -132,14 +130,19 @@ static bool string_match(const char *tok,const char *s)
 			SMB_ASSERT(tmp.length > 0);
 			mydomain = (tmp.data[0] == '\0')
 				? NULL : (char *)tmp.data;
-		}
-		else {
-			yp_get_default_domain(&mydomain);
-
-			memcache_add(
-				NULL, SINGLETON_CACHE,
-				data_blob_string_const_null("yp_default_domain"),
-				data_blob_string_const_null(mydomain?mydomain:""));
+		} else {
+			if (getdomainname(nis_domain_buf,
+					  sizeof(nis_domain_buf)) == 0) {
+				mydomain = &nis_domain_buf[0];
+				memcache_add(NULL,
+					     SINGLETON_CACHE,
+					     data_blob_string_const_null(
+						     "yp_default_domain"),
+					     data_blob_string_const_null(
+						     mydomain));
+			} else {
+				mydomain = NULL;
+			}
 		}
 
 		if (!mydomain) {

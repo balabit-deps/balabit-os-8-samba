@@ -32,7 +32,7 @@
 #include "librpc/gen_ndr/ndr_winreg_c.h"
 #include "librpc/gen_ndr/ndr_wkssvc_c.h"
 #include "librpc/gen_ndr/ndr_svcctl_c.h"
-#include "lib/cmdline/popt_common.h"
+#include "lib/cmdline/cmdline.h"
 #include "torture/rpc/torture_rpc.h"
 #include "libcli/libcli.h"
 #include "libcli/smb_composite/smb_composite.h"
@@ -196,7 +196,7 @@ bool torture_bind_authcontext(struct torture_context *torture)
 					lpcfg_smb_ports(torture->lp_ctx),
 					"IPC$", NULL,
 					lpcfg_socket_options(torture->lp_ctx),
-					popt_get_cmdline_credentials(),
+					samba_cmdline_get_creds(),
 					lpcfg_resolve_context(torture->lp_ctx),
 					torture->ev, &options, &session_options,
 					lpcfg_gensec_settings(torture, torture->lp_ctx));
@@ -431,7 +431,7 @@ static bool torture_bind_samba3(struct torture_context *torture)
 					lpcfg_smb_ports(torture->lp_ctx),
 					"IPC$", NULL,
 					lpcfg_socket_options(torture->lp_ctx),
-					popt_get_cmdline_credentials(),
+					samba_cmdline_get_creds(),
 					lpcfg_resolve_context(torture->lp_ctx),
 					torture->ev, &options, &session_options,
 					lpcfg_gensec_settings(torture, torture->lp_ctx));
@@ -443,16 +443,16 @@ static bool torture_bind_samba3(struct torture_context *torture)
 
 	ret = true;
 
-	ret &= bindtest(torture, cli, popt_get_cmdline_credentials(),
+	ret &= bindtest(torture, cli, samba_cmdline_get_creds(),
 			DCERPC_AUTH_TYPE_NTLMSSP,
 			DCERPC_AUTH_LEVEL_INTEGRITY);
-	ret &= bindtest(torture, cli, popt_get_cmdline_credentials(),
+	ret &= bindtest(torture, cli, samba_cmdline_get_creds(),
 			DCERPC_AUTH_TYPE_NTLMSSP,
 			DCERPC_AUTH_LEVEL_PRIVACY);
-	ret &= bindtest(torture, cli, popt_get_cmdline_credentials(),
+	ret &= bindtest(torture, cli, samba_cmdline_get_creds(),
 			DCERPC_AUTH_TYPE_SPNEGO,
 			DCERPC_AUTH_LEVEL_INTEGRITY);
-	ret &= bindtest(torture, cli, popt_get_cmdline_credentials(),
+	ret &= bindtest(torture, cli, samba_cmdline_get_creds(),
 			DCERPC_AUTH_TYPE_SPNEGO,
 			DCERPC_AUTH_LEVEL_PRIVACY);
 
@@ -1071,7 +1071,7 @@ static bool auth2(struct torture_context *tctx,
 		goto done;
 	}
 
-	negotiate_flags = NETLOGON_NEG_AUTH2_ADS_FLAGS;
+	negotiate_flags = NETLOGON_NEG_AUTH2_ADS_FLAGS | NETLOGON_NEG_SUPPORTS_AES;
 	E_md4hash(cli_credentials_get_password(wks_cred), mach_pw.hash);
 
 	a.in.server_name = talloc_asprintf(
@@ -1260,9 +1260,18 @@ static bool schan(struct torture_context *tctx,
 		E_md4hash(cli_credentials_get_password(user_creds),
 			  pinfo.ntpassword.hash);
 
-		netlogon_creds_arcfour_crypt(creds_state, pinfo.ntpassword.hash, 16);
-
 		logon.password = &pinfo;
+
+		/*
+		 * We don't use this here:
+		 *
+		 * netlogon_creds_encrypt_samlogon_logon(creds_state,
+		 *                                       NetlogonInteractiveInformation,
+		 *                                       &logon);
+		 *
+		 * in order to detect bugs
+		 */
+		netlogon_creds_aes_encrypt(creds_state, pinfo.ntpassword.hash, 16);
 
 		r.in.logon_level = NetlogonInteractiveInformation;
 		r.in.logon = &logon;
@@ -1379,7 +1388,7 @@ static bool torture_netlogon_samba3(struct torture_context *torture)
 					lpcfg_smb_ports(torture->lp_ctx),
 					"IPC$", NULL,
 					lpcfg_socket_options(torture->lp_ctx),
-					popt_get_cmdline_credentials(),
+					samba_cmdline_get_creds(),
 					lpcfg_resolve_context(torture->lp_ctx),
 					torture->ev, &options, &session_options,
 					lpcfg_gensec_settings(torture, torture->lp_ctx));
@@ -1403,7 +1412,7 @@ static bool torture_netlogon_samba3(struct torture_context *torture)
 		"join failed");
 
 	cli_credentials_set_domain(
-		popt_get_cmdline_credentials(),
+		samba_cmdline_get_creds(),
 		cli_credentials_get_domain(wks_creds),
 		CRED_SPECIFIED);
 
@@ -1422,7 +1431,7 @@ static bool torture_netlogon_samba3(struct torture_context *torture)
 		for (j=0; j<2; j++) {
 			torture_assert(torture,
 				schan(torture, cli, wks_creds,
-				popt_get_cmdline_credentials()),
+				samba_cmdline_get_creds()),
 				"schan failed");
 		}
 	}
@@ -1480,7 +1489,7 @@ static bool test_join3(struct torture_context *tctx,
 		"join failed");
 
 	cli_credentials_set_domain(
-		popt_get_cmdline_credentials(),
+		samba_cmdline_get_creds(),
 		cli_credentials_get_domain(wks_creds),
 		CRED_SPECIFIED);
 
@@ -1530,7 +1539,7 @@ static bool torture_samba3_sessionkey(struct torture_context *torture)
 	}
 
 	torture_assert(torture,
-		test_join3(torture, false, popt_get_cmdline_credentials(),
+		test_join3(torture, false, samba_cmdline_get_creds(),
 		NULL, wks_name),
 		"join using anonymous bind on an authenticated smb connection failed");
 
@@ -1539,7 +1548,7 @@ static bool torture_samba3_sessionkey(struct torture_context *torture)
 	 */
 
 	torture_assert(torture,
-		test_join3(torture, true, popt_get_cmdline_credentials(),
+		test_join3(torture, true, samba_cmdline_get_creds(),
 		NULL, wks_name),
 		"join using anonymous bind on an authenticated smb connection failed");
 
@@ -1813,7 +1822,7 @@ static bool torture_samba3_rpc_getusername(struct torture_context *torture)
 		torture, &cli, torture_setting_string(torture, "host", NULL),
 		lpcfg_smb_ports(torture->lp_ctx),
 		"IPC$", NULL, lpcfg_socket_options(torture->lp_ctx),
-		popt_get_cmdline_credentials(),
+		samba_cmdline_get_creds(),
 		lpcfg_resolve_context(torture->lp_ctx), torture->ev, &options,
 		&session_options, lpcfg_gensec_settings(torture, torture->lp_ctx));
 	torture_assert_ntstatus_ok(torture, status, "smbcli_full_connection failed\n");
@@ -2792,7 +2801,7 @@ static bool torture_samba3_rpc_spoolss(struct torture_context *torture)
 	userlevel1.client = talloc_asprintf(
 		torture, "\\\\%s", lpcfg_netbios_name(torture->lp_ctx));
 	userlevel1.user = cli_credentials_get_username(
-				popt_get_cmdline_credentials());
+				samba_cmdline_get_creds());
 	userlevel1.build = 2600;
 	userlevel1.major = 3;
 	userlevel1.minor = 0;
@@ -3418,7 +3427,7 @@ static bool torture_rpc_smb_reauth1(struct torture_context *torture)
 					lpcfg_smb_ports(torture->lp_ctx),
 					"IPC$", NULL,
 					lpcfg_socket_options(torture->lp_ctx),
-					popt_get_cmdline_credentials(),
+					samba_cmdline_get_creds(),
 					lpcfg_resolve_context(torture->lp_ctx),
 					torture->ev, &options, &session_options,
 					lpcfg_gensec_settings(torture, torture->lp_ctx));
@@ -3503,7 +3512,7 @@ static bool torture_rpc_smb_reauth1(struct torture_context *torture)
 	ZERO_STRUCT(io);
 	io.in.sesskey         = cli->transport->negotiate.sesskey;
 	io.in.capabilities    = cli->transport->negotiate.capabilities;
-	io.in.credentials     = popt_get_cmdline_credentials();
+	io.in.credentials     = samba_cmdline_get_creds();
 	io.in.workgroup       = lpcfg_workgroup(torture->lp_ctx);
 	io.in.gensec_settings = lpcfg_gensec_settings(torture, torture->lp_ctx);
 
@@ -3577,7 +3586,7 @@ static bool torture_rpc_smb_reauth2(struct torture_context *torture)
 					lpcfg_smb_ports(torture->lp_ctx),
 					"IPC$", NULL,
 					lpcfg_socket_options(torture->lp_ctx),
-					popt_get_cmdline_credentials(),
+					samba_cmdline_get_creds(),
 					lpcfg_resolve_context(torture->lp_ctx),
 					torture->ev, &options, &session_options,
 					lpcfg_gensec_settings(torture, torture->lp_ctx));
@@ -3640,7 +3649,7 @@ static bool torture_rpc_smb_reauth2(struct torture_context *torture)
 	ZERO_STRUCT(io);
 	io.in.sesskey         = cli->transport->negotiate.sesskey;
 	io.in.capabilities    = cli->transport->negotiate.capabilities;
-	io.in.credentials     = popt_get_cmdline_credentials();
+	io.in.credentials     = samba_cmdline_get_creds();
 	io.in.workgroup       = lpcfg_workgroup(torture->lp_ctx);
 	io.in.gensec_settings = lpcfg_gensec_settings(torture, torture->lp_ctx);
 
@@ -3710,7 +3719,7 @@ static bool torture_rpc_smb2_reauth1(struct torture_context *torture)
 			      lpcfg_smb_ports(torture->lp_ctx),
 			      "IPC$",
 			      lpcfg_resolve_context(torture->lp_ctx),
-			      popt_get_cmdline_credentials(),
+			      samba_cmdline_get_creds(),
 			      &tree,
 			      torture->ev,
 			      &options,
@@ -3791,7 +3800,7 @@ static bool torture_rpc_smb2_reauth1(struct torture_context *torture)
 	/* smb re-auth again to the original user */
 
 	status = smb2_session_setup_spnego(tree->session,
-					   popt_get_cmdline_credentials(),
+					   samba_cmdline_get_creds(),
 					   0 /* previous_session_id */);
 	torture_assert_ntstatus_ok_goto(torture, status, ret, done,
 					"session reauth to anon failed");
@@ -3860,7 +3869,7 @@ static bool torture_rpc_smb2_reauth2(struct torture_context *torture)
 			      lpcfg_smb_ports(torture->lp_ctx),
 			      "IPC$",
 			      lpcfg_resolve_context(torture->lp_ctx),
-			      popt_get_cmdline_credentials(),
+			      samba_cmdline_get_creds(),
 			      &tree,
 			      torture->ev,
 			      &options,
@@ -3919,7 +3928,7 @@ static bool torture_rpc_smb2_reauth2(struct torture_context *torture)
 	/* smb re-auth again to the original user */
 
 	status = smb2_session_setup_spnego(tree->session,
-					   popt_get_cmdline_credentials(),
+					   samba_cmdline_get_creds(),
 					   0 /* previous_session_id */);
 	torture_assert_ntstatus_ok_goto(torture, status, ret, done,
 					"session reauth to anon failed");
@@ -3978,7 +3987,7 @@ static bool torture_rpc_smb1_pipe_name(struct torture_context *torture)
 					lpcfg_smb_ports(torture->lp_ctx),
 					"IPC$", NULL,
 					lpcfg_socket_options(torture->lp_ctx),
-					popt_get_cmdline_credentials(),
+					samba_cmdline_get_creds(),
 					lpcfg_resolve_context(torture->lp_ctx),
 					torture->ev, &options, &session_options,
 					lpcfg_gensec_settings(torture, torture->lp_ctx));
@@ -4227,7 +4236,7 @@ static bool torture_rpc_smb2_pipe_name(struct torture_context *torture)
 			      lpcfg_smb_ports(torture->lp_ctx),
 			      "IPC$",
 			      lpcfg_resolve_context(torture->lp_ctx),
-			      popt_get_cmdline_credentials(),
+			      samba_cmdline_get_creds(),
 			      &tree,
 			      torture->ev,
 			      &options,
@@ -4321,7 +4330,7 @@ static bool torture_rpc_smb2_pipe_read_close(struct torture_context *torture)
 			      lpcfg_smb_ports(torture->lp_ctx),
 			      "IPC$",
 			      lpcfg_resolve_context(torture->lp_ctx),
-			      popt_get_cmdline_credentials(),
+			      samba_cmdline_get_creds(),
 			      &tree,
 			      torture->ev,
 			      &options,
@@ -4405,7 +4414,7 @@ static bool torture_rpc_smb2_pipe_read_tdis(struct torture_context *torture)
 			      lpcfg_smb_ports(torture->lp_ctx),
 			      "IPC$",
 			      lpcfg_resolve_context(torture->lp_ctx),
-			      popt_get_cmdline_credentials(),
+			      samba_cmdline_get_creds(),
 			      &tree,
 			      torture->ev,
 			      &options,
@@ -4489,7 +4498,7 @@ static bool torture_rpc_smb2_pipe_read_logoff(struct torture_context *torture)
 			      lpcfg_smb_ports(torture->lp_ctx),
 			      "IPC$",
 			      lpcfg_resolve_context(torture->lp_ctx),
-			      popt_get_cmdline_credentials(),
+			      samba_cmdline_get_creds(),
 			      &tree,
 			      torture->ev,
 			      &options,
@@ -4568,7 +4577,7 @@ static bool torture_rpc_lsa_over_netlogon(struct torture_context *torture)
 			      lpcfg_smb_ports(torture->lp_ctx),
 			      "IPC$",
 			      lpcfg_resolve_context(torture->lp_ctx),
-			      popt_get_cmdline_credentials(),
+			      samba_cmdline_get_creds(),
 			      &tree,
 			      torture->ev,
 			      &options,
@@ -4639,7 +4648,7 @@ static bool torture_rpc_pipes_supported_interfaces(
 			      lpcfg_smb_ports(torture->lp_ctx),
 			      "IPC$",
 			      lpcfg_resolve_context(torture->lp_ctx),
-			      popt_get_cmdline_credentials(),
+			      samba_cmdline_get_creds(),
 			      &tree,
 			      torture->ev,
 			      &options,

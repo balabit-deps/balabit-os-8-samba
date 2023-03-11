@@ -15,7 +15,6 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
-from __future__ import print_function
 from samba.tests import BlackboxTestCase, BlackboxProcessError
 from samba.samba3 import param as s3param
 
@@ -37,6 +36,7 @@ class SmbCaclsBlockboxTestBase(BlackboxTestCase):
         self.creds.set_password(self.passwd)
         self.testdir = os.getenv("TESTDIR", "smbcacls")
         self.share = os.getenv("SHARE", "tmp")
+        self.dirpath = os.path.join(os.environ["LOCAL_PATH"],self.testdir)
 
     def tearDown(self):
         try:
@@ -45,19 +45,20 @@ class SmbCaclsBlockboxTestBase(BlackboxTestCase):
             # so if we fail with remote remove perform local remove
             # (of remote files) instead
             smbclient_args = self.build_test_cmd("smbclient", ["//%s/%s" % (self.server, self.share), "-c", "deltree %s/*" % self.testdir])
-            self.check_output(smbclient_args)
+            out = self.check_output(smbclient_args)
+            if "NT_STATUS_OBJECT_PATH_NOT_FOUND" in out.decode():
+                raise Exception("deltree: failed without setting errcode")
         except Exception as e:
             print("remote remove failed: %s" % str(e))
-            dirpath = os.path.join(os.environ["LOCAL_PATH"],self.testdir)
-            print("falling back to removing contents of local dir: %s" % dirpath)
-            if os.path.exists(dirpath):
-                for entry in os.listdir(dirpath):
-                    fullpath = os.path.join(dirpath, entry)
-                if os.path.isdir(fullpath):
-                    import shutil
-                    shutil.rmtree(fullpath)
-                else:
-                    os.unlink(fullpath)
+            print("falling back to removing contents of local dir: %s" % self.dirpath)
+            if os.path.exists(self.dirpath):
+                for entry in os.listdir(self.dirpath):
+                    fullpath = os.path.join(self.dirpath, entry)
+                    if os.path.isdir(fullpath):
+                        import shutil
+                        shutil.rmtree(fullpath)
+                    else:
+                        os.unlink(fullpath)
 
     def ace_dump(self, ace):
         for key, value in ace.items():
@@ -119,7 +120,7 @@ class SmbCaclsBlockboxTestBase(BlackboxTestCase):
 
     def file_ace_check(self, remotepath, ace):
         smbcacls_args = self.build_test_cmd("smbcacls",
-                            ["//%s/%s" % (self.server, self.share), "--get",
+                            ["//%s/%s" % (self.server, self.share),
                             remotepath])
         try:
             output = self.check_output(smbcacls_args)

@@ -21,23 +21,42 @@
    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#include "includes.h"
+#include "replace.h"
+#include "lib/util/samba_util.h"
+#include "lib/util/genrand.h"
 #include "librpc/ndr/libndr.h"
 #include "librpc/gen_ndr/ndr_misc.h"
 #include "lib/util/util_str_hex.h"
+
+_PUBLIC_ NTSTATUS GUID_to_ndr_buf(
+	const struct GUID *guid, struct GUID_ndr_buf *buf)
+{
+	DATA_BLOB b = { .data = buf->buf, .length = sizeof(buf->buf), };
+	enum ndr_err_code ndr_err;
+
+	ndr_err = ndr_push_struct_into_fixed_blob(
+		&b, guid, (ndr_push_flags_fn_t)ndr_push_GUID);
+	return ndr_map_error2ntstatus(ndr_err);
+}
+
 /**
   build a NDR blob from a GUID
 */
 _PUBLIC_ NTSTATUS GUID_to_ndr_blob(const struct GUID *guid, TALLOC_CTX *mem_ctx, DATA_BLOB *b)
 {
-	enum ndr_err_code ndr_err;
-	*b = data_blob_talloc(mem_ctx, NULL, 16);
+	struct GUID_ndr_buf buf = { .buf = {0}, };
+	NTSTATUS status;
+
+	status = GUID_to_ndr_buf(guid, &buf);
+	if (!NT_STATUS_IS_OK(status)) {
+		return status;
+	}
+
+	*b = data_blob_talloc(mem_ctx, buf.buf, sizeof(buf.buf));
 	if (b->data == NULL) {
 		return NT_STATUS_NO_MEMORY;
 	}
-	ndr_err = ndr_push_struct_into_fixed_blob(
-		b, guid, (ndr_push_flags_fn_t)ndr_push_GUID);
-	return ndr_map_error2ntstatus(ndr_err);
+	return NT_STATUS_OK;
 }
 
 
@@ -58,78 +77,42 @@ _PUBLIC_ NTSTATUS GUID_from_ndr_blob(const DATA_BLOB *b, struct GUID *guid)
 */
 _PUBLIC_ NTSTATUS GUID_from_data_blob(const DATA_BLOB *s, struct GUID *guid)
 {
-	NTSTATUS status = NT_STATUS_INVALID_PARAMETER;
-	uint32_t time_low = 0;
-	uint32_t time_mid = 0;
-	uint32_t time_hi_and_version = 0;
-	uint32_t clock_seq[2] = {0};
-	uint32_t node[6] = {0};
-	uint8_t buf16[16] = {0};
-
-	DATA_BLOB blob16 = data_blob_const(buf16, sizeof(buf16));
-	int i;
+	bool ok;
 
 	if (s->data == NULL) {
 		return NT_STATUS_INVALID_PARAMETER;
 	}
 
-	switch(s->length) {
-	case 36:
-	{
-		status = parse_guid_string((char *)s->data,
-					   &time_low,
-					   &time_mid,
-					   &time_hi_and_version,
-					   clock_seq,
-					   node);
-		break;
+	if (s->length == 36) {
+		ok = parse_guid_string((char *)s->data, guid);
+		return ok ? NT_STATUS_OK : NT_STATUS_INVALID_PARAMETER;
 	}
-	case 38:
-	{
-		if (s->data[0] != '{' || s->data[37] != '}') {
-			break;
-		}
 
-		status = parse_guid_string((char *)s->data + 1,
-					   &time_low,
-					   &time_mid,
-					   &time_hi_and_version,
-					   clock_seq,
-					   node);
-		break;
+	if (s->length == 38) {
+		if (s->data[0] != '{' || s->data[37] != '}') {
+			return NT_STATUS_INVALID_PARAMETER;
+		}
+		ok = parse_guid_string((char *)s->data + 1, guid);
+		return ok ? NT_STATUS_OK : NT_STATUS_INVALID_PARAMETER;
 	}
-	case 32:
-	{
+
+	if (s->length == 32) {
+		uint8_t buf16[16] = {0};
+		DATA_BLOB blob16 = { .data = buf16, .length = sizeof(buf16) };
 		size_t rlen = strhex_to_str((char *)blob16.data, blob16.length,
 					    (const char *)s->data, s->length);
 		if (rlen != blob16.length) {
 			return NT_STATUS_INVALID_PARAMETER;
 		}
 
-		s = &blob16;
+		return GUID_from_ndr_blob(&blob16, guid);
+	}
+
+	if (s->length == 16) {
 		return GUID_from_ndr_blob(s, guid);
 	}
-	case 16:
-		return GUID_from_ndr_blob(s, guid);
-	default:
-		status = NT_STATUS_INVALID_PARAMETER;
-		break;
-	}
 
-	if (!NT_STATUS_IS_OK(status)) {
-		return status;
-	}
-
-	guid->time_low = time_low;
-	guid->time_mid = time_mid;
-	guid->time_hi_and_version = time_hi_and_version;
-	guid->clock_seq[0] = clock_seq[0];
-	guid->clock_seq[1] = clock_seq[1];
-	for (i=0;i<6;i++) {
-		guid->node[i] = node[i];
-	}
-
-	return NT_STATUS_OK;
+	return NT_STATUS_INVALID_PARAMETER;
 }
 
 /**

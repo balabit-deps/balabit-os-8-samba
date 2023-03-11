@@ -45,6 +45,7 @@
 #include "lib/util/util_net.h"
 #include "auth/kerberos/pac_utils.h"
 #include "auth/kerberos/gssapi_helper.h"
+#include "lib/util/smb_strtox.h"
 
 #ifndef gss_mech_spnego
 gss_OID_desc spnego_mech_oid_desc =
@@ -763,27 +764,27 @@ init_sec_context_done:
 		} else if (smb_gss_oid_equal(gensec_gssapi_state->gss_oid,
 					     gss_mech_krb5)) {
 			switch (min_stat) {
-			case KRB5KRB_AP_ERR_TKT_NYV:
+			case (OM_uint32)KRB5KRB_AP_ERR_TKT_NYV:
 				DEBUG(1, ("Error with ticket to contact %s: possible clock skew between us and the KDC or target server: %s\n",
 					  gensec_gssapi_state->target_principal,
 					  gssapi_error_string(out_mem_ctx, maj_stat, min_stat, gensec_gssapi_state->gss_oid)));
 				return NT_STATUS_TIME_DIFFERENCE_AT_DC; /* Make SPNEGO ignore us, we can't go any further here */
-			case KRB5KRB_AP_ERR_TKT_EXPIRED:
+			case (OM_uint32)KRB5KRB_AP_ERR_TKT_EXPIRED:
 				DEBUG(1, ("Error with ticket to contact %s: ticket is expired, possible clock skew between us and the KDC or target server: %s\n",
 					  gensec_gssapi_state->target_principal,
 					  gssapi_error_string(out_mem_ctx, maj_stat, min_stat, gensec_gssapi_state->gss_oid)));
 				return NT_STATUS_INVALID_PARAMETER; /* Make SPNEGO ignore us, we can't go any further here */
-			case KRB5_KDC_UNREACH:
+			case (OM_uint32)KRB5_KDC_UNREACH:
 				DEBUG(3, ("Cannot reach a KDC we require in order to obtain a ticket to %s: %s\n",
 					  gensec_gssapi_state->target_principal,
 					  gssapi_error_string(out_mem_ctx, maj_stat, min_stat, gensec_gssapi_state->gss_oid)));
 				return NT_STATUS_NO_LOGON_SERVERS; /* Make SPNEGO ignore us, we can't go any further here */
-			case KRB5KDC_ERR_S_PRINCIPAL_UNKNOWN:
+			case (OM_uint32)KRB5KDC_ERR_S_PRINCIPAL_UNKNOWN:
 				DEBUG(3, ("Server %s is not registered with our KDC: %s\n",
 					  gensec_gssapi_state->target_principal,
 					  gssapi_error_string(out_mem_ctx, maj_stat, min_stat, gensec_gssapi_state->gss_oid)));
 				return NT_STATUS_INVALID_PARAMETER; /* Make SPNEGO ignore us, we can't go any further here */
-			case KRB5KRB_AP_ERR_MSG_TYPE:
+			case (OM_uint32)KRB5KRB_AP_ERR_MSG_TYPE:
 				/* garbage input, possibly from the auto-mech detection */
 				return NT_STATUS_INVALID_PARAMETER;
 			default:
@@ -1560,7 +1561,9 @@ static NTSTATUS gensec_gssapi_session_info(struct gensec_security *gensec_securi
 		}
 		
 		/* This credential handle isn't useful for password authentication, so ensure nobody tries to do that */
-		cli_credentials_set_kerberos_state(session_info->credentials, CRED_MUST_USE_KERBEROS);
+		cli_credentials_set_kerberos_state(session_info->credentials,
+						   CRED_USE_KERBEROS_REQUIRED,
+						   CRED_SPECIFIED);
 
 		/* It has been taken from this place... */
 		gensec_gssapi_state->delegated_cred_handle = GSS_C_NO_CREDENTIAL;

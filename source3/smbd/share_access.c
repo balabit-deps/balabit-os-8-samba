@@ -23,6 +23,7 @@
 #include "../libcli/security/security.h"
 #include "passdb/lookup_sid.h"
 #include "auth.h"
+#include "source3/lib/substitute.h"
 
 /*
  * No prefix means direct username
@@ -79,7 +80,7 @@ static bool token_contains_name(TALLOC_CTX *mem_ctx,
 	enum lsa_SidType type;
 
 	if (username != NULL) {
-		size_t domain_len = strlen(domain);
+		size_t domain_len = domain != NULL ? strlen(domain) : 0;
 
 		/* Check if username starts with domain name */
 		if (domain_len > 0) {

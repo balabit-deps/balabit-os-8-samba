@@ -22,19 +22,6 @@
 #ifndef __UTIL_SAMBA_UTIL_H__
 #define __UTIL_SAMBA_UTIL_H__
 
-#define SMB_STR_STANDARD  0x00
-#define SMB_STR_ALLOW_NEGATIVE 0x01
-#define SMB_STR_FULL_STR_CONV  0x02
-#define SMB_STR_ALLOW_NO_CONVERSION 0x04
-#define SMB_STR_GLIBC_STANDARD (SMB_STR_ALLOW_NO_CONVERSION | \
-				SMB_STR_ALLOW_NEGATIVE)
-
-unsigned long int
-smb_strtoul(const char *nptr, char **endptr, int base, int *err, int flags);
-
-unsigned long long int
-smb_strtoull(const char *nptr, char **endptr, int base, int *err, int flags);
-
 /**
  * Write dump of binary data to a callback
  */
@@ -63,5 +50,33 @@ _PUBLIC_ void dump_data(int level, const uint8_t *buf,int len);
  * debug class dbgc_class.
  */
 _PUBLIC_ void dump_data_dbgc(int dbgc_class, int level, const uint8_t *buf, int len);
+
+/**
+ * Write dump of compared binary data to a callback
+ */
+void dump_data_diff_cb(const uint8_t *buf1, size_t len1,
+		       const uint8_t *buf2, size_t len2,
+		       bool omit_zero_bytes,
+		       void (*cb)(const char *buf, void *private_data),
+		       void *private_data);
+
+/**
+ * Write dump of compared binary data to the log file.
+ *
+ * The data is only written if the log level is at least level for
+ * debug class dbgc_class.
+ */
+_PUBLIC_ void dump_data_diff(int dbgc_class, int level,
+			     bool omit_zero_bytes,
+			     const uint8_t *buf1, size_t len1,
+			     const uint8_t *buf2, size_t len2);
+
+/**
+ * Write dump of compared binary data to the given file handle
+ */
+_PUBLIC_ void dump_data_file_diff(FILE *f,
+				  bool omit_zero_bytes,
+				  const uint8_t *buf1, size_t len1,
+				  const uint8_t *buf2, size_t len2);
 
 #endif

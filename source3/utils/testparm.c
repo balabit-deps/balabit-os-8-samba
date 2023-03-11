@@ -33,7 +33,7 @@
 
 #include "includes.h"
 #include "system/filesys.h"
-#include "popt_common.h"
+#include "lib/cmdline/cmdline.h"
 #include "lib/param/loadparm.h"
 #include "lib/crypto/gnutls_helpers.h"
 #include "cmdline_contexts.h"
@@ -128,6 +128,21 @@ static bool lp_scan_idmap_found_domain(const char *string,
 	return false; /* Keep scanning */
 }
 
+static int idmap_config_int(const char *domname, const char *option, int def)
+{
+	int len = snprintf(NULL, 0, "idmap config %s", domname);
+
+	if (len == -1) {
+		return def;
+	}
+	{
+		char config_option[len+1];
+		snprintf(config_option, sizeof(config_option),
+			 "idmap config %s", domname);
+		return lp_parm_int(-1, config_option, option, def);
+	}
+}
+
 static bool do_idmap_check(void)
 {
 	struct idmap_domains *d;
@@ -157,6 +172,42 @@ static bool do_idmap_check(void)
 			rc);
 	}
 
+	/* Check autorid backend */
+	if (strequal(lp_idmap_default_backend(), "autorid")) {
+		struct idmap_config *c = NULL;
+		bool found = false;
+
+		for (i = 0; i < d->count; i++) {
+			c = &d->c[i];
+
+			if (strequal(c->backend, "autorid")) {
+				found = true;
+				break;
+			}
+		}
+
+		if (found) {
+			uint32_t rangesize =
+				idmap_config_int("*", "rangesize", 100000);
+			uint32_t maxranges =
+				(c->high - c->low  + 1) / rangesize;
+
+			if (maxranges < 2) {
+				fprintf(stderr,
+					"ERROR: The idmap autorid range "
+					"[%u-%u] needs to be at least twice as"
+					"big as the rangesize [%u]!"
+					"\n\n",
+					c->low,
+					c->high,
+					rangesize);
+				ok = false;
+				goto done;
+			}
+		}
+	}
+
+	/* Check for overlapping idmap ranges */
 	for (i = 0; i < d->count; i++) {
 		struct idmap_config *c = &d->c[i];
 		uint32_t j;
@@ -215,12 +266,34 @@ static int do_global_checks(void)
 	const struct loadparm_substitution *lp_sub =
 		loadparm_s3_global_substitution();
 
+	fprintf(stderr, "\n");
+
 	if (lp_security() >= SEC_DOMAIN && !lp_encrypt_passwords()) {
 		fprintf(stderr, "ERROR: in 'security=domain' mode the "
 				"'encrypt passwords' parameter must always be "
 				"set to 'true'.\n\n");
 		ret = 1;
 	}
+
+	if (lp_security() == SEC_ADS) {
+		const char *workgroup = lp_workgroup();
+		const char *realm = lp_realm();
+
+		if (workgroup == NULL || strlen(workgroup) == 0) {
+			fprintf(stderr,
+				"ERROR: The 'security=ADS' mode requires "
+				"'workgroup' parameter to be set!\n\n ");
+			ret = 1;
+		}
+
+		if (realm == NULL || strlen(realm) == 0) {
+			fprintf(stderr,
+				"ERROR: The 'security=ADS' mode requires "
+				"'realm' parameter to be set!\n\n ");
+			ret = 1;
+		}
+	}
+
 
 	if (lp_we_are_a_wins_server() && lp_wins_server_list()) {
 		fprintf(stderr, "ERROR: both 'wins support = true' and "
@@ -525,6 +598,96 @@ static int do_global_checks(void)
 		ret = 1;
 	}
 
+	if (lp_server_schannel() != true) { /* can be 'auto' */
+		fprintf(stderr,
+			"WARNING: You have not configured "
+			"'server schannel = yes' (the default). "
+			"Your server is vulernable to \"ZeroLogon\" "
+			"(CVE-2020-1472)\n"
+			"If required use individual "
+			"'server require schannel:COMPUTERACCOUNT$ = no' "
+			"options\n\n");
+	}
+	if (lp_allow_nt4_crypto()) {
+		fprintf(stderr,
+			"WARNING: You have not configured "
+			"'allow nt4 crypto = no' (the default). "
+			"Your server is vulernable to "
+			"CVE-2022-38023 and others!\n"
+			"If required use individual "
+			"'allow nt4 crypto:COMPUTERACCOUNT$ = yes' "
+			"options\n\n");
+	}
+	if (!lp_reject_md5_clients()) {
+		fprintf(stderr,
+			"WARNING: You have not configured "
+			"'reject md5 clients = yes' (the default). "
+			"Your server is vulernable to "
+			"CVE-2022-38023!\n"
+			"If required use individual "
+			"'server reject md5 schannel:COMPUTERACCOUNT$ = yes' "
+			"options\n\n");
+	}
+	if (!lp_server_schannel_require_seal()) {
+		fprintf(stderr,
+			"WARNING: You have not configured "
+			"'server schannel require seal = yes' (the default). "
+			"Your server is vulernable to "
+			"CVE-2022-38023!\n"
+			"If required use individual "
+			"'server schannel require seal:COMPUTERACCOUNT$ = no' "
+			"options\n\n");
+	}
+
+	if (lp_client_schannel() != true) { /* can be 'auto' */
+		fprintf(stderr,
+			"WARNING: You have not configured "
+			"'client schannel = yes' (the default). "
+			"Your server is vulernable to \"ZeroLogon\" "
+			"(CVE-2020-1472)\n"
+			"If required use individual "
+			"'client schannel:NETBIOSDOMAIN = no' "
+			"options\n\n");
+	}
+	if (!lp_reject_md5_servers()) {
+		fprintf(stderr,
+			"WARNING: You have not configured "
+			"'reject md5 servers = yes' (the default). "
+			"Your server is vulernable to "
+			"CVE-2022-38023\n"
+			"If required use individual "
+			"'reject md5 servers:NETBIOSDOMAIN = no' "
+			"options\n\n");
+	}
+	if (!lp_require_strong_key()) {
+		fprintf(stderr,
+			"WARNING: You have not configured "
+			"'require strong key = yes' (the default). "
+			"Your server is vulernable to "
+			"CVE-2022-38023\n"
+			"If required use individual "
+			"'require strong key:NETBIOSDOMAIN = no' "
+			"options\n\n");
+	}
+	if (!lp_winbind_sealed_pipes()) {
+		fprintf(stderr,
+			"WARNING: You have not configured "
+			"'winbind sealed pipes = yes' (the default). "
+			"Your server is vulernable to "
+			"CVE-2022-38023\n"
+			"If required use individual "
+			"'winbind sealed pipes:NETBIOSDOMAIN = no' "
+			"options\n\n");
+	}
+
+	if (lp_kerberos_encryption_types() == KERBEROS_ETYPES_LEGACY) {
+		fprintf(stderr,
+			"WARNING: You have configured "
+			"'kerberos encryption types = legacy'. "
+			"Your server is vulernable to "
+			"CVE-2022-37966\n\n");
+	}
+
 	return ret;
 }
 
@@ -640,9 +803,10 @@ static void do_per_share_checks(int s)
 
  int main(int argc, const char *argv[])
 {
-	const char *config_file = get_dyn_CONFIGFILE();
+	const char *config_file = NULL;
 	const struct loadparm_substitution *lp_sub =
 		loadparm_s3_global_substitution();
+	int opt;
 	int s;
 	static int silent_mode = False;
 	static int show_all_parameters = False;
@@ -655,6 +819,7 @@ static void do_per_share_checks(int s)
 	static int show_defaults;
 	static int skip_logic_checks = 0;
 	const char *weak_crypo_str = "";
+	bool ok;
 
 	struct poptOption long_options[] = {
 		POPT_AUTOHELP
@@ -707,15 +872,25 @@ static void do_per_share_checks(int s)
 			.val        = 0,
 			.descrip    = "Limit testparm to a named section",
 		},
+		POPT_COMMON_DEBUG_ONLY
+		POPT_COMMON_OPTION_ONLY
 		POPT_COMMON_VERSION
-		POPT_COMMON_DEBUGLEVEL
-		POPT_COMMON_OPTION
 		POPT_TABLEEND
 	};
 
 	TALLOC_CTX *frame = talloc_stackframe();
 
 	smb_init_locale();
+
+	ok = samba_cmdline_init(frame,
+				SAMBA_CMDLINE_CONFIG_NONE,
+				true /* require_smbconf */);
+	if (!ok) {
+		DBG_ERR("Failed to init cmdline parser!\n");
+		ret = 1;
+		goto done;
+	}
+
 	/*
 	 * Set the default debug level to 1.
 	 * Allow it to be overridden by the command line,
@@ -723,21 +898,39 @@ static void do_per_share_checks(int s)
 	 */
 	lp_set_cmdline("log level", "1");
 
-	pc = poptGetContext(NULL, argc, argv, long_options,
-			    POPT_CONTEXT_KEEP_FIRST);
+	pc = samba_popt_get_context(getprogname(),
+				    argc,
+				    argv,
+				    long_options,
+				    0);
+	if (pc == NULL) {
+		DBG_ERR("Failed to setup popt context!\n");
+		ret = 1;
+		goto done;
+	}
+
 	poptSetOtherOptionHelp(pc, "[OPTION...] <config-file> [host-name] [host-ip]");
 
-	while(poptGetNextOpt(pc) != -1);
+	while ((opt = poptGetNextOpt(pc)) != -1) {
+		switch (opt) {
+		case POPT_ERROR_BADOPT:
+			fprintf(stderr, "\nInvalid option %s: %s\n\n",
+				poptBadOption(pc, 0), poptStrerror(opt));
+			poptPrintUsage(pc, stderr, 0);
+			exit(1);
+		}
+	}
 
 	if (show_all_parameters) {
 		show_parameter_list();
 		exit(0);
 	}
 
-	setup_logging(poptGetArg(pc), DEBUG_STDERR);
-
-	if (poptPeekArg(pc))
+	if (poptPeekArg(pc)) {
 		config_file = poptGetArg(pc);
+	} else {
+		config_file = get_dyn_CONFIGFILE();
+	}
 
 	cname = poptGetArg(pc);
 	caddr = poptGetArg(pc);

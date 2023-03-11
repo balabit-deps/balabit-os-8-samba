@@ -41,12 +41,13 @@ class drsException(Exception):
         return "drsException: " + self.value
 
 
-def drsuapi_connect(server, lp, creds):
+def drsuapi_connect(server, lp, creds, ip=None):
     """Make a DRSUAPI connection to the server.
 
     :param server: the name of the server to connect to
     :param lp: a samba line parameter object
     :param creds: credential used for the connection
+    :param ip: Forced target server name
     :return: A tuple with the drsuapi bind object, the drsuapi handle
                 and the supported extensions.
     :raise drsException: if the connection fails
@@ -55,7 +56,14 @@ def drsuapi_connect(server, lp, creds):
     binding_options = "seal"
     if lp.log_level() >= 9:
         binding_options += ",print"
-    binding_string = "ncacn_ip_tcp:%s[%s]" % (server, binding_options)
+
+    # Allow forcing the IP
+    if ip is not None:
+        binding_options += f",target_hostname={server}"
+        binding_string = f"ncacn_ip_tcp:{ip}[{binding_options}]"
+    else:
+        binding_string = "ncacn_ip_tcp:%s[%s]" % (server, binding_options)
+
     try:
         drsuapiBind = drsuapi.drsuapi(binding_string, lp, creds)
         (drsuapiHandle, bindSupportedExtensions) = drs_DsBind(drsuapiBind)
@@ -90,29 +98,6 @@ def sendDsReplicaSync(drsuapiBind, drsuapi_handle, source_dsa_guid,
         drsuapiBind.DsReplicaSync(drsuapi_handle, 1, req1)
     except Exception as estr:
         raise drsException("DsReplicaSync failed %s" % estr)
-
-
-def sendRemoveDsServer(drsuapiBind, drsuapi_handle, server_dsa_dn, domain):
-    """Send RemoveDSServer request.
-
-    :param drsuapiBind: a drsuapi Bind object
-    :param drsuapi_handle: a drsuapi handle on the drsuapi connection
-    :param server_dsa_dn: a DN object of the server's dsa that we want to
-        demote
-    :param domain: a DN object of the server's domain
-    :raise drsException: if any error occur while sending and receiving the
-        reply for the DsRemoveDSServer
-    """
-
-    try:
-        req1 = drsuapi.DsRemoveDSServerRequest1()
-        req1.server_dn = str(server_dsa_dn)
-        req1.domain_dn = str(domain)
-        req1.commit = 1
-
-        drsuapiBind.DsRemoveDSServer(drsuapi_handle, 1, req1)
-    except Exception as estr:
-        raise drsException("DsRemoveDSServer failed %s" % estr)
 
 
 def drs_DsBind(drs):

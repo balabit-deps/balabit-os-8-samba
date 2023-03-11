@@ -33,6 +33,9 @@
 
 #include "kdc_locl.h"
 
+/* Awful hack to get access to 'struct samba_kdc_entry'. */
+#include "../../kdc/samba_kdc.h"
+
 /*
  * return the realm of a krbtgt-ticket or NULL
  */
@@ -78,7 +81,7 @@ check_PAC(krb5_context context,
 	return ret;
 
     if (pac == NULL)
-	return KRB5KDC_ERR_BADOPTION;
+	return KRB5KDC_ERR_TGT_REVOKED;
 
     /* Verify the server signature. */
     ret = krb5_pac_verify(context, pac, tkt->authtime, client_principal,
@@ -130,6 +133,7 @@ check_PAC(krb5_context context,
 static krb5_error_code
 check_tgs_flags(krb5_context context,
 		krb5_kdc_configuration *config,
+		const hdb_entry_ex *krbtgt_in,
 		KDC_REQ_BODY *b, const EncTicketPart *tgt, EncTicketPart *et)
 {
     KDCOptions f = b->kdc_options;
@@ -242,6 +246,17 @@ check_tgs_flags(krb5_context context,
 	et->endtime = *et->starttime + old_life;
 	if (et->renew_till != NULL)
 	    et->endtime = min(*et->renew_till, et->endtime);
+    }
+
+    if (tgt->endtime - kdc_time <= CHANGEPW_LIFETIME) {
+	/* Check that the ticket has not arrived across a trust. */
+	const struct samba_kdc_entry *skdc_entry = krbtgt_in->ctx;
+	if (!skdc_entry->is_trust) {
+	    /* This may be a kpasswd ticket rather than a TGT, so don't accept it. */
+	    kdc_log(context, config, 0,
+		    "Ticket is not a ticket-granting ticket");
+	    return KRB5KRB_AP_ERR_TKT_EXPIRED;
+	}
     }
 
 #if 0
@@ -510,6 +525,7 @@ tgs_make_reply(krb5_context context,
 	       hdb_entry_ex *client,
 	       krb5_principal client_principal,
                const char *tgt_realm,
+	       const hdb_entry_ex *krbtgt_in,
 	       hdb_entry_ex *krbtgt,
 	       krb5_pac mspac,
 	       uint16_t rodc_id,
@@ -538,7 +554,7 @@ tgs_make_reply(krb5_context context,
     ALLOC(et.starttime);
     *et.starttime = kdc_time;
 
-    ret = check_tgs_flags(context, config, b, tgt, &et);
+    ret = check_tgs_flags(context, config, krbtgt_in, b, tgt, &et);
     if(ret)
 	goto out;
 
@@ -715,7 +731,7 @@ tgs_make_reply(krb5_context context,
     /* The PAC should be the last change to the ticket. */
     if (mspac != NULL) {
 	ret = _krb5_kdc_pac_sign_ticket(context, mspac, tgt_name, serverkey,
-					krbtgtkey, rodc_id, add_ticket_sig, &et);
+					krbtgtkey, rodc_id, add_ticket_sig, add_ticket_sig, &et);
 	if (ret)
 	    goto out;
     }
@@ -731,7 +747,7 @@ tgs_make_reply(krb5_context context,
        etype list, even if we don't want a session key with
        DES3? */
     ret = _kdc_encode_reply(context, config,
-			    &rep, &et, &ek, et.key.keytype,
+			    &rep, &et, &ek, serverkey->keytype,
 			    kvno,
 			    serverkey, 0, replykey, rk_is_subkey,
 			    e_text, reply);
@@ -764,9 +780,6 @@ tgs_check_authenticator(krb5_context context,
 			krb5_keyblock *key)
 {
     krb5_authenticator auth;
-    size_t len = 0;
-    unsigned char *buf;
-    size_t buf_size;
     krb5_error_code ret;
     krb5_crypto crypto;
 
@@ -792,25 +805,9 @@ tgs_check_authenticator(krb5_context context,
 	goto out;
     }
 
-    /* XXX should not re-encode this */
-    ASN1_MALLOC_ENCODE(KDC_REQ_BODY, buf, buf_size, b, &len, ret);
-    if(ret){
-	const char *msg = krb5_get_error_message(context, ret);
-	kdc_log(context, config, 0, "Failed to encode KDC-REQ-BODY: %s", msg);
-	krb5_free_error_message(context, msg);
-	goto out;
-    }
-    if(buf_size != len) {
-	free(buf);
-	kdc_log(context, config, 0, "Internal error in ASN.1 encoder");
-	*e_text = "KDC internal error";
-	ret = KRB5KRB_ERR_GENERIC;
-	goto out;
-    }
     ret = krb5_crypto_init(context, key, 0, &crypto);
     if (ret) {
 	const char *msg = krb5_get_error_message(context, ret);
-	free(buf);
 	kdc_log(context, config, 0, "krb5_crypto_init failed: %s", msg);
 	krb5_free_error_message(context, msg);
 	goto out;
@@ -818,10 +815,9 @@ tgs_check_authenticator(krb5_context context,
     ret = krb5_verify_checksum(context,
 			       crypto,
 			       KRB5_KU_TGS_REQ_AUTH_CKSUM,
-			       buf,
-			       len,
+			       b->_save.data,
+			       b->_save.length,
 			       auth->cksum);
-    free(buf);
     krb5_crypto_destroy(context, crypto);
     if(ret){
 	const char *msg = krb5_get_error_message(context, ret);
@@ -1304,9 +1300,9 @@ tgs_build_reply(krb5_context context,
 {
     krb5_error_code ret;
     krb5_principal cp = NULL, sp = NULL, tp = NULL, dp = NULL;
-    krb5_principal krbtgt_principal = NULL;
+    krb5_principal krbtgt_out_principal = NULL;
     krb5_principal user2user_princ = NULL;
-    char *spn = NULL, *cpn = NULL, *tpn = NULL, *dpn = NULL;
+    char *spn = NULL, *cpn = NULL, *tpn = NULL, *dpn = NULL, *krbtgt_out_n = NULL;
     char *user2user_name = NULL;
     hdb_entry_ex *server = NULL, *client = NULL, *s4u2self_impersonated_client = NULL;
     hdb_entry_ex *user2user_krbtgt = NULL;
@@ -1472,7 +1468,7 @@ server_lookup:
     /* Now refetch the primary krbtgt, and get the current kvno (the
      * sign check may have been on an old kvno, and the server may
      * have been an incoming trust) */
-    ret = krb5_make_principal(context, &krbtgt_principal,
+    ret = krb5_make_principal(context, &krbtgt_out_principal,
 			      krb5_principal_get_comp_string(context,
 							     krbtgt->entry.principal,
 							     1),
@@ -1482,24 +1478,28 @@ server_lookup:
 							     1), NULL);
     if(ret) {
 	kdc_log(context, config, 0,
-		    "Failed to generate krbtgt principal");
+		"Failed to make krbtgt principal name object for "
+		"authz-data signatures");
+	goto out;
+    }
+    ret = krb5_unparse_name(context, krbtgt_out_principal, &krbtgt_out_n);
+    if (ret) {
+	kdc_log(context, config, 0,
+		"Failed to make krbtgt principal name object for "
+		"authz-data signatures");
 	goto out;
     }
 
-    ret = _kdc_db_fetch(context, config, krbtgt_principal, HDB_F_GET_KRBTGT, NULL, NULL, &krbtgt_out);
-    krb5_free_principal(context, krbtgt_principal);
+    ret = _kdc_db_fetch(context, config, krbtgt_out_principal,
+			HDB_F_GET_KRBTGT, NULL, NULL, &krbtgt_out);
     if (ret) {
-	krb5_error_code ret2;
-	char *ktpn, *ktpn2;
+	char *ktpn = NULL;
 	ret = krb5_unparse_name(context, krbtgt->entry.principal, &ktpn);
-	ret2 = krb5_unparse_name(context, krbtgt_principal, &ktpn2);
 	kdc_log(context, config, 0,
-		"Request with wrong krbtgt: %s, %s not found in our database",
-		(ret == 0) ? ktpn : "<unknown>", (ret2 == 0) ? ktpn2 : "<unknown>");
-	if(ret == 0)
-	    free(ktpn);
-	if(ret2 == 0)
-	    free(ktpn2);
+		"No such principal %s (needed for authz-data signature keys) "
+		"while processing TGS-REQ for service %s with krbtg %s",
+		krbtgt_out_n, spn, (ret == 0) ? ktpn : "<unknown>");
+	free(ktpn);
 	ret = KRB5KRB_AP_ERR_NOT_US;
 	goto out;
     }
@@ -1629,7 +1629,7 @@ server_lookup:
 		ret = KRB5KDC_ERR_BADOPTION;
 		kdc_log(context, config, 0,
 			"Ticket not signed with PAC; user-to-user failed (%s).",
-			mspac ? "Ticket unsigned" : "No PAC");
+			user2user_pac ? "Ticket unsigned" : "No PAC");
 		goto out;
 	    }
 
@@ -1649,17 +1649,21 @@ server_lookup:
 	} else {
 	    Key *skey;
 
-	    ret = _kdc_find_etype(context,
-				  config->tgs_use_strongest_session_key, FALSE,
-				  server, b->etype.val, b->etype.len, NULL,
-				  &skey);
+	    ret = _kdc_find_session_etype(context, b->etype.val, b->etype.len,
+					  server, &etype);
 	    if(ret) {
 		kdc_log(context, config, 0,
 			"Server (%s) has no support for etypes", spn);
 		goto out;
 	    }
+	    ret = _kdc_get_preferred_key(context, config, server, spn,
+					 NULL, &skey);
+	    if(ret) {
+		kdc_log(context, config, 0,
+			"Server (%s) has no supported etypes", spn);
+		goto out;
+	    }
 	    ekey = &skey->key;
-	    etype = skey->key.keytype;
 	    kvno = server->entry.kvno;
 	}
 
@@ -1691,8 +1695,15 @@ server_lookup:
 	ret = KRB5KRB_AP_ERR_NOT_US;
     }
 
+    ret = _kdc_get_preferred_key(context, config, krbtgt_out, krbtgt_out_n,
+				 NULL, &tkey_sign);
+    if (ret) {
+	kdc_log(context, config, 0,
+		    "Failed to find key for krbtgt PAC signature");
+	goto out;
+    }
     ret = hdb_enctype2key(context, &krbtgt_out->entry,
-			  krbtgt_etype, &tkey_sign);
+			  tkey_sign->key.keytype, &tkey_sign);
     if(ret) {
 	kdc_log(context, config, 0,
 		    "Failed to find key for krbtgt PAC signature");
@@ -1846,12 +1857,14 @@ server_lookup:
 	    if (mspac) {
 		krb5_pac_free(context, mspac);
 		mspac = NULL;
-		ret = _kdc_pac_generate(context, s4u2self_impersonated_client, NULL, NULL, &mspac);
-		if (ret) {
-		    kdc_log(context, config, 0, "PAC generation failed for -- %s",
-			    tpn);
-		    goto out;
-		}
+	    }
+
+	    ret = _kdc_pac_generate(context, s4u2self_impersonated_client, server,
+				    NULL, NULL, &mspac);
+	    if (ret) {
+		kdc_log(context, config, 0, "PAC generation failed for -- %s",
+			tpn);
+		goto out;
 	    }
 
 	    /*
@@ -2127,6 +2140,7 @@ server_lookup:
 			 client,
 			 cp,
 			 tgt_realm,
+			 krbtgt,
 			 krbtgt_out,
 			 mspac,
 			 rodc_id,
@@ -2141,8 +2155,8 @@ out:
 	    free(tpn);
     free(spn);
     free(cpn);
-    if (dpn)
-	free(dpn);
+    free(dpn);
+    free(krbtgt_out_n);
 
     krb5_free_keyblock_contents(context, &sessionkey);
     if(krbtgt_out)
@@ -2160,12 +2174,10 @@ out:
 	krb5_free_principal(context, user2user_princ);
     if (tp && tp != cp)
 	krb5_free_principal(context, tp);
-    if (cp)
-	krb5_free_principal(context, cp);
-    if (dp)
-	krb5_free_principal(context, dp);
-    if (sp)
-	krb5_free_principal(context, sp);
+    krb5_free_principal(context, cp);
+    krb5_free_principal(context, dp);
+    krb5_free_principal(context, sp);
+    krb5_free_principal(context, krbtgt_out_principal);
     if (ref_realm)
 	free(ref_realm);
     free_METHOD_DATA(&enc_pa_data);

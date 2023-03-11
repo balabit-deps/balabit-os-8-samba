@@ -35,12 +35,14 @@
 
 enum virusfilter_scanner_enum {
 	VIRUSFILTER_SCANNER_CLAMAV,
+	VIRUSFILTER_SCANNER_DUMMY,
 	VIRUSFILTER_SCANNER_FSAV,
 	VIRUSFILTER_SCANNER_SOPHOS
 };
 
 static const struct enum_list scanner_list[] = {
 	{ VIRUSFILTER_SCANNER_CLAMAV,	"clamav" },
+	{ VIRUSFILTER_SCANNER_DUMMY,	"dummy" },
 	{ VIRUSFILTER_SCANNER_FSAV,	"fsav" },
 	{ VIRUSFILTER_SCANNER_SOPHOS,	"sophos" },
 	{ -1,				NULL }
@@ -199,6 +201,7 @@ static int virusfilter_vfs_connect(
 	int snum = SNUM(handle->conn);
 	struct virusfilter_config *config = NULL;
 	const char *exclude_files = NULL;
+	const char *infected_files = NULL;
 	const char *temp_quarantine_dir_mode = NULL;
 	const char *infected_file_command = NULL;
 	const char *scan_error_command = NULL;
@@ -255,6 +258,12 @@ static int virusfilter_vfs_connect(
 		set_namearray(&config->exclude_files, exclude_files);
 	}
 
+	infected_files = lp_parm_const_string(
+		snum, "virusfilter", "infected files", NULL);
+	if (infected_files != NULL) {
+		set_namearray(&config->infected_files, infected_files);
+	}
+
 	config->cache_entry_limit = lp_parm_int(
 		snum, "virusfilter", "cache entry limit", 100);
 
@@ -268,7 +277,9 @@ static int virusfilter_vfs_connect(
 	infected_file_command = lp_parm_const_string(
 		snum, "virusfilter", "infected file command", NULL);
 	if (infected_file_command != NULL) {
-		config->infected_file_command = talloc_strdup(config, infected_file_command);
+		config->infected_file_command = talloc_strdup(
+							config,
+							infected_file_command);
 		if (config->infected_file_command == NULL) {
 			DBG_ERR("virusfilter-vfs: out of memory!\n");
 			return -1;
@@ -277,7 +288,8 @@ static int virusfilter_vfs_connect(
 	scan_error_command = lp_parm_const_string(
 		snum, "virusfilter", "scan error command", NULL);
 	if (scan_error_command != NULL) {
-		config->scan_error_command = talloc_strdup(config, scan_error_command);
+		config->scan_error_command = talloc_strdup(config,
+							   scan_error_command);
 		if (config->scan_error_command == NULL) {
 			DBG_ERR("virusfilter-vfs: out of memory!\n");
 			return -1;
@@ -317,7 +329,8 @@ static int virusfilter_vfs_connect(
 		snum, "virusfilter", "quarantine prefix",
 		VIRUSFILTER_DEFAULT_QUARANTINE_PREFIX);
 	if (quarantine_prefix != NULL) {
-		config->quarantine_prefix = talloc_strdup(config, quarantine_prefix);
+		config->quarantine_prefix = talloc_strdup(config,
+							  quarantine_prefix);
 		if (config->quarantine_prefix == NULL) {
 			DBG_ERR("virusfilter-vfs: out of memory!\n");
 			return -1;
@@ -328,7 +341,8 @@ static int virusfilter_vfs_connect(
 		snum, "virusfilter", "quarantine suffix",
 		VIRUSFILTER_DEFAULT_QUARANTINE_SUFFIX);
 	if (quarantine_suffix != NULL) {
-		config->quarantine_suffix = talloc_strdup(config, quarantine_suffix);
+		config->quarantine_suffix = talloc_strdup(config,
+							  quarantine_suffix);
 		if (config->quarantine_suffix == NULL) {
 			DBG_ERR("virusfilter-vfs: out of memory!\n");
 			return -1;
@@ -531,6 +545,9 @@ static int virusfilter_vfs_connect(
 		break;
 	case VIRUSFILTER_SCANNER_CLAMAV:
 		ret = virusfilter_clamav_init(config);
+		break;
+	case VIRUSFILTER_SCANNER_DUMMY:
+		ret = virusfilter_dummy_init(config);
 		break;
 	default:
 		DBG_ERR("Unhandled scanner %d\n", backend);
@@ -1238,11 +1255,7 @@ static int virusfilter_vfs_openat(struct vfs_handle_struct *handle,
 	bool ok1;
 	char *sret = NULL;
 	struct smb_filename *smb_fname = NULL;
-
-	/*
-	 * For now assert this, so SMB_VFS_NEXT_STAT() below works.
-	 */
-	SMB_ASSERT(dirfsp->fh->fd == AT_FDCWD);
+	SMB_STRUCT_STAT sbuf = smb_fname_in->st;
 
 	SMB_VFS_HANDLE_GET_DATA(handle, config,
 				struct virusfilter_config, return -1);
@@ -1284,7 +1297,7 @@ static int virusfilter_vfs_openat(struct vfs_handle_struct *handle,
 		goto virusfilter_vfs_open_next;
 	}
 
-	ret = SMB_VFS_NEXT_STAT(handle, smb_fname);
+	ret = SMB_VFS_NEXT_FSTAT(handle, fsp, &sbuf);
 	if (ret != 0) {
 
 		/*
@@ -1296,21 +1309,21 @@ static int virusfilter_vfs_openat(struct vfs_handle_struct *handle,
 		 */
 		goto virusfilter_vfs_open_next;
 	}
-	ret = S_ISREG(smb_fname->st.st_ex_mode);
+	ret = S_ISREG(sbuf.st_ex_mode);
 	if (ret == 0) {
 		DBG_INFO("Not scanned: Directory or special file: %s/%s\n",
 			 cwd_fname, fname);
 		goto virusfilter_vfs_open_next;
 	}
 	if (config->max_file_size > 0 &&
-	    smb_fname->st.st_ex_size > config->max_file_size)
+	    sbuf.st_ex_size > config->max_file_size)
 	{
 		DBG_INFO("Not scanned: file size > max file size: %s/%s\n",
 			 cwd_fname, fname);
 		goto virusfilter_vfs_open_next;
 	}
 	if (config->min_file_size > 0 &&
-	    smb_fname->st.st_ex_size < config->min_file_size)
+	    sbuf.st_ex_size < config->min_file_size)
 	{
 		DBG_INFO("Not scanned: file size < min file size: %s/%s\n",
 		      cwd_fname, fname);
@@ -1534,8 +1547,9 @@ static int virusfilter_vfs_unlinkat(struct vfs_handle_struct *handle,
 			smb_fname,
 			flags);
 	struct virusfilter_config *config = NULL;
+	struct smb_filename *full_fname = NULL;
 	char *fname = NULL;
-	char *cwd_fname = handle->conn->cwd_fsp->fsp_name->base_name;
+	char *cwd_fname = dirfsp->fsp_name->base_name;
 
 	if (ret != 0 && errno != ENOENT) {
 		return ret;
@@ -1548,11 +1562,19 @@ static int virusfilter_vfs_unlinkat(struct vfs_handle_struct *handle,
 		return 0;
 	}
 
-	fname = smb_fname->base_name;
+	full_fname = full_path_from_dirfsp_atname(talloc_tos(),
+						  dirfsp,
+						  smb_fname);
+	if (full_fname == NULL) {
+		return -1;
+	}
+
+	fname = full_fname->base_name;
 
 	DBG_DEBUG("Removing cache entry (if existent): fname: %s\n", fname);
 	virusfilter_cache_remove(config->cache, cwd_fname, fname);
 
+	TALLOC_FREE(full_fname);
 	return 0;
 }
 
@@ -1572,6 +1594,8 @@ static int virusfilter_vfs_renameat(
 	char *fname = NULL;
 	char *dst_fname = NULL;
 	char *cwd_fname = handle->conn->cwd_fsp->fsp_name->base_name;
+	struct smb_filename *full_src = NULL;
+	struct smb_filename *full_dst = NULL;
 
 	if (ret != 0) {
 		return ret;
@@ -1584,16 +1608,39 @@ static int virusfilter_vfs_renameat(
 		return 0;
 	}
 
-	fname = smb_fname_src->base_name;
-	dst_fname = smb_fname_dst->base_name;
+	full_src = full_path_from_dirfsp_atname(talloc_tos(),
+						srcfsp,
+						smb_fname_src);
+	if (full_src == NULL) {
+		errno = ENOMEM;
+		ret = -1;
+		goto out;
+	}
+
+	full_dst = full_path_from_dirfsp_atname(talloc_tos(),
+						dstfsp,
+						smb_fname_dst);
+	if (full_dst == NULL) {
+		errno = ENOMEM;
+		ret = -1;
+		goto out;
+	}
+
+	fname = full_src->base_name;
+	dst_fname = full_dst->base_name;
 
 	DBG_DEBUG("Renaming cache entry: fname: %s to: %s\n",
 		  fname, dst_fname);
 	virusfilter_cache_entry_rename(config->cache,
-				       cwd_fname, fname,
+				       cwd_fname,
+				       fname,
 				       dst_fname);
 
-	return 0;
+	ret = 0;
+  out:
+	TALLOC_FREE(full_src);
+	TALLOC_FREE(full_dst);
+	return ret;
 }
 
 

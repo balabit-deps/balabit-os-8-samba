@@ -23,6 +23,7 @@
 #include "includes.h"
 #include "smbd/smbd.h"
 #include "string_replace.h"
+#include "lib/util/string_wrappers.h"
 
 #define MAP_SIZE        0xFF
 #define MAP_NUM         0x101 /* max unicode charval / MAP_SIZE */
@@ -100,7 +101,7 @@ struct char_mappings **string_replace_init_map(TALLOC_CTX *mem_ctx,
 		return NULL;
 	}
 
-	cmaps = TALLOC_ZERO(mem_ctx, MAP_NUM * sizeof(struct char_mappings *));
+	cmaps = talloc_zero_array(mem_ctx, struct char_mappings *, MAP_NUM);
 	if (cmaps == NULL) {
 		return NULL;
 	}

@@ -26,6 +26,8 @@
 #include "torture/util.h"
 #include "torture/basic/proto.h"
 
+#undef strcasecmp
+
 static TDB_CONTEXT *tdb;
 
 #define NAME_LENGTH 20
@@ -193,7 +195,7 @@ bool torture_mangle(struct torture_context *torture,
 		}
 	}
 
-	smbcli_unlink(cli->tree, "\\mangle_test\\*");
+	smbcli_unlink_wcard(cli->tree, "\\mangle_test\\*");
 	if (NT_STATUS_IS_ERR(smbcli_rmdir(cli->tree, "\\mangle_test"))) {
 		printf("ERROR: Failed to remove directory\n");
 		return false;

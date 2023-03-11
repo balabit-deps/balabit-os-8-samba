@@ -45,7 +45,8 @@
 #define IS_PRINT(conn)       ((conn) && (conn)->printer)
 
 #define CHECK_READ(fsp,req) \
-	(((fsp)->fh->fd != -1) && \
+	((!(fsp)->fsp_flags.is_pathref) &&  \
+	 (fsp_get_io_fd(fsp) != -1) && \
 	 (((fsp)->fsp_flags.can_read) || \
 	  ((req->flags2 & FLAGS2_READ_PERMIT_EXECUTE) && \
 	   (fsp->access_mask & FILE_EXECUTE))))
@@ -63,7 +64,8 @@
  * test).
  */
 #define CHECK_READ_SMB2(fsp) \
-	(((fsp)->fh->fd != -1) && \
+	((!(fsp)->fsp_flags.is_pathref) &&  \
+	 (fsp_get_io_fd(fsp) != -1) && \
 	 (((fsp)->fsp_flags.can_read) || \
 	  (fsp->access_mask & FILE_EXECUTE)))
 
@@ -74,12 +76,14 @@
  * the "if execute is granted then also grant read" arrangement.
  */
 #define CHECK_READ_IOCTL(fsp) \
-	(((fsp)->fh->fd != -1) && \
+	((!(fsp)->fsp_flags.is_pathref) &&  \
+	 (fsp_get_io_fd(fsp) != -1) && \
 	 (((fsp)->fsp_flags.can_read)))
 
 #define CHECK_WRITE(fsp) \
 	((fsp)->fsp_flags.can_write && \
-	 ((fsp)->fh->fd != -1))
+	(!(fsp)->fsp_flags.is_pathref) && \
+	 (fsp_get_io_fd(fsp) != -1))
 
 #define ERROR_WAS_LOCK_DENIED(status) (NT_STATUS_EQUAL((status), NT_STATUS_LOCK_NOT_GRANTED) || \
 				NT_STATUS_EQUAL((status), NT_STATUS_FILE_LOCK_CONFLICT) )
@@ -148,7 +152,7 @@
 
 /* the remaining number of bytes in smb buffer 'buf' from pointer 'p'. */
 #define smb_bufrem(buf, p) (smb_buflen(buf)-PTR_DIFF(p, smb_buf(buf)))
-#define smbreq_bufrem(req, p) (req->buflen - PTR_DIFF(p, req->buf))
+#define smbreq_bufrem(req, p) ((req)->buflen < PTR_DIFF((p), (req)->buf) ? 0 : (req)->buflen - PTR_DIFF((p), (req)->buf))
 
 
 /* Note that chain_size must be available as an extern int to this macro. */
@@ -224,10 +228,7 @@ copy an IP address from one buffer to another
 #define SMB_XMALLOC_ARRAY(type,count) (type *)smb_xmalloc_array(sizeof(type),(count))
 
 #define TALLOC(ctx, size) talloc_named_const(ctx, size, __location__)
-#define TALLOC_ZERO(ctx, size) _talloc_zero(ctx, size, __location__)
 #define TALLOC_SIZE(ctx, size) talloc_named_const(ctx, size, __location__)
-#define TALLOC_ZERO_SIZE(ctx, size) _talloc_zero(ctx, size, __location__)
-
 #define TALLOC_REALLOC(ctx, ptr, count) _talloc_realloc(ctx, ptr, count, __location__)
 #define talloc_destroy(ctx) talloc_free(ctx)
 #ifndef TALLOC_FREE

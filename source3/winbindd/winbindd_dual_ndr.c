@@ -433,9 +433,8 @@ static NTSTATUS make_internal_dcesrv_connection(TALLOC_CTX *mem_ctx,
 	context->conn = conn;
 	context->context_id = 0;
 	context->transfer_syntax = *(conn->preferred_transfer);
-	context->iface = find_interface_by_uuid(conn->endpoint,
-					&ndr_table->syntax_id.uuid,
-					ndr_table->syntax_id.if_version);
+	context->iface = find_interface_by_syntax_id(
+		conn->endpoint, &ndr_table->syntax_id);
 	if (context->iface == NULL) {
 		status = NT_STATUS_RPC_INTERFACE_NOT_FOUND;
 		goto fail;
@@ -475,69 +474,6 @@ struct dcerpc_binding_handle *wbint_binding_handle(TALLOC_CTX *mem_ctx,
 	return h;
 }
 
-static NTSTATUS rpcint_dispatch(struct dcesrv_call_state *call)
-{
-	NTSTATUS status;
-	struct ndr_pull *pull = NULL;
-	struct ndr_push *push = NULL;
-	struct data_blob_list_item *rep = NULL;
-
-	pull = ndr_pull_init_blob(&call->pkt.u.request.stub_and_verifier,
-				  call);
-	if (pull == NULL) {
-		return NT_STATUS_NO_MEMORY;
-	}
-
-	pull->flags |= LIBNDR_FLAG_REF_ALLOC;
-
-	call->ndr_pull = pull;
-
-	/* unravel the NDR for the packet */
-	status = call->context->iface->ndr_pull(call, call, pull, &call->r);
-	if (!NT_STATUS_IS_OK(status)) {
-		DBG_ERR("DCE/RPC fault in call %s:%02X - %s\n",
-			call->context->iface->name,
-			call->pkt.u.request.opnum,
-			dcerpc_errstr(call, call->fault_code));
-		return status;
-	}
-
-	status = call->context->iface->local(call, call, call->r);
-	if (!NT_STATUS_IS_OK(status)) {
-		DBG_ERR("DCE/RPC fault in call %s:%02X - %s\n",
-			call->context->iface->name,
-			call->pkt.u.request.opnum,
-			dcerpc_errstr(call, call->fault_code));
-		return status;
-	}
-
-	push = ndr_push_init_ctx(call);
-	if (push == NULL) {
-		return NT_STATUS_NO_MEMORY;
-	}
-
-	push->ptr_count = call->ndr_pull->ptr_count;
-
-	status = call->context->iface->ndr_push(call, call, push, call->r);
-	if (!NT_STATUS_IS_OK(status)) {
-		DBG_ERR("DCE/RPC fault in call %s:%02X - %s\n",
-			call->context->iface->name,
-			call->pkt.u.request.opnum,
-			dcerpc_errstr(call, call->fault_code));
-		return status;
-	}
-
-	rep = talloc_zero(call, struct data_blob_list_item);
-	if (rep == NULL) {
-		return NT_STATUS_NO_MEMORY;
-	}
-
-	rep->blob = ndr_push_blob(push);
-	DLIST_ADD_END(call->replies, rep);
-
-	return NT_STATUS_OK;
-}
-
 enum winbindd_result winbindd_dual_ndrcmd(struct winbindd_domain *domain,
 					  struct winbindd_cli_state *state)
 {
@@ -545,6 +481,7 @@ enum winbindd_result winbindd_dual_ndrcmd(struct winbindd_domain *domain,
 	struct dcesrv_connection *dcesrv_conn = NULL;
 	struct dcesrv_call_state *dcesrv_call = NULL;
 	struct data_blob_list_item *rep = NULL;
+	struct dcesrv_context_callbacks *cb = NULL;
 	uint32_t opnum = state->request->data.ndrcmd;
 	TALLOC_CTX *mem_ctx;
 	NTSTATUS status;
@@ -586,8 +523,10 @@ enum winbindd_result winbindd_dual_ndrcmd(struct winbindd_domain *domain,
 
 	ZERO_STRUCT(dcesrv_call->pkt);
 	dcesrv_call->pkt.u.bind.assoc_group_id = 0;
-	status = dcesrv_call->conn->dce_ctx->callbacks.assoc_group.find(
-								dcesrv_call);
+
+	cb = dcesrv_call->conn->dce_ctx->callbacks;
+	status = cb->assoc_group.find(
+		dcesrv_call, cb->assoc_group.private_data);
 	if (!NT_STATUS_IS_OK(status)) {
 		goto out;
 	}
@@ -599,7 +538,7 @@ enum winbindd_result winbindd_dual_ndrcmd(struct winbindd_domain *domain,
 		data_blob_const(state->request->extra_data.data,
 				state->request->extra_len);
 
-	status = rpcint_dispatch(dcesrv_call);
+	status = dcesrv_call_dispatch_local(dcesrv_call);
 	if (!NT_STATUS_IS_OK(status)) {
 		goto out;
 	}

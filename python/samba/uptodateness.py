@@ -16,7 +16,6 @@
 #
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
-from __future__ import print_function
 
 import sys
 import time
@@ -87,8 +86,6 @@ def get_utdv(samdb, dn):
             settings_dn = str(res[0]["distinguishedName"][0])
             prefix, dsa_dn = settings_dn.split(',', 1)
         except IndexError as e:
-            print("Unknown invocation ID %s" % inv_id,
-                  file=sys.stderr)
             continue
         if prefix != 'CN=NTDS Settings':
             raise CommandError("Expected NTDS Settings DN, got %s" %

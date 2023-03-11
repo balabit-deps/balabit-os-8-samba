@@ -1,3 +1,9 @@
+samba (2:4.15.13+dfsg-0ubuntu0.20.04.1bb1) focal; urgency=medium
+
+  * Balabit patched version
+
+ -- Balabit Platform Team <devnull@dev.null>  Sat, 11 Mar 2023 16:28:40 +0100
+
 samba (2:4.15.13+dfsg-0ubuntu0.20.04.1) focal-security; urgency=medium
 
   * Update to 4.15.13 as a security update

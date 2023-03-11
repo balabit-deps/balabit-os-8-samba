@@ -913,11 +913,20 @@ NTSTATUS smbXsrv_tcon_disconnect(struct smbXsrv_tcon *tcon, uint64_t vuid)
 				  tcon->global->tcon_global_id,
 				  tcon->global->share_name,
 				  nt_errstr(status)));
+			/*
+			 * We must call close_cnum() on
+			 * error, as the caller is going
+			 * to free tcon and tcon->compat
+			 * so we must ensure tcon->compat is
+			 * removed from the linked list
+			 * conn->sconn->connections.
+			 */
+			close_cnum(tcon->compat, vuid, ERROR_CLOSE);
 			tcon->compat = NULL;
 			return status;
 		}
 
-		close_cnum(tcon->compat, vuid);
+		close_cnum(tcon->compat, vuid, SHUTDOWN_CLOSE);
 		tcon->compat = NULL;
 	}
 
@@ -1061,6 +1070,7 @@ static int smbXsrv_tcon_disconnect_all_callback(struct db_record *local_rec,
 
 	tcon->db_rec = local_rec;
 	status = smbXsrv_tcon_disconnect(tcon, vuid);
+	tcon->db_rec = NULL;
 	if (!NT_STATUS_IS_OK(status)) {
 		if (NT_STATUS_IS_OK(state->first_status)) {
 			state->first_status = status;

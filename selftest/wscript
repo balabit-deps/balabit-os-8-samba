@@ -142,9 +142,6 @@ def cmd_testonly(opt):
                         '--flapping=${srcdir}/selftest/flapping '
                         '--flapping=${srcdir}/selftest/flapping.d')
 
-    if CONFIG_GET(opt, 'HAVE_MIT_KRB5_PRE_1_18'):
-        env.FILTER_XFAIL += ' --expected-failures=${srcdir}/selftest/knownfail_mit_krb5_pre_1_18'
-
     if Options.options.FAIL_IMMEDIATELY:
         env.FILTER_XFAIL += ' --fail-immediately'
 
@@ -255,7 +252,7 @@ def cmd_testonly(opt):
     if os.environ.get('USE_NAMESPACES') is None:
         env.OPTIONS += " --socket_wrapper_so_path=" + CONFIG_GET(opt, 'LIBSOCKET_WRAPPER_SO_PATH')
 
-    if Utils.unversioned_sys_platform() in ('netbsd', 'openbsd', 'sunos'):
+    if not CONFIG_SET(opt, 'HAVE_RESOLV_CONF_SUPPORT'):
         env.OPTIONS += " --use-dns-faking"
 
     if CONFIG_GET(opt, 'USING_SYSTEM_KRB5') and CONFIG_GET(opt, 'MIT_KDC_PATH'):
@@ -270,6 +267,9 @@ def cmd_testonly(opt):
         # older MIT krb5 libraries (< 1.14) don't have
         # GSS_KRB5_CRED_NO_CI_FLAGS_X
         env.OPTIONS += " --exclude=${srcdir}/selftest/skip.no-GSS_KRB5_CRED_NO_CI_FLAGS_X"
+
+    if os.environ.get('DISABLE_OPATH'):
+        env.OPTIONS += " --exclude=${srcdir}/selftest/skip.opath-required"
 
     if env.ADDRESS_SANITIZER:
         # We try to find the correct libasan automatically
@@ -293,8 +293,8 @@ def cmd_testonly(opt):
         env.CORE_COMMAND = 'unshare --net --user --map-root-user ' + env.CORE_COMMAND
 
     if env.ADDRESS_SANITIZER:
-        # For now we cannot run with leak detection
-        no_leak_check = "ASAN_OPTIONS=detect_leaks=0 "
+        # For now we cannot run with leak and odr detection
+        no_leak_check = "ASAN_OPTIONS=detect_leaks=0:detect_odr_violation=0 "
         # And we need to disable RTLD_DEEPBIND in ldb and socket wrapper
         no_leak_check += "LDB_MODULES_DISABLE_DEEPBIND=1 "
         no_leak_check += "SOCKET_WRAPPER_DISABLE_DEEP_BIND=1"

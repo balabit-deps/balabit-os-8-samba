@@ -32,11 +32,9 @@ from samba import dsdb, dsdb_dns
 from samba.ndr import ndr_unpack, ndr_pack
 from samba.dcerpc import drsblobs, misc
 from samba.common import normalise_int32
-from samba.compat import text_type
-from samba.compat import binary_type
-from samba.compat import get_bytes
-from samba.common import cmp
+from samba.common import get_bytes, cmp
 from samba.dcerpc import security
+from samba import is_ad_dc_built
 import binascii
 
 __docformat__ = "restructuredText"
@@ -45,6 +43,11 @@ __docformat__ = "restructuredText"
 def get_default_backend_store():
     return "tdb"
 
+class SamDBError(Exception):
+    pass
+
+class SamDBNotFoundError(SamDBError):
+    pass
 
 class SamDB(samba.Ldb):
     """The SAM database."""
@@ -185,6 +188,31 @@ pwdLastSet: 0
 """ % (user_dn)
         self.modify_ldif(mod)
 
+    def unlock_account(self, search_filter):
+        """Unlock a user account by resetting lockoutTime to 0.
+        This does also reset the badPwdCount to 0.
+
+        :param search_filter: LDAP filter to find the user (e.g.
+            sAMAccountName=username)
+        """
+        res = self.search(base=self.domain_dn(),
+                          scope=ldb.SCOPE_SUBTREE,
+                          expression=search_filter,
+                          attrs=[])
+        if len(res) == 0:
+            raise SamDBNotFoundError('Unable to find user "%s"' % search_filter)
+        if len(res) != 1:
+            raise SamDBError('User "%s" is not unique' % search_filter)
+        user_dn = res[0].dn
+
+        mod = """
+dn: %s
+changetype: modify
+replace: lockoutTime
+lockoutTime: 0
+""" % (user_dn)
+        self.modify_ldif(mod)
+
     def newgroup(self, groupname, groupou=None, grouptype=None,
                  description=None, mailaddress=None, notes=None, sd=None,
                  gidnumber=None, nisdomain=None):
@@ -200,7 +228,12 @@ pwdLastSet: 0
         :param sd: security descriptor of the object
         """
 
-        group_dn = "CN=%s,%s,%s" % (groupname, (groupou or "CN=Users"), self.domain_dn())
+        if groupou:
+            group_dn = "CN=%s,%s,%s" % (groupname, groupou, self.domain_dn())
+        else:
+            group_dn = "CN=%s,%s" % (groupname, self.get_wellknown_dn(
+                                        self.get_default_basedn(),
+                                        dsdb.DS_GUID_USERS_CONTAINER))
 
         # The new user record. Note the reliance on the SAMLDB module which
         # fills in the default information
@@ -396,6 +429,60 @@ member: %s
         else:
             self.transaction_commit()
 
+    def prepare_attr_replace(self, msg, old, attr_name, value):
+        """Changes the MessageElement with the given attr_name of the
+        given Message. If the value is "" set an empty value and the flag
+        FLAG_MOD_DELETE, otherwise set the new value and FLAG_MOD_REPLACE.
+        If the value is None or the Message contains the attr_name with this
+        value, nothing will changed."""
+        # skip unchanged attribute
+        if value is None:
+            return
+        if attr_name in old and str(value) == str(old[attr_name]):
+            return
+
+        # remove attribute
+        if len(value) == 0:
+            if attr_name in old:
+                el = ldb.MessageElement([], ldb.FLAG_MOD_DELETE, attr_name)
+                msg.add(el)
+            return
+
+        # change attribute
+        el = ldb.MessageElement(value, ldb.FLAG_MOD_REPLACE, attr_name)
+        msg.add(el)
+
+    def fullname_from_names(self, given_name=None, initials=None, surname=None,
+                            old_attrs={}, fallback_default=""):
+        """Prepares new combined fullname, using the name parts.
+        Used for things like displayName or cn.
+        Use the original name values, if no new one is specified."""
+
+        attrs = {"givenName": given_name,
+                 "initials": initials,
+                 "sn": surname}
+
+        # if the attribute is not specified, try to use the old one
+        for attr_name, attr_value in attrs.items():
+            if attr_value == None and attr_name in old_attrs:
+                attrs[attr_name] = str(old_attrs[attr_name])
+
+        # add '.' to initials if initals are not None and not "" and if the initials
+        # don't have already a '.' at the end
+        if attrs["initials"] and not attrs["initials"].endswith('.'):
+            attrs["initials"] += '.'
+
+        # remove empty values (None and '')
+        attrs_values = list(filter(None, attrs.values()))
+
+        # fullname is the combination of not-empty values as string, separated by ' '
+        fullname = ' '.join(attrs_values)
+
+        if fullname == '':
+            return fallback_default
+
+        return fullname
+
     def newuser(self, username, password,
                 force_password_change_at_next_login_req=False,
                 useusernameascn=False, userou=None, surname=None, givenname=None,
@@ -441,21 +528,19 @@ member: %s
         :param smartcard_required: set the UF_SMARTCARD_REQUIRED bit of the new user
         """
 
-        displayname = ""
-        if givenname is not None:
-            displayname += givenname
-
-        if initials is not None:
-            displayname += ' %s.' % initials
-
-        if surname is not None:
-            displayname += ' %s' % surname
-
+        displayname = self.fullname_from_names(given_name=givenname,
+                                               initials=initials,
+                                               surname=surname)
         cn = username
         if useusernameascn is None and displayname != "":
             cn = displayname
 
-        user_dn = "CN=%s,%s,%s" % (cn, (userou or "CN=Users"), self.domain_dn())
+        if userou:
+            user_dn = "CN=%s,%s,%s" % (cn, userou, self.domain_dn())
+        else:
+            user_dn = "CN=%s,%s" % (cn, self.get_wellknown_dn(
+                                        self.get_default_basedn(),
+                                        dsdb.DS_GUID_USERS_CONTAINER))
 
         dnsdomain = ldb.Dn(self, self.domain_dn()).canonical_str().replace("/", "")
         user_principal_name = "%s@%s" % (username, dnsdomain)
@@ -604,15 +689,9 @@ member: %s
         """
 
         # Prepare the contact name like the RSAT, using the name parts.
-        cn = ""
-        if givenname is not None:
-            cn += givenname
-
-        if initials is not None:
-            cn += ' %s.' % initials
-
-        if surname is not None:
-            cn += ' %s' % surname
+        cn = self.fullname_from_names(given_name=givenname,
+                                      initials=initials,
+                                      surname=surname)
 
         # Use the specified fullcontactname instead of the previously prepared
         # contact name, if it is specified.
@@ -694,7 +773,8 @@ member: %s
             raise Exception('Illegal computername "%s"' % computername)
         samaccountname = "%s$" % cn
 
-        computercontainer_dn = "CN=Computers,%s" % self.domain_dn()
+        computercontainer_dn = self.get_wellknown_dn(self.get_default_basedn(),
+                                              dsdb.DS_GUID_COMPUTERS_CONTAINER)
         if computerou:
             computercontainer_dn = self.normalize_dn_in_domain(computerou)
 
@@ -775,7 +855,7 @@ member: %s
             if len(res) > 1:
                 raise Exception('Matched %u multiple users with filter "%s"' % (len(res), search_filter))
             user_dn = res[0].dn
-            if not isinstance(password, text_type):
+            if not isinstance(password, str):
                 pw = password.decode('utf-8')
             else:
                 pw = password
@@ -915,6 +995,21 @@ accountExpires: %u
     def get_ntds_GUID(self):
         """Get the NTDS objectGUID"""
         return dsdb._samdb_ntds_objectGUID(self)
+
+    def get_timestr(self):
+        """Get the current time as generalized time string"""
+        res = self.search(base="",
+                          scope=ldb.SCOPE_BASE,
+                          attrs=["currentTime"])
+        return str(res[0]["currentTime"][0])
+
+    def get_time(self):
+        """Get the current time as UNIX time"""
+        return ldb.string_to_time(self.get_timestr())
+
+    def get_nttime(self):
+        """Get the current time as NT time"""
+        return samba.unix2nttime(self.get_time())
 
     def server_site_name(self):
         """Get the server site name"""
@@ -1115,7 +1210,7 @@ schemaUpdateNow: 1
         return dn
 
     def set_minPwdAge(self, value):
-        if not isinstance(value, binary_type):
+        if not isinstance(value, bytes):
             value = str(value).encode('utf8')
         m = ldb.Message()
         m.dn = ldb.Dn(self, self.domain_dn())
@@ -1132,7 +1227,7 @@ schemaUpdateNow: 1
             return int(res[0]["minPwdAge"][0])
 
     def set_maxPwdAge(self, value):
-        if not isinstance(value, binary_type):
+        if not isinstance(value, bytes):
             value = str(value).encode('utf8')
         m = ldb.Message()
         m.dn = ldb.Dn(self, self.domain_dn())
@@ -1149,7 +1244,7 @@ schemaUpdateNow: 1
             return int(res[0]["maxPwdAge"][0])
 
     def set_minPwdLength(self, value):
-        if not isinstance(value, binary_type):
+        if not isinstance(value, bytes):
             value = str(value).encode('utf8')
         m = ldb.Message()
         m.dn = ldb.Dn(self, self.domain_dn())
@@ -1166,7 +1261,7 @@ schemaUpdateNow: 1
             return int(res[0]["minPwdLength"][0])
 
     def set_pwdProperties(self, value):
-        if not isinstance(value, binary_type):
+        if not isinstance(value, bytes):
             value = str(value).encode('utf8')
         m = ldb.Message()
         m.dn = ldb.Dn(self, self.domain_dn())
@@ -1286,6 +1381,10 @@ schemaUpdateNow: 1
         '''garbage_collect_tombstones(lp, samdb, [dn], current_time, tombstone_lifetime)
         -> (num_objects_expunged, num_links_expunged)'''
 
+        if not is_ad_dc_built():
+            raise SamDBError('Cannot garbage collect tombstones: ' \
+                'AD DC was not built')
+
         if tombstone_lifetime is None:
             return dsdb._dsdb_garbage_collect_tombstones(self, dn,
                                                          current_time)
@@ -1381,8 +1480,8 @@ schemaUpdateNow: 1
         if prev_pool == uint64_max or next_rid == uint32_max:
             prev_pool = alloc_pool
             next_rid = prev_pool & uint32_max
-
-        next_rid += 1
+        else:
+            next_rid += 1
 
         # Now check if our current pool is still usable
         prev_pool_lo = prev_pool & uint32_max

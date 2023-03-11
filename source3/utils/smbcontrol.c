@@ -26,7 +26,7 @@
 #include "includes.h"
 #include "system/filesys.h"
 #include "lib/util/server_id.h"
-#include "popt_common.h"
+#include "lib/cmdline/cmdline.h"
 #include "librpc/gen_ndr/spoolss.h"
 #include "nt_printing.h"
 #include "printing/notify.h"
@@ -36,6 +36,8 @@
 #include "../lib/util/pidfile.h"
 #include "serverid.h"
 #include "cmdline_contexts.h"
+#include "lib/util/string_wrappers.h"
+#include "lib/global_contexts.h"
 
 #ifdef HAVE_LIBUNWIND_H
 #include <libunwind.h>
@@ -1701,7 +1703,7 @@ int main(int argc, const char **argv)
 	struct tevent_context *evt_ctx;
 	struct messaging_context *msg_ctx;
 
-	static struct poptOption long_options[] = {
+	struct poptOption long_options[] = {
 		/* POPT_AUTOHELP */
 		{ NULL, '\0', POPT_ARG_INCLUDE_TABLE, help_options,
 		                        0, "Help options:", NULL },
@@ -1709,20 +1711,37 @@ int main(int argc, const char **argv)
 		  "Set timeout value in seconds", "TIMEOUT" },
 
 		POPT_COMMON_SAMBA
+		POPT_COMMON_VERSION
 		POPT_TABLEEND
 	};
 	TALLOC_CTX *frame = talloc_stackframe();
 	int ret = 0;
+	bool ok;
 
 	smb_init_locale();
 
-	setup_logging(argv[0], DEBUG_STDOUT);
+	ok = samba_cmdline_init(frame,
+				SAMBA_CMDLINE_CONFIG_CLIENT,
+				false /* require_smbconf */);
+	if (!ok) {
+		DBG_ERR("Failed to init cmdline parser!\n");
+		TALLOC_FREE(frame);
+		exit(1);
+	}
 	lp_set_cmdline("log level", "0");
 
 	/* Parse command line arguments using popt */
 
-	pc = poptGetContext(
-		"smbcontrol", argc, (const char **)argv, long_options, 0);
+	pc = samba_popt_get_context(getprogname(),
+				    argc,
+				    argv,
+				    long_options,
+				    0);
+	if (pc == NULL) {
+		DBG_ERR("Failed to setup popt context!\n");
+		TALLOC_FREE(frame);
+		exit(1);
+	}
 
 	poptSetOtherOptionHelp(pc, "[OPTION...] <destination> <message-type> "
 			       "<parameters>");
@@ -1766,14 +1785,13 @@ int main(int argc, const char **argv)
 
 	evt_ctx = global_event_context();
 
-	lp_load_global(get_dyn_CONFIGFILE());
-
 	/* Need to invert sense of return code -- samba
          * routines mostly return True==1 for success, but
          * shell needs 0. */ 
 
 	ret = !do_command(evt_ctx, msg_ctx, argc, argv);
 
+	cmdline_messaging_context_free();
 	poptFreeContext(pc);
 	TALLOC_FREE(frame);
 	return ret;

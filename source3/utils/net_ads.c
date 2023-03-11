@@ -41,6 +41,7 @@
 #include "lib/param/loadparm.h"
 #include "utils/net_dns.h"
 #include "auth/kerberos/pac_utils.h"
+#include "lib/util/string_wrappers.h"
 
 #ifdef HAVE_JANSSON
 #include <jansson.h>
@@ -606,6 +607,8 @@ static ADS_STATUS ads_startup_int(struct net_context *c, bool only_own_domain,
 	char *cp;
 	const char *realm = NULL;
 	bool tried_closest_dc = false;
+	enum credentials_use_kerberos krb5_state =
+		CRED_USE_KERBEROS_DISABLED;
 
 	/* lp_realm() should be handled by a command line param,
 	   However, the join requires that realm be set in smb.conf
@@ -649,9 +652,27 @@ retry:
 		ads->auth.password = smb_xstrdup(c->opt_password);
 	}
 
-	ads->auth.flags |= auth_flags;
 	SAFE_FREE(ads->auth.user_name);
 	ads->auth.user_name = smb_xstrdup(c->opt_user_name);
+
+	ads->auth.flags |= auth_flags;
+
+	/* The ADS code will handle FIPS mode */
+	krb5_state = cli_credentials_get_kerberos_state(c->creds);
+	switch (krb5_state) {
+	case CRED_USE_KERBEROS_REQUIRED:
+		ads->auth.flags &= ~ADS_AUTH_DISABLE_KERBEROS;
+		ads->auth.flags &= ~ADS_AUTH_ALLOW_NTLMSSP;
+		break;
+	case CRED_USE_KERBEROS_DESIRED:
+		ads->auth.flags &= ~ADS_AUTH_DISABLE_KERBEROS;
+		ads->auth.flags |= ADS_AUTH_ALLOW_NTLMSSP;
+		break;
+	case CRED_USE_KERBEROS_DISABLED:
+		ads->auth.flags |= ADS_AUTH_DISABLE_KERBEROS;
+		ads->auth.flags |= ADS_AUTH_ALLOW_NTLMSSP;
+		break;
+	}
 
        /*
         * If the username is of the form "name@realm",
@@ -1291,6 +1312,8 @@ static int net_ads_status(struct net_context *c, int argc, const char **argv)
 		return 0;
 	}
 
+	net_warn_member_options();
+
 	if (!ADS_ERR_OK(ads_startup(c, true, &ads))) {
 		return -1;
 	}
@@ -1432,6 +1455,8 @@ static NTSTATUS net_ads_join_ok(struct net_context *c)
 		return NT_STATUS_ACCESS_DENIED;
 	}
 
+	net_warn_member_options();
+
 	net_use_krb_machine_account(c);
 
 	get_dc_name(lp_workgroup(), lp_realm(), dc_name, &dcip);
@@ -1461,6 +1486,8 @@ int net_ads_testjoin(struct net_context *c, int argc, const char **argv)
 			 _("Test if the existing join is ok"));
 		return 0;
 	}
+
+	net_warn_member_options();
 
 	/* Display success or failure */
 	status = net_ads_join_ok(c);
@@ -1505,7 +1532,7 @@ static WERROR check_ads_config( void )
  Send a DNS update request
 *******************************************************************/
 
-#if defined(WITH_DNS_UPDATES)
+#if defined(HAVE_KRB5)
 #include "../lib/addns/dns.h"
 
 static NTSTATUS net_update_dns_internal(struct net_context *c,
@@ -1515,7 +1542,7 @@ static NTSTATUS net_update_dns_internal(struct net_context *c,
 					int num_addrs, bool remove_host)
 {
 	struct dns_rr_ns *nameservers = NULL;
-	int ns_count = 0, i;
+	size_t ns_count = 0, i;
 	NTSTATUS status = NT_STATUS_UNSUCCESSFUL;
 	DNS_ERROR dns_err;
 	fstring dns_server;
@@ -1740,7 +1767,7 @@ static int net_ads_join_usage(struct net_context *c, int argc, const char **argv
 
 static void _net_ads_join_dns_updates(struct net_context *c, TALLOC_CTX *ctx, struct libnet_JoinCtx *r)
 {
-#if defined(WITH_DNS_UPDATES)
+#if defined(HAVE_KRB5)
 	ADS_STRUCT *ads_dns = NULL;
 	int ret;
 	NTSTATUS status;
@@ -1846,6 +1873,8 @@ int net_ads_join(struct net_context *c, int argc, const char **argv)
 
 	if (c->display_usage)
 		return net_ads_join_usage(c, argc, argv);
+
+	net_warn_member_options();
 
 	if (!modify_config) {
 
@@ -2029,7 +2058,7 @@ fail:
 
 static int net_ads_dns_register(struct net_context *c, int argc, const char **argv)
 {
-#if defined(WITH_DNS_UPDATES)
+#if defined(HAVE_KRB5)
 	ADS_STRUCT *ads;
 	ADS_STATUS status;
 	NTSTATUS ntstatus;
@@ -2128,7 +2157,7 @@ static int net_ads_dns_unregister(struct net_context *c,
 				  int argc,
 				  const char **argv)
 {
-#if defined(WITH_DNS_UPDATES)
+#if defined(HAVE_KRB5)
 	ADS_STRUCT *ads;
 	ADS_STATUS status;
 	NTSTATUS ntstatus;
@@ -2189,35 +2218,80 @@ static int net_ads_dns_unregister(struct net_context *c,
 #endif
 }
 
-static int net_ads_dns_gethostbyname(struct net_context *c, int argc, const char **argv)
+
+static int net_ads_dns_async(struct net_context *c, int argc, const char **argv)
 {
-#if defined(WITH_DNS_UPDATES)
-	DNS_ERROR err;
+	size_t num_names = 0;
+	char **hostnames = NULL;
+	size_t i = 0;
+	struct samba_sockaddr *addrs = NULL;
+	NTSTATUS status;
 
-#ifdef DEVELOPER
-	talloc_enable_leak_report();
-#endif
-
-	if (argc != 2 || c->display_usage) {
+	if (argc != 1 || c->display_usage) {
 		d_printf(  "%s\n"
 			   "    %s\n"
 			   "    %s\n",
 			 _("Usage:"),
-			 _("net ads dns gethostbyname <server> <name>\n"),
-			 _("  Look up hostname from the AD\n"
-			   "    nameserver\tName server to use\n"
+			 _("net ads dns async <name>\n"),
+			 _("  Async look up hostname from the DNS server\n"
 			   "    hostname\tName to look up\n"));
 		return -1;
 	}
 
-	err = do_gethostbyname(argv[0], argv[1]);
-	if (!ERR_DNS_IS_OK(err)) {
-		d_printf(_("do_gethostbyname returned %s (%d)\n"),
-			dns_errstr(err), ERROR_DNS_V(err));
+	status = ads_dns_lookup_a(talloc_tos(),
+				  argv[0],
+				  &num_names,
+				  &hostnames,
+				  &addrs);
+	if (!NT_STATUS_IS_OK(status)) {
+		d_printf("Looking up A record for %s got error %s\n",
+			 argv[0],
+			 nt_errstr(status));
+		return -1;
+	}
+	d_printf("Async A record lookup - got %u names for %s\n",
+		 (unsigned int)num_names,
+		 argv[0]);
+	for (i = 0; i < num_names; i++) {
+		char addr_buf[INET6_ADDRSTRLEN];
+		print_sockaddr(addr_buf,
+			       sizeof(addr_buf),
+			       &addrs[i].u.ss);
+		d_printf("hostname[%u] = %s, IPv4addr = %s\n",
+			(unsigned int)i,
+			hostnames[i],
+			addr_buf);
+	}
+
+#if defined(HAVE_IPV6)
+	status = ads_dns_lookup_aaaa(talloc_tos(),
+				     argv[0],
+				     &num_names,
+				     &hostnames,
+				     &addrs);
+	if (!NT_STATUS_IS_OK(status)) {
+		d_printf("Looking up AAAA record for %s got error %s\n",
+			 argv[0],
+			 nt_errstr(status));
+		return -1;
+	}
+	d_printf("Async AAAA record lookup - got %u names for %s\n",
+		 (unsigned int)num_names,
+		 argv[0]);
+	for (i = 0; i < num_names; i++) {
+		char addr_buf[INET6_ADDRSTRLEN];
+		print_sockaddr(addr_buf,
+			       sizeof(addr_buf),
+			       &addrs[i].u.ss);
+		d_printf("hostname[%u] = %s, IPv6addr = %s\n",
+			(unsigned int)i,
+			hostnames[i],
+			addr_buf);
 	}
 #endif
 	return 0;
 }
+
 
 static int net_ads_dns(struct net_context *c, int argc, const char *argv[])
 {
@@ -2239,12 +2313,12 @@ static int net_ads_dns(struct net_context *c, int argc, const char *argv[])
 			   "    Remove host dns entry from AD")
 		},
 		{
-			"gethostbyname",
-			net_ads_dns_gethostbyname,
+			"async",
+			net_ads_dns_async,
 			NET_TRANSPORT_ADS,
 			N_("Look up host"),
-			N_("net ads dns gethostbyname\n"
-			   "    Look up host")
+			N_("net ads dns async\n"
+			   "    Look up host using async DNS")
 		},
 		{NULL, NULL, 0, NULL, NULL}
 	};
@@ -2387,7 +2461,6 @@ static int net_ads_printer_publish(struct net_context *c, int argc, const char *
 	char *prt_dn, *srv_dn, **srv_cn;
 	char *srv_cn_escaped = NULL, *printername_escaped = NULL;
 	LDAPMessage *res = NULL;
-	struct cli_credentials *creds = NULL;
 	bool ok;
 
 	if (argc < 1 || c->display_usage) {
@@ -2425,20 +2498,15 @@ static int net_ads_printer_publish(struct net_context *c, int argc, const char *
 		return -1;
 	}
 
-	creds = net_context_creds(c, mem_ctx);
-	if (creds == NULL) {
-		d_fprintf(stderr, "net_context_creds() failed\n");
-		ads_destroy(&ads);
-		talloc_destroy(mem_ctx);
-		return -1;
-	}
-	cli_credentials_set_kerberos_state(creds, CRED_MUST_USE_KERBEROS);
+	cli_credentials_set_kerberos_state(c->creds,
+					   CRED_USE_KERBEROS_REQUIRED,
+					   CRED_SPECIFIED);
 
 	nt_status = cli_full_connection_creds(&cli, lp_netbios_name(), servername,
 					&server_ss, 0,
 					"IPC$", "IPC",
-					creds, 0,
-					SMB_SIGNING_IPC_DEFAULT);
+					c->creds,
+					CLI_FULL_CONNECTION_IPC);
 
 	if (NT_STATUS_IS_ERR(nt_status)) {
 		d_fprintf(stderr, _("Unable to open a connection to %s to "
@@ -2627,8 +2695,8 @@ static int net_ads_printer(struct net_context *c, int argc, const char **argv)
 static int net_ads_password(struct net_context *c, int argc, const char **argv)
 {
 	ADS_STRUCT *ads;
-	const char *auth_principal = c->opt_user_name;
-	const char *auth_password = c->opt_password;
+	const char *auth_principal = cli_credentials_get_username(c->creds);
+	const char *auth_password = cli_credentials_get_password(c->creds);
 	const char *realm = NULL;
 	const char *new_password = NULL;
 	char *chr, *prompt;
@@ -2645,7 +2713,7 @@ static int net_ads_password(struct net_context *c, int argc, const char **argv)
 		return 0;
 	}
 
-	if (c->opt_user_name == NULL || c->opt_password == NULL) {
+	if (auth_principal == NULL || auth_password == NULL) {
 		d_fprintf(stderr, _("You must supply an administrator "
 				    "username/password\n"));
 		return -1;
@@ -2741,6 +2809,8 @@ int net_ads_changetrustpw(struct net_context *c, int argc, const char **argv)
 		DEBUG(1,("Failed to initialise secrets database\n"));
 		return -1;
 	}
+
+	net_warn_member_options();
 
 	net_use_krb_machine_account(c);
 
@@ -2984,6 +3054,10 @@ static int net_ads_keytab_flush(struct net_context *c, int argc, const char **ar
 		return 0;
 	}
 
+	if (!c->opt_user_specified && c->opt_password == NULL) {
+		net_use_krb_machine_account(c);
+	}
+
 	if (!ADS_ERR_OK(ads_startup(c, true, &ads))) {
 		return -1;
 	}
@@ -3011,7 +3085,14 @@ static int net_ads_keytab_add(struct net_context *c,
 		return 0;
 	}
 
+	net_warn_member_options();
+
 	d_printf(_("Processing principals to add...\n"));
+
+	if (!c->opt_user_specified && c->opt_password == NULL) {
+		net_use_krb_machine_account(c);
+	}
+
 	if (!ADS_ERR_OK(ads_startup(c, true, &ads))) {
 		return -1;
 	}
@@ -3048,6 +3129,12 @@ static int net_ads_keytab_create(struct net_context *c, int argc, const char **a
 			 _("Usage:"),
 			 _("Create new default keytab"));
 		return 0;
+	}
+
+	net_warn_member_options();
+
+	if (!c->opt_user_specified && c->opt_password == NULL) {
+		net_use_krb_machine_account(c);
 	}
 
 	if (!ADS_ERR_OK(ads_startup(c, true, &ads))) {
@@ -3200,6 +3287,8 @@ static int net_ads_kerberos_pac_common(struct net_context *c, int argc, const ch
 				     2592000, /* one month */
 				     impersonate_princ_s,
 				     local_service,
+				     NULL,
+				     NULL,
 				     pac_data_ctr);
 	if (!NT_STATUS_IS_OK(status)) {
 		d_printf(_("failed to query kerberos PAC: %s\n"),
@@ -3624,6 +3713,12 @@ static void net_ads_enctype_dump_enctypes(const char *username,
 	printf("[%s] 0x%08x AES256-CTS-HMAC-SHA1-96\n",
 		enctypes & ENC_HMAC_SHA1_96_AES256 ? "X" : " ",
 		ENC_HMAC_SHA1_96_AES256);
+	printf("[%s] 0x%08x AES256-CTS-HMAC-SHA1-96-SK\n",
+		enctypes & ENC_HMAC_SHA1_96_AES256_SK ? "X" : " ",
+		ENC_HMAC_SHA1_96_AES256_SK);
+	printf("[%s] 0x%08x RESOURCE-SID-COMPRESSION-DISABLED\n",
+		enctypes & KERB_ENCTYPE_RESOURCE_SID_COMPRESSION_DISABLED ? "X" : " ",
+		KERB_ENCTYPE_RESOURCE_SID_COMPRESSION_DISABLED);
 }
 
 static int net_ads_enctypes_list(struct net_context *c, int argc, const char **argv)
@@ -3701,13 +3796,10 @@ static int net_ads_enctypes_set(struct net_context *c, int argc, const char **ar
 		goto done;
 	}
 
-	etype_list = ENC_CRC32 | ENC_RSA_MD5 | ENC_RC4_HMAC_MD5;
-#ifdef HAVE_ENCTYPE_AES128_CTS_HMAC_SHA1_96
+	etype_list = 0;
+	etype_list |= ENC_RC4_HMAC_MD5;
 	etype_list |= ENC_HMAC_SHA1_96_AES128;
-#endif
-#ifdef HAVE_ENCTYPE_AES256_CTS_HMAC_SHA1_96
 	etype_list |= ENC_HMAC_SHA1_96_AES256;
-#endif
 
 	if (argv[1] != NULL) {
 		sscanf(argv[1], "%i", &etype_list);

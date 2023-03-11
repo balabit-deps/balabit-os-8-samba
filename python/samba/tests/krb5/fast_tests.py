@@ -17,9 +17,13 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 
-import functools
-import os
 import sys
+import os
+
+sys.path.insert(0, "bin/python")
+os.environ["PYTHONUNBUFFERED"] = "1"
+
+import functools
 import collections
 
 import ldb
@@ -50,9 +54,6 @@ from samba.tests.krb5.rfc4120_constants import (
 )
 import samba.tests.krb5.rfc4120_pyasn1 as krb5_asn1
 import samba.tests.krb5.kcrypto as kcrypto
-
-sys.path.insert(0, "bin/python")
-os.environ["PYTHONUNBUFFERED"] = "1"
 
 global_asn1_print = False
 global_hexdump = False
@@ -154,6 +155,40 @@ class FAST_Tests(KDCBaseTest):
                 'gen_tgt_fn': self.get_user_tgt,
                 'fast_armor': None,
                 'sname': None,
+                'expected_sname': expected_sname
+            }
+        ])
+
+    def test_fast_inner_no_sname(self):
+        expected_sname = self.get_krbtgt_sname()
+
+        self._run_test_sequence([
+            {
+                'rep_type': KRB_AS_REP,
+                'expected_error_mode': KDC_ERR_GENERIC,
+                'use_fast': True,
+                'fast_armor': FX_FAST_ARMOR_AP_REQUEST,
+                'gen_armor_tgt_fn': self.get_mach_tgt,
+                'inner_req': {
+                    'sname': None  # should be ignored
+                },
+                'expected_sname': expected_sname
+            }
+        ])
+
+    def test_fast_tgs_inner_no_sname(self):
+        expected_sname = self.get_krbtgt_sname()
+
+        self._run_test_sequence([
+            {
+                'rep_type': KRB_TGS_REP,
+                'expected_error_mode': KDC_ERR_GENERIC,
+                'use_fast': True,
+                'gen_tgt_fn': self.get_user_tgt,
+                'fast_armor': None,
+                'inner_req': {
+                    'sname': None  # should be ignored
+                },
                 'expected_sname': expected_sname
             }
         ])
@@ -454,6 +489,21 @@ class FAST_Tests(KDCBaseTest):
                 self.generate_enc_challenge_padata_wrong_key_kdc,
                 'fast_armor': FX_FAST_ARMOR_AP_REQUEST,
                 'gen_armor_tgt_fn': self.get_mach_tgt
+            }
+        ])
+
+    def test_fast_encrypted_challenge_no_fast(self):
+        self._run_test_sequence([
+            {
+                'rep_type': KRB_AS_REP,
+                'expected_error_mode': KDC_ERR_PREAUTH_REQUIRED,
+                'use_fast': False
+            },
+            {
+                'rep_type': KRB_AS_REP,
+                'expected_error_mode': KDC_ERR_PREAUTH_FAILED,
+                'use_fast': False,
+                'gen_padata_fn': self.generate_enc_challenge_padata_wrong_key
             }
         ])
 

@@ -23,7 +23,7 @@
 
 static int (*gpfs_set_share_fn)(int fd, unsigned int allow, unsigned int deny);
 static int (*gpfs_set_lease_fn)(int fd, unsigned int type);
-static int (*gpfs_getacl_fn)(const char *pathname, int flags, void *acl);
+static int (*gpfs_fgetacl_fn)(int fd, int flags, void *acl);
 static int (*gpfs_putacl_fn)(const char *pathname, int flags, void *acl);
 static int (*gpfs_get_realfilename_path_fn)(const char *pathname,
 					    char *filenamep,
@@ -33,12 +33,12 @@ static int (*gpfs_set_winattrs_path_fn)(const char *pathname,
 					struct gpfs_winattr *attrs);
 static int (*gpfs_set_winattrs_fn)(int fd, int flags,
 				   struct gpfs_winattr *attrs);
-static int (*gpfs_get_winattrs_path_fn)(const char *pathname,
-					struct gpfs_winattr *attrs);
 static int (*gpfs_get_winattrs_fn)(int fd, struct gpfs_winattr *attrs);
 static int (*gpfs_ftruncate_fn)(int fd, gpfs_off64_t length);
 static int (*gpfs_lib_init_fn)(int flags);
-static int (*gpfs_set_times_path_fn)(char *pathname, int flags,
+static int (*gpfs_set_times_fn)(int fd, int flags, gpfs_timestruc_t times[4]);
+static int (*gpfs_set_times_path_fn)(char *path,
+				     int flags,
 				     gpfs_timestruc_t times[4]);
 static int (*gpfs_quotactl_fn)(const char *pathname,
 			       int cmd,
@@ -68,15 +68,15 @@ int gpfswrap_init(void)
 
 	gpfs_set_share_fn	      = dlsym(l, "gpfs_set_share");
 	gpfs_set_lease_fn	      = dlsym(l, "gpfs_set_lease");
-	gpfs_getacl_fn		      = dlsym(l, "gpfs_getacl");
+	gpfs_fgetacl_fn		      = dlsym(l, "gpfs_getacl_fd");
 	gpfs_putacl_fn		      = dlsym(l, "gpfs_putacl");
 	gpfs_get_realfilename_path_fn = dlsym(l, "gpfs_get_realfilename_path");
 	gpfs_set_winattrs_path_fn     = dlsym(l, "gpfs_set_winattrs_path");
 	gpfs_set_winattrs_fn	      = dlsym(l, "gpfs_set_winattrs");
-	gpfs_get_winattrs_path_fn     = dlsym(l, "gpfs_get_winattrs_path");
 	gpfs_get_winattrs_fn	      = dlsym(l, "gpfs_get_winattrs");
 	gpfs_ftruncate_fn	      = dlsym(l, "gpfs_ftruncate");
 	gpfs_lib_init_fn	      = dlsym(l, "gpfs_lib_init");
+	gpfs_set_times_fn	      = dlsym(l, "gpfs_set_times");
 	gpfs_set_times_path_fn	      = dlsym(l, "gpfs_set_times_path");
 	gpfs_quotactl_fn	      = dlsym(l, "gpfs_quotactl");
 	gpfs_init_trace_fn	      = dlsym(l, "gpfs_init_trace");
@@ -109,14 +109,14 @@ int gpfswrap_set_lease(int fd, unsigned int type)
 	return gpfs_set_lease_fn(fd, type);
 }
 
-int gpfswrap_getacl(const char *pathname, int flags, void *acl)
+int gpfswrap_fgetacl(int fd, int flags, void *acl)
 {
-	if (gpfs_getacl_fn == NULL) {
+	if (gpfs_fgetacl_fn == NULL) {
 		errno = ENOSYS;
 		return -1;
 	}
 
-	return gpfs_getacl_fn(pathname, flags, acl);
+	return gpfs_fgetacl_fn(fd, flags, acl);
 }
 
 int gpfswrap_putacl(const char *pathname, int flags, void *acl)
@@ -163,17 +163,6 @@ int gpfswrap_set_winattrs(int fd, int flags, struct gpfs_winattr *attrs)
 	return gpfs_set_winattrs_fn(fd, flags, attrs);
 }
 
-int gpfswrap_get_winattrs_path(const char *pathname,
-			       struct gpfs_winattr *attrs)
-{
-	if (gpfs_get_winattrs_path_fn == NULL) {
-		errno = ENOSYS;
-		return -1;
-	}
-
-	return gpfs_get_winattrs_path_fn(pathname, attrs);
-}
-
 int gpfswrap_get_winattrs(int fd, struct gpfs_winattr *attrs)
 {
 	if (gpfs_get_winattrs_fn == NULL) {
@@ -204,15 +193,24 @@ int gpfswrap_lib_init(int flags)
 	return gpfs_lib_init_fn(flags);
 }
 
-int gpfswrap_set_times_path(char *pathname, int flags,
-			    gpfs_timestruc_t times[4])
+int gpfswrap_set_times(int fd, int flags, gpfs_timestruc_t times[4])
+{
+	if (gpfs_set_times_fn == NULL) {
+		errno = ENOSYS;
+		return -1;
+	}
+
+	return gpfs_set_times_fn(fd, flags, times);
+}
+
+int gpfswrap_set_times_path(char *path, int flags, gpfs_timestruc_t times[4])
 {
 	if (gpfs_set_times_path_fn == NULL) {
 		errno = ENOSYS;
 		return -1;
 	}
 
-	return gpfs_set_times_path_fn(pathname, flags, times);
+	return gpfs_set_times_path_fn(path, flags, times);
 }
 
 int gpfswrap_quotactl(const char *pathname, int cmd, int id, void *bufp)

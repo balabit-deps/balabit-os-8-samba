@@ -36,7 +36,8 @@
 #include <sys/param.h>
 #endif
 
-#ifdef HAVE_SYS_MOUNT_H
+/* This include is required on UNIX (*BSD, AIX, ...) for statfs() */
+#if !defined(LINUX) && defined(HAVE_SYS_MOUNT_H)
 #include <sys/mount.h>
 #endif
 
@@ -44,6 +45,7 @@
 #include <mntent.h>
 #endif
 
+/* This include is required on Linux for statfs() */
 #ifdef HAVE_SYS_VFS_H
 #include <sys/vfs.h>
 #endif
@@ -197,6 +199,10 @@
 
 #ifdef _WIN32
 #define mkdir(d,m) _mkdir(d)
+#endif
+
+#ifdef DISABLE_OPATH
+#undef O_PATH
 #endif
 
 /*

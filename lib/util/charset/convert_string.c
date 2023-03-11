@@ -21,8 +21,11 @@
    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 */
-#include "includes.h"
+#include "replace.h"
 #include "system/iconv.h"
+#include "charset.h"
+#include "lib/util/debug.h"
+#include "lib/util/fault.h"
 
 /**
  * @file
@@ -432,8 +435,8 @@ bool convert_string_talloc_handle(TALLOC_CTX *ctx, struct smb_iconv_handle *ic,
 				break;
 			case E2BIG:
 				reason = "output buffer is too small";
-				DBG_NOTICE("Conversion error: %s\n",
-					   reason);
+				DBG_ERR("Conversion error: %s\n",
+					reason);
 				break;
 			case EILSEQ:
 				reason="Illegal multibyte sequence";

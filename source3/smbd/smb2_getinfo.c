@@ -303,13 +303,41 @@ static struct tevent_req *smbd_smb2_getinfo_send(TALLOC_CTX *mem_ctx,
 
 		ZERO_STRUCT(write_time_ts);
 
+		/*
+		 * MS-SMB2 3.3.5.20.1 "Handling SMB2_0_INFO_FILE"
+		 *
+		 * FileBasicInformation, FileAllInformation,
+		 * FileNetworkOpenInformation, FileAttributeTagInformation
+		 * require FILE_READ_ATTRIBUTES.
+		 *
+		 * FileFullEaInformation requires FILE_READ_EA.
+		 */
 		switch (in_file_info_class) {
-		case 0x0F:/* RAW_FILEINFO_SMB2_ALL_EAS */
-			file_info_level = 0xFF00 | in_file_info_class;
+		case FSCC_FILE_BASIC_INFORMATION:
+		case FSCC_FILE_ALL_INFORMATION:
+		case FSCC_FILE_NETWORK_OPEN_INFORMATION:
+		case FSCC_FILE_ATTRIBUTE_TAG_INFORMATION:
+			if (!(fsp->access_mask & SEC_FILE_READ_ATTRIBUTE)) {
+				tevent_req_nterror(req, NT_STATUS_ACCESS_DENIED);
+				return tevent_req_post(req, ev);
+			}
 			break;
 
-		case 0x12:/* RAW_FILEINFO_SMB2_ALL_INFORMATION */
-			file_info_level = 0xFF00 | in_file_info_class;
+		case FSCC_FILE_FULL_EA_INFORMATION:
+			if (!(fsp->access_mask & SEC_FILE_READ_EA)) {
+				tevent_req_nterror(req, NT_STATUS_ACCESS_DENIED);
+				return tevent_req_post(req, ev);
+			}
+			break;
+		}
+
+		switch (in_file_info_class) {
+		case FSCC_FILE_FULL_EA_INFORMATION:
+			file_info_level = SMB2_FILE_FULL_EA_INFORMATION;
+			break;
+
+		case FSCC_FILE_ALL_INFORMATION:
+			file_info_level = SMB2_FILE_ALL_INFORMATION;
 			break;
 
 		default:
@@ -334,7 +362,7 @@ static struct tevent_req *smbd_smb2_getinfo_send(TALLOC_CTX *mem_ctx,
 
 			/* We know this name is ok, it's already passed the checks. */
 
-		} else if (fsp->fh->fd == -1) {
+		} else if (fsp_get_pathref_fd(fsp) == -1) {
 			/*
 			 * This is actually a QFILEINFO on a directory
 			 * handle (returned from an NT SMB). NT5.0 seems
@@ -374,11 +402,11 @@ static struct tevent_req *smbd_smb2_getinfo_send(TALLOC_CTX *mem_ctx,
 			 * Original code - this is an open file.
 			 */
 
-			if (SMB_VFS_FSTAT(fsp, &fsp->fsp_name->st) != 0) {
+			status = vfs_stat_fsp(fsp);
+			if (!NT_STATUS_IS_OK(status)) {
 				DEBUG(3, ("smbd_smb2_getinfo_send: "
 					  "fstat of %s failed (%s)\n",
-					  fsp_fnum_dbg(fsp), strerror(errno)));
-				status = map_nt_error_from_unix(errno);
+					  fsp_fnum_dbg(fsp), nt_errstr(status)));
 				tevent_req_nterror(req, status);
 				return tevent_req_post(req, ev);
 			}

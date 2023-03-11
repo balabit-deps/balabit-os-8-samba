@@ -25,7 +25,8 @@
 #include "system/capability.h"
 #include "system/passwd.h"
 #include "system/filesys.h"
-#include "../lib/util/setid.h"
+#include "lib/util/setid.h"
+#include "lib/util/time.h"
 
 #ifdef HAVE_SYS_SYSCTL_H
 #include <sys/sysctl.h>
@@ -120,124 +121,6 @@ int sys_fcntl_int(int fd, int cmd, int arg)
 		ret = fcntl(fd, cmd, arg);
 	} while (ret == -1 && errno == EINTR);
 	return ret;
-}
-
-/****************************************************************************
- Get/Set all the possible time fields from a stat struct as a timespec.
-****************************************************************************/
-
-static struct timespec get_atimespec(const struct stat *pst)
-{
-#if !defined(HAVE_STAT_HIRES_TIMESTAMPS)
-	struct timespec ret;
-
-	/* Old system - no ns timestamp. */
-	ret.tv_sec = pst->st_atime;
-	ret.tv_nsec = 0;
-	return ret;
-#else
-#if defined(HAVE_STRUCT_STAT_ST_MTIM_TV_NSEC)
-	struct timespec ret;
-	ret.tv_sec = pst->st_atim.tv_sec;
-	ret.tv_nsec = pst->st_atim.tv_nsec;
-	return ret;
-#elif defined(HAVE_STRUCT_STAT_ST_MTIMENSEC)
-	struct timespec ret;
-	ret.tv_sec = pst->st_atime;
-	ret.tv_nsec = pst->st_atimensec;
-	return ret;
-#elif defined(HAVE_STRUCT_STAT_ST_MTIME_N)
-	struct timespec ret;
-	ret.tv_sec = pst->st_atime;
-	ret.tv_nsec = pst->st_atime_n;
-	return ret;
-#elif defined(HAVE_STRUCT_STAT_ST_UMTIME)
-	struct timespec ret;
-	ret.tv_sec = pst->st_atime;
-	ret.tv_nsec = pst->st_uatime * 1000;
-	return ret;
-#elif defined(HAVE_STRUCT_STAT_ST_MTIMESPEC_TV_NSEC)
-	return pst->st_atimespec;
-#else
-#error	CONFIGURE_ERROR_IN_DETECTING_TIMESPEC_IN_STAT
-#endif
-#endif
-}
-
-static struct timespec get_mtimespec(const struct stat *pst)
-{
-#if !defined(HAVE_STAT_HIRES_TIMESTAMPS)
-	struct timespec ret;
-
-	/* Old system - no ns timestamp. */
-	ret.tv_sec = pst->st_mtime;
-	ret.tv_nsec = 0;
-	return ret;
-#else
-#if defined(HAVE_STRUCT_STAT_ST_MTIM_TV_NSEC)
-	struct timespec ret;
-	ret.tv_sec = pst->st_mtim.tv_sec;
-	ret.tv_nsec = pst->st_mtim.tv_nsec;
-	return ret;
-#elif defined(HAVE_STRUCT_STAT_ST_MTIMENSEC)
-	struct timespec ret;
-	ret.tv_sec = pst->st_mtime;
-	ret.tv_nsec = pst->st_mtimensec;
-	return ret;
-#elif defined(HAVE_STRUCT_STAT_ST_MTIME_N)
-	struct timespec ret;
-	ret.tv_sec = pst->st_mtime;
-	ret.tv_nsec = pst->st_mtime_n;
-	return ret;
-#elif defined(HAVE_STRUCT_STAT_ST_UMTIME)
-	struct timespec ret;
-	ret.tv_sec = pst->st_mtime;
-	ret.tv_nsec = pst->st_umtime * 1000;
-	return ret;
-#elif defined(HAVE_STRUCT_STAT_ST_MTIMESPEC_TV_NSEC)
-	return pst->st_mtimespec;
-#else
-#error	CONFIGURE_ERROR_IN_DETECTING_TIMESPEC_IN_STAT
-#endif
-#endif
-}
-
-static struct timespec get_ctimespec(const struct stat *pst)
-{
-#if !defined(HAVE_STAT_HIRES_TIMESTAMPS)
-	struct timespec ret;
-
-	/* Old system - no ns timestamp. */
-	ret.tv_sec = pst->st_ctime;
-	ret.tv_nsec = 0;
-	return ret;
-#else
-#if defined(HAVE_STRUCT_STAT_ST_MTIM_TV_NSEC)
-	struct timespec ret;
-	ret.tv_sec = pst->st_ctim.tv_sec;
-	ret.tv_nsec = pst->st_ctim.tv_nsec;
-	return ret;
-#elif defined(HAVE_STRUCT_STAT_ST_MTIMENSEC)
-	struct timespec ret;
-	ret.tv_sec = pst->st_ctime;
-	ret.tv_nsec = pst->st_ctimensec;
-	return ret;
-#elif defined(HAVE_STRUCT_STAT_ST_MTIME_N)
-	struct timespec ret;
-	ret.tv_sec = pst->st_ctime;
-	ret.tv_nsec = pst->st_ctime_n;
-	return ret;
-#elif defined(HAVE_STRUCT_STAT_ST_UMTIME)
-	struct timespec ret;
-	ret.tv_sec = pst->st_ctime;
-	ret.tv_nsec = pst->st_uctime * 1000;
-	return ret;
-#elif defined(HAVE_STRUCT_STAT_ST_MTIMESPEC_TV_NSEC)
-	return pst->st_ctimespec;
-#else
-#error	CONFIGURE_ERROR_IN_DETECTING_TIMESPEC_IN_STAT
-#endif
-#endif
 }
 
 /****************************************************************************
@@ -428,6 +311,58 @@ void init_stat_ex_from_stat (struct stat_ex *dst,
 }
 
 /*******************************************************************
+ Create a clock-derived itime (invented) time. Used to generate
+ the fileid.
+********************************************************************/
+
+void create_clock_itime(struct stat_ex *dst)
+{
+	NTTIME tval;
+	struct timespec itime;
+	uint64_t mixin;
+	uint8_t rval;
+
+	/* Start with the system clock. */
+	itime = timespec_current();
+
+	/* Convert to NTTIME. */
+	tval = unix_timespec_to_nt_time(itime);
+
+	/*
+	 * In case the system clock is poor granularity
+	 * (happens on VM or docker images) then mix in
+	 * 8 bits of randomness.
+	 */
+	generate_random_buffer((unsigned char *)&rval, 1);
+	mixin = rval;
+
+	/*
+	 * Shift up by 55 bits. This gives us approx 114 years
+	 * of headroom.
+	 */
+	mixin <<= 55;
+
+	/* And OR into the nttime. */
+	tval |= mixin;
+
+	/*
+	 * Convert to a unix timespec, ignoring any
+	 * constraints on seconds being higher than
+	 * TIME_T_MAX or lower than TIME_T_MIN. These
+	 * are only needed to allow unix display time functions
+	 * to work correctly, and this is being used to
+	 * generate a fileid. All we care about is the
+	 * NTTIME being valid across all NTTIME ranges
+	 * (which we carefully ensured above).
+	 */
+
+	itime = nt_time_to_unix_timespec_raw(tval);
+
+	/* And set as a generated itime. */
+	update_stat_ex_itime(dst, itime);
+}
+
+/*******************************************************************
 A stat() wrapper.
 ********************************************************************/
 
@@ -484,6 +419,32 @@ int sys_lstat(const char *fname,SMB_STRUCT_STAT *sbuf,
 		init_stat_ex_from_stat(sbuf, &statbuf, fake_dir_create_times);
 	}
 	return ret;
+}
+
+/*******************************************************************
+ An fstatat() wrapper.
+********************************************************************/
+
+int sys_fstatat(int fd,
+		const char *pathname,
+		SMB_STRUCT_STAT *sbuf,
+		int flags,
+		bool fake_dir_create_times)
+{
+	int ret;
+	struct stat statbuf;
+
+	ret = fstatat(fd, pathname, &statbuf, flags);
+	if (ret != 0) {
+		return -1;
+	}
+
+	/* we always want directories to appear zero size */
+	if (S_ISDIR(statbuf.st_mode)) {
+		statbuf.st_size = 0;
+	}
+	init_stat_ex_from_stat(sbuf, &statbuf, fake_dir_create_times);
+	return 0;
 }
 
 /*******************************************************************
@@ -704,8 +665,9 @@ char *sys_getwd(void)
 static bool set_process_capability(enum smbd_capability capability,
 				   bool enable)
 {
-	cap_value_t cap_vals[2] = {0};
-	int num_cap_vals = 0;
+	/* "5" is the number of "num_cap_vals++" below */
+	cap_value_t cap_vals[5] = {0};
+	size_t num_cap_vals = 0;
 
 	cap_t cap;
 
@@ -730,6 +692,12 @@ static bool set_process_capability(enum smbd_capability capability,
 	}
 
 	switch (capability) {
+		/*
+		 * WARNING: If you add any #ifdef for a fresh
+		 * capability, bump up the array size in the
+		 * declaration of cap_vals[] above just to be
+		 * trivially safe to never overwrite cap_vals[].
+		 */
 		case KERNEL_OPLOCK_CAPABILITY:
 #ifdef CAP_NETWORK_MGT
 			/* IRIX has CAP_NETWORK_MGT for oplocks. */
@@ -755,8 +723,6 @@ static bool set_process_capability(enum smbd_capability capability,
 			cap_vals[num_cap_vals++] = CAP_DAC_OVERRIDE;
 #endif
 	}
-
-	SMB_ASSERT(num_cap_vals <= ARRAY_SIZE(cap_vals));
 
 	if (num_cap_vals == 0) {
 		cap_free(cap);
@@ -842,13 +808,31 @@ void sys_srandom(unsigned int seed)
  Returns equivalent to NGROUPS_MAX - using sysconf if needed.
 ****************************************************************************/
 
-int groups_max(void)
+int setgroups_max(void)
 {
 #if defined(SYSCONF_SC_NGROUPS_MAX)
 	int ret = sysconf(_SC_NGROUPS_MAX);
 	return (ret == -1) ? NGROUPS_MAX : ret;
 #else
 	return NGROUPS_MAX;
+#endif
+}
+
+int getgroups_max(void)
+{
+#if defined(DARWINOS)
+	/*
+	 * On MacOS sysconf(_SC_NGROUPS_MAX) returns 16 due to MacOS's group
+	 * nesting. However, The initgroups() manpage states the following:
+	 * "Note that OS X supports group membership in an unlimited number
+	 * of groups. The OS X kernel uses the group list stored in the process
+	 * credentials only as an initial cache.  Additional group memberships
+	 * are determined by communication between the operating system and the
+	 * opendirectoryd daemon."
+	 */
+	return INT_MAX;
+#else
+	return setgroups_max();
 #endif
 }
 
@@ -917,7 +901,7 @@ static int sys_broken_setgroups(int setlen, gid_t *gidset)
 	if (setlen == 0)
 		return 0 ;
 
-	if (setlen < 0 || setlen > groups_max()) {
+	if (setlen < 0 || setlen > setgroups_max()) {
 		errno = EINVAL; 
 		return -1;   
 	}
@@ -968,7 +952,7 @@ static int sys_bsd_setgroups(gid_t primary_gid, int setlen, const gid_t *gidset)
 	int ret;
 
 	/* setgroups(2) will fail with EINVAL if we pass too many groups. */
-	max = groups_max();
+	max = setgroups_max();
 
 	/* No group list, just make sure we are setting the efective GID. */
 	if (setlen == 0) {
@@ -1142,3 +1126,66 @@ int sys_get_number_of_cores(void)
 	return ret;
 }
 #endif
+
+static struct proc_fd_pattern {
+	const char *pattern;
+	const char *test_path;
+} proc_fd_patterns[] = {
+	/* Linux */
+	{ "/proc/self/fd/%d", "/proc/self/fd/0" },
+	{ NULL, NULL },
+};
+
+static const char *proc_fd_pattern;
+
+bool sys_have_proc_fds(void)
+{
+	static bool checked;
+	static bool have_proc_fds;
+	struct proc_fd_pattern *p = NULL;
+	struct stat sb;
+	int ret;
+
+	if (checked) {
+		return have_proc_fds;
+	}
+
+	for (p = &proc_fd_patterns[0]; p->test_path != NULL; p++) {
+		ret = stat(p->test_path, &sb);
+		if (ret != 0) {
+			continue;
+		}
+		have_proc_fds = true;
+		proc_fd_pattern = p->pattern;
+		break;
+	}
+
+	checked = true;
+	return have_proc_fds;
+}
+
+const char *sys_proc_fd_path(int fd, char *buf, size_t bufsize)
+{
+	int written;
+
+	if (!sys_have_proc_fds()) {
+		return NULL;
+	}
+
+#if defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wformat-nonliteral"
+#endif
+	written = snprintf(buf,
+			   bufsize,
+			   proc_fd_pattern,
+			   fd);
+#if defined(__clang__)
+#pragma clang diagnostic pop
+#endif
+	if (written >= bufsize) {
+		return NULL;
+	}
+
+	return buf;
+}

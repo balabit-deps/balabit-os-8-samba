@@ -32,187 +32,370 @@
 #undef DBGC_CLASS
 #define DBGC_CLASS DBGC_RPC_SRV
 
-NTSTATUS dcesrv_create_ncacn_ip_tcp_sockets(struct dcesrv_endpoint *e,
-					    struct pf_listen_fd *listen_fd,
-					    int *listen_fd_size)
+static NTSTATUS dcesrv_create_ncacn_np_socket(
+	struct dcerpc_binding *b, int *out_fd)
 {
-	TALLOC_CTX *tmp_ctx;
-	NTSTATUS status = NT_STATUS_UNSUCCESSFUL;
-	uint16_t port = 0;
-	char port_str[6];
-	const char *endpoint = NULL;
+	char *np_dir = NULL;
+	int fd = -1;
+	NTSTATUS status;
+	const char *endpoint;
+	char *endpoint_normalized = NULL;
+	char *p = NULL;
 
-	tmp_ctx = talloc_stackframe();
-	if (tmp_ctx == NULL) {
+	endpoint = dcerpc_binding_get_string_option(b, "endpoint");
+	if (endpoint == NULL) {
+		DBG_ERR("Endpoint mandatory for named pipes\n");
+		return NT_STATUS_INVALID_PARAMETER;
+	}
+
+	/* The endpoint string from IDL can be mixed uppercase and case is
+	 * normalized by smbd on connection */
+	endpoint_normalized = strlower_talloc(talloc_tos(), endpoint);
+	if (endpoint_normalized == NULL) {
 		return NT_STATUS_NO_MEMORY;
 	}
 
-	endpoint = dcerpc_binding_get_string_option(e->ep_description,
-						    "endpoint");
+	/* The endpoint string from IDL can be prefixed by \pipe\ */
+	p = endpoint_normalized;
+	if (strncmp(p, "\\pipe\\", 6) == 0) {
+		p += 6;
+	}
+
+	/*
+	 * As lp_ncalrpc_dir() should have 0755, but
+	 * lp_ncalrpc_dir()/np should have 0700, we need to
+	 * create lp_ncalrpc_dir() first.
+	 */
+	if (!directory_create_or_exist(lp_ncalrpc_dir(), 0755)) {
+		status = map_nt_error_from_unix_common(errno);
+		DBG_ERR("Failed to create pipe directory %s - %s\n",
+			lp_ncalrpc_dir(), strerror(errno));
+		goto out;
+	}
+
+	np_dir = talloc_asprintf(talloc_tos(), "%s/np", lp_ncalrpc_dir());
+	if (!np_dir) {
+		status = NT_STATUS_NO_MEMORY;
+		DBG_ERR("Out of memory\n");
+		goto out;
+	}
+
+	if (!directory_create_or_exist_strict(np_dir, geteuid(), 0700)) {
+		status = map_nt_error_from_unix_common(errno);
+		DBG_ERR("Failed to create pipe directory %s - %s\n",
+			np_dir, strerror(errno));
+		goto out;
+	}
+
+	fd = create_pipe_sock(np_dir, p, 0700);
+	if (fd == -1) {
+		status = map_nt_error_from_unix_common(errno);
+		DBG_ERR("Failed to create ncacn_np socket! '%s/%s': %s\n",
+			np_dir, p, strerror(errno));
+		goto out;
+	}
+
+	DBG_DEBUG("Opened pipe socket fd %d for %s\n", fd, p);
+
+	*out_fd = fd;
+
+	status = NT_STATUS_OK;
+
+out:
+	TALLOC_FREE(endpoint_normalized);
+	TALLOC_FREE(np_dir);
+	return status;
+}
+
+/********************************************************************
+ * Start listening on the tcp/ip socket
+ ********************************************************************/
+
+static NTSTATUS dcesrv_create_ncacn_ip_tcp_socket(
+	const struct sockaddr_storage *ifss, uint16_t *port, int *out_fd)
+{
+	int fd = -1;
+
+	if (*port == 0) {
+		static uint16_t low = 0;
+		uint16_t i;
+
+		if (low == 0) {
+			low = lp_rpc_low_port();
+		}
+
+		for (i = low; i <= lp_rpc_high_port(); i++) {
+			fd = open_socket_in(SOCK_STREAM, ifss, i, false);
+			if (fd >= 0) {
+				*port = i;
+				low = i+1;
+				break;
+			}
+		}
+	} else {
+		fd = open_socket_in(SOCK_STREAM, ifss, *port, true);
+	}
+
+	if (fd < 0) {
+		DBG_ERR("Failed to create socket on port %u!\n", *port);
+		return map_nt_error_from_unix(-fd);
+	}
+
+	/* ready to listen */
+	set_socket_options(fd, "SO_KEEPALIVE");
+	set_socket_options(fd, lp_socket_options());
+
+	DBG_DEBUG("Opened ncacn_ip_tcp socket fd %d for port %u\n", fd, *port);
+
+	*out_fd = fd;
+
+	return NT_STATUS_OK;
+}
+
+static NTSTATUS dcesrv_create_ncacn_ip_tcp_sockets(
+	struct dcerpc_binding *b,
+	TALLOC_CTX *mem_ctx,
+	size_t *pnum_fds,
+	int **pfds)
+{
+	uint16_t port = 0;
+	char port_str[11];
+	const char *endpoint = NULL;
+	size_t i = 0, num_fds;
+	int *fds = NULL;
+	struct samba_sockaddr *addrs = NULL;
+	NTSTATUS status = NT_STATUS_INVALID_PARAMETER;
+	bool ok;
+
+	endpoint = dcerpc_binding_get_string_option(b, "endpoint");
 	if (endpoint != NULL) {
 		port = atoi(endpoint);
 	}
 
 	if (lp_interfaces() && lp_bind_interfaces_only()) {
-		uint32_t num_ifs = iface_count();
-		uint32_t i;
+		num_fds = iface_count();
+	} else {
+		num_fds = 1;
+#ifdef HAVE_IPV6
+		num_fds += 1;
+#endif
+	}
 
-		/*
-		 * We have been given an interfaces line, and been told to only
-		 * bind to those interfaces. Create a socket per interface and
-		 * bind to only these.
-		 */
+	addrs = talloc_array(mem_ctx, struct samba_sockaddr, num_fds);
+	if (addrs == NULL) {
+		status = NT_STATUS_NO_MEMORY;
+		goto fail;
+	}
+	fds = talloc_array(mem_ctx, int, num_fds);
+	if (fds == NULL) {
+		status = NT_STATUS_NO_MEMORY;
+		goto fail;
+	}
 
-		/* Now open a listen socket for each of the interfaces. */
-		for (i = 0; i < num_ifs; i++) {
+	/*
+	 * Fill "addrs"
+	 */
+
+	if (lp_interfaces() && lp_bind_interfaces_only()) {
+		for (i=0; i<num_fds; i++) {
 			const struct sockaddr_storage *ifss =
-					iface_n_sockaddr_storage(i);
-			int fd = -1;
+				iface_n_sockaddr_storage(i);
 
-			status = dcesrv_create_ncacn_ip_tcp_socket(ifss,
-								   &port,
-								   &fd);
-			if (!NT_STATUS_IS_OK(status)) {
-				goto done;
+			ok = sockaddr_storage_to_samba_sockaddr(
+				&addrs[i], ifss);
+			if (!ok) {
+				i = 0; /* nothing to close */
+				goto fail;
 			}
-			listen_fd[*listen_fd_size].fd = fd;
-			listen_fd[*listen_fd_size].fd_data = e;
-			(*listen_fd_size)++;
 		}
 	} else {
-		const char *sock_addr;
-		const char *sock_ptr;
-		char *sock_tok;
+		struct sockaddr_storage ss = { .ss_family = 0 };
 
 #ifdef HAVE_IPV6
-		sock_addr = "::,0.0.0.0";
-#else
-		sock_addr = "0.0.0.0";
-#endif
-
-		for (sock_ptr = sock_addr;
-		     next_token_talloc(talloc_tos(), &sock_ptr, &sock_tok, " \t,");
-		    ) {
-			struct sockaddr_storage ss;
-			int fd = -1;
-
-			/* open an incoming socket */
-			if (!interpret_string_addr(&ss,
-						   sock_tok,
-						   AI_NUMERICHOST|AI_PASSIVE)) {
-				continue;
-			}
-
-			status = dcesrv_create_ncacn_ip_tcp_socket(&ss,
-								   &port,
-								   &fd);
-			if (!NT_STATUS_IS_OK(status)) {
-				goto done;
-			}
-			listen_fd[*listen_fd_size].fd = fd;
-			listen_fd[*listen_fd_size].fd_data = e;
-			(*listen_fd_size)++;
+		ok = interpret_string_addr(
+			&ss, "::", AI_NUMERICHOST|AI_PASSIVE);
+		if (!ok) {
+			goto fail;
 		}
+		ok = sockaddr_storage_to_samba_sockaddr(&addrs[0], &ss);
+		if (!ok) {
+			goto fail;
+		}
+#endif
+		ok = interpret_string_addr(
+			&ss, "0.0.0.0", AI_NUMERICHOST|AI_PASSIVE);
+		if (!ok) {
+			goto fail;
+		}
+
+		/* num_fds set above depending on HAVE_IPV6 */
+		ok = sockaddr_storage_to_samba_sockaddr(
+			&addrs[num_fds-1], &ss);
+		if (!ok) {
+			goto fail;
+		}
+	}
+
+	for (i=0; i<num_fds; i++) {
+		status = dcesrv_create_ncacn_ip_tcp_socket(
+			&addrs[i].u.ss, &port, &fds[i]);
+		if (!NT_STATUS_IS_OK(status)) {
+			goto fail;
+		}
+		samba_sockaddr_set_port(&addrs[i], port);
 	}
 
 	/* Set the port in the endpoint */
-	snprintf(port_str, sizeof(port_str), "%u", port);
+	snprintf(port_str, sizeof(port_str), "%"PRIu16, port);
 
-	status = dcerpc_binding_set_string_option(e->ep_description,
-						  "endpoint", port_str);
+	status = dcerpc_binding_set_string_option(b, "endpoint", port_str);
 	if (!NT_STATUS_IS_OK(status)) {
 		DBG_ERR("Failed to set binding endpoint '%s': %s\n",
 			port_str, nt_errstr(status));
-		goto done;
+		goto fail;
 	}
 
-	status = NT_STATUS_OK;
-done:
-	talloc_free(tmp_ctx);
+	TALLOC_FREE(addrs);
+
+	*pfds = fds;
+	*pnum_fds = num_fds;
+
+	return NT_STATUS_OK;
+
+fail:
+	while (i > 0) {
+		close(fds[i-1]);
+		i -= 1;
+	}
+	TALLOC_FREE(fds);
+	TALLOC_FREE(addrs);
 	return status;
 }
 
-NTSTATUS dcesrv_setup_ncacn_ip_tcp_sockets(struct tevent_context *ev_ctx,
-					   struct messaging_context *msg_ctx,
-					   struct dcesrv_context *dce_ctx,
-					   struct dcesrv_endpoint *e,
-					   dcerpc_ncacn_termination_fn t_fn,
-					   void *t_data)
+/********************************************************************
+ * Start listening on the ncalrpc socket
+ ********************************************************************/
+
+static NTSTATUS dcesrv_create_ncalrpc_socket(
+	struct dcerpc_binding *b, int *out_fd)
 {
-	TALLOC_CTX *tmp_ctx;
+	int fd = -1;
+	const char *endpoint = NULL;
 	NTSTATUS status;
 
-	tmp_ctx = talloc_stackframe();
-	if (tmp_ctx == NULL) {
-		return NT_STATUS_NO_MEMORY;
-	}
-
-	if (lp_interfaces() && lp_bind_interfaces_only()) {
-		uint32_t num_ifs = iface_count();
-		uint32_t i;
-
+	endpoint = dcerpc_binding_get_string_option(b, "endpoint");
+	if (endpoint == NULL) {
 		/*
-		 * We have been given an interfaces line, and been told to only
-		 * bind to those interfaces. Create a socket per interface and
-		 * bind to only these.
+		 * No identifier specified: use DEFAULT or SMBD.
+		 *
+		 * When role is AD DC we run two rpc server instances, the one
+		 * started by 'samba' and the one embedded in 'smbd'.
+		 * Avoid listening in DEFAULT socket for NCALRPC as both
+		 * servers will race to accept connections. In this case smbd
+		 * will listen in SMBD socket and rpcint binding handle
+		 * implementation will pick the right socket to use.
+		 *
+		 * TODO: DO NOT hardcode this value anywhere else. Rather,
+		 * specify no endpoint and let the epmapper worry about it.
 		 */
-
-		/* Now open a listen socket for each of the interfaces. */
-		for (i = 0; i < num_ifs; i++) {
-			const struct sockaddr_storage *ifss =
-					iface_n_sockaddr_storage(i);
-
-			status = dcesrv_setup_ncacn_ip_tcp_socket(ev_ctx,
-								  msg_ctx,
-								  dce_ctx,
-								  e,
-								  ifss,
-								  t_fn,
-								  t_data);
-			if (!NT_STATUS_IS_OK(status)) {
-				goto done;
-			}
+		if (lp_server_role() == ROLE_ACTIVE_DIRECTORY_DC) {
+			endpoint = "SMBD";
+		} else {
+			endpoint = "DEFAULT";
 		}
-	} else {
-		const char *sock_addr;
-		const char *sock_ptr;
-		char *sock_tok;
-
-#ifdef HAVE_IPV6
-		sock_addr = "::,0.0.0.0";
-#else
-		sock_addr = "0.0.0.0";
-#endif
-
-		for (sock_ptr = sock_addr;
-		     next_token_talloc(talloc_tos(), &sock_ptr, &sock_tok, " \t,");
-		    ) {
-			struct sockaddr_storage ss;
-
-			/* open an incoming socket */
-			if (!interpret_string_addr(&ss,
-						   sock_tok,
-						   AI_NUMERICHOST|AI_PASSIVE)) {
-				continue;
-			}
-
-			status = dcesrv_setup_ncacn_ip_tcp_socket(ev_ctx,
-								  msg_ctx,
-								  dce_ctx,
-								  e,
-								  &ss,
-								  t_fn,
-								  t_data);
-			if (!NT_STATUS_IS_OK(status)) {
-				goto done;
-			}
+		status = dcerpc_binding_set_string_option(
+			b, "endpoint", endpoint);
+		if (!NT_STATUS_IS_OK(status)) {
+			DBG_ERR("Failed to set ncalrpc 'endpoint' binding "
+				"string option to '%s': %s\n",
+				endpoint, nt_errstr(status));
+			return status;
 		}
 	}
 
-	status = NT_STATUS_OK;
-done:
-	talloc_free(tmp_ctx);
+	if (!directory_create_or_exist(lp_ncalrpc_dir(), 0755)) {
+		status = map_nt_error_from_unix_common(errno);
+		DBG_ERR("Failed to create ncalrpc directory '%s': %s\n",
+			lp_ncalrpc_dir(), strerror(errno));
+		goto out;
+	}
+
+	fd = create_pipe_sock(lp_ncalrpc_dir(), endpoint, 0755);
+	if (fd == -1) {
+		status = map_nt_error_from_unix_common(errno);
+		DBG_ERR("Failed to create ncalrpc socket '%s/%s': %s\n",
+			lp_ncalrpc_dir(), endpoint, strerror(errno));
+		goto out;
+	}
+
+	DBG_DEBUG("Opened ncalrpc socket fd '%d' for '%s/%s'\n",
+		  fd, lp_ncalrpc_dir(), endpoint);
+
+	*out_fd = fd;
+
+	return NT_STATUS_OK;
+
+out:
 	return status;
+}
+
+NTSTATUS dcesrv_create_binding_sockets(
+	struct dcerpc_binding *b,
+	TALLOC_CTX *mem_ctx,
+	size_t *pnum_fds,
+	int **pfds)
+{
+	enum dcerpc_transport_t transport = dcerpc_binding_get_transport(b);
+	size_t i, num_fds = 1;
+	int *fds = NULL;
+	NTSTATUS status;
+
+	if ((transport == NCALRPC) || (transport == NCACN_NP)) {
+		fds = talloc(mem_ctx, int);
+		if (fds == NULL) {
+			return NT_STATUS_NO_MEMORY;
+		}
+	}
+
+	switch(transport) {
+	case NCALRPC:
+		status = dcesrv_create_ncalrpc_socket(b, fds);
+		break;
+	case NCACN_NP:
+		status = dcesrv_create_ncacn_np_socket(b, fds);
+		break;
+	case NCACN_IP_TCP:
+		status = dcesrv_create_ncacn_ip_tcp_sockets(
+			b, talloc_tos(), &num_fds, &fds);
+		break;
+	default:
+		status = NT_STATUS_NOT_SUPPORTED;
+		break;
+	}
+
+	if (!NT_STATUS_IS_OK(status)) {
+		TALLOC_FREE(fds);
+		return status;
+	}
+
+	for (i=0; i<num_fds; i++) {
+		bool ok = smb_set_close_on_exec(fds[i]);
+		if (!ok) {
+			status = map_nt_error_from_unix(errno);
+			break;
+		}
+	}
+	if (i < num_fds) {
+		for (i=0; i<num_fds; i++) {
+			close(fds[i]);
+		}
+		TALLOC_FREE(fds);
+		return status;
+	}
+
+	*pfds = fds;
+	*pnum_fds = num_fds;
+	return NT_STATUS_OK;
 }
 
 /* vim: set ts=8 sw=8 noet cindent syntax=c.doxygen: */

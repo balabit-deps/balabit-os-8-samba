@@ -69,6 +69,7 @@ apt-get -y install \
     libsystemd-dev \
     libtasn1-bin \
     libtasn1-dev \
+    libtracker-sparql-2.0-dev \
     libunwind-dev \
     lmdb-utils \
     locales \
@@ -93,6 +94,7 @@ apt-get -y install \
     python3-matplotlib \
     python3-pexpect \
     python3-pyasn1 \
+    python3-setproctitle \
     rng-tools \
     rsync \
     sed \

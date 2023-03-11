@@ -143,7 +143,12 @@ void ndr_print_winbindd_domain(struct ndr_print *ndr,
 	ndr_print_time_t(ndr, "startup_time", r->startup_time);
 	ndr_print_bool(ndr, "startup", r->startup);
 	ndr_print_winbindd_methods(ndr, "backend", r->backend);
-	ndr_print_ptr(ndr, "private_data", r->private_data);
+	ndr_print_ptr(ndr,
+		      "backend_data.samr_pipes",
+		      r->backend_data.samr_pipes);
+	ndr_print_ptr(ndr,
+		      "backend_data.ads_conn",
+		      r->backend_data.ads_conn);
 	ndr_print_string(ndr, "dcname", r->dcname);
 	ndr_print_sockaddr_storage(ndr, "dcaddr", &r->dcaddr);
 	ndr_print_time_t(ndr, "last_seq_check", r->last_seq_check);
@@ -153,7 +158,6 @@ void ndr_print_winbindd_domain(struct ndr_print *ndr,
 	for (i=0; i<lp_winbind_max_domain_connections(); i++) {
 		ndr_print_winbindd_child(ndr, "children", &r->children[i]);
 	}
-	ndr_print_uint32(ndr, "check_online_timeout", r->check_online_timeout);
 	ndr_print_ptr(ndr, "check_online_event", r->check_online_event);
 	ndr->depth--;
 }

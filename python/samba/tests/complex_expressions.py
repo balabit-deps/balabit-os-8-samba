@@ -16,7 +16,6 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 
-from __future__ import print_function
 import optparse
 import samba
 import samba.getopt as options
@@ -114,7 +113,7 @@ class ComplexExpressionTests(TestCase):
 
         for ldap_object in ldap_objects:
             # It's useful to keep appropriate python types in the ldap_object
-            # dict but smdb's 'add' function expects strings.
+            # dict but samdb's 'add' function expects strings.
             stringed_ldap_object = {k: str(v)
                                     for (k, v) in ldap_object.items()}
             try:

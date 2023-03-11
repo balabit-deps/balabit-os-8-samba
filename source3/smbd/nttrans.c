@@ -630,7 +630,6 @@ void reply_ntcreate_and_X(struct smb_request *req)
 				fname,
 				ucf_flags,
 				0,
-				NULL,
 				&smb_fname);
 
 	TALLOC_FREE(case_state);
@@ -656,7 +655,6 @@ void reply_ntcreate_and_X(struct smb_request *req)
 	status = SMB_VFS_CREATE_FILE(
 		conn,					/* conn */
 		req,					/* req */
-		&conn->cwd_fsp,				/* dirfsp */
 		smb_fname,				/* fname */
 		access_mask,				/* access_mask */
 		share_access,				/* share_access */
@@ -749,7 +747,7 @@ void reply_ntcreate_and_X(struct smb_request *req)
 	}
 	p += 4;
 
-	fattr = dos_mode(conn, smb_fname);
+	fattr = fdos_mode(fsp);
 	if (fattr == 0) {
 		fattr = FILE_ATTRIBUTE_NORMAL;
 	}
@@ -789,14 +787,14 @@ void reply_ntcreate_and_X(struct smb_request *req)
 		if (lp_ea_support(SNUM(conn))) {
 			size_t num_names = 0;
 			/* Do we have any EA's ? */
-			status = get_ea_names_from_file(
-			    ctx, conn, fsp, smb_fname, NULL, &num_names);
+			status = get_ea_names_from_fsp(
+			    ctx, smb_fname->fsp, NULL, &num_names);
 			if (NT_STATUS_IS_OK(status) && num_names) {
 				file_status &= ~NO_EAS;
 			}
 		}
 
-		status = vfs_streaminfo(conn, NULL, smb_fname, ctx,
+		status = vfs_fstreaminfo(smb_fname->fsp, ctx,
 			&num_streams, &streams);
 		/* There is always one stream, ::$DATA. */
 		if (NT_STATUS_IS_OK(status) && num_streams > 1) {
@@ -813,9 +811,7 @@ void reply_ntcreate_and_X(struct smb_request *req)
 		p += 25;
 		if (fsp->fsp_flags.is_directory ||
 		    fsp->fsp_flags.can_write ||
-		    can_write_to_file(conn,
-				conn->cwd_fsp,
-				smb_fname))
+		    can_write_to_fsp(fsp))
 		{
 			perms = FILE_GENERIC_ALL;
 		} else {
@@ -949,7 +945,8 @@ static void do_nt_transact_create_pipe(connection_struct *conn,
  same.
 *********************************************************************/
 
-static void canonicalize_inheritance_bits(struct security_descriptor *psd)
+static void canonicalize_inheritance_bits(struct files_struct *fsp,
+					  struct security_descriptor *psd)
 {
 	bool set_auto_inherited = false;
 
@@ -965,6 +962,11 @@ static void canonicalize_inheritance_bits(struct security_descriptor *psd)
 	 *
 	 * for details.
 	 */
+
+	if (!lp_acl_flag_inherited_canonicalization(SNUM(fsp->conn))) {
+		psd->type &= ~SEC_DESC_DACL_AUTO_INHERIT_REQ;
+		return;
+	}
 
 	if ((psd->type & (SEC_DESC_DACL_AUTO_INHERITED|SEC_DESC_DACL_AUTO_INHERIT_REQ))
 			== (SEC_DESC_DACL_AUTO_INHERITED|SEC_DESC_DACL_AUTO_INHERIT_REQ)) {
@@ -984,6 +986,7 @@ static void canonicalize_inheritance_bits(struct security_descriptor *psd)
 NTSTATUS set_sd(files_struct *fsp, struct security_descriptor *psd,
 		       uint32_t security_info_sent)
 {
+	files_struct *sd_fsp = fsp;
 	NTSTATUS status;
 
 	if (!CAN_WRITE(fsp->conn)) {
@@ -994,10 +997,11 @@ NTSTATUS set_sd(files_struct *fsp, struct security_descriptor *psd,
 		return NT_STATUS_OK;
 	}
 
-	if (S_ISLNK(fsp->fsp_name->st.st_ex_mode)) {
-		DEBUG(10, ("ACL set on symlink %s denied.\n",
-			fsp_str_dbg(fsp)));
-		return NT_STATUS_ACCESS_DENIED;
+	status = refuse_symlink_fsp(fsp);
+	if (!NT_STATUS_IS_OK(status)) {
+		DBG_DEBUG("ACL set on symlink %s denied.\n",
+			fsp_str_dbg(fsp));
+		return status;
 	}
 
 	if (psd->owner_sid == NULL) {
@@ -1053,14 +1057,21 @@ NTSTATUS set_sd(files_struct *fsp, struct security_descriptor *psd,
 		}
 	}
 
-	canonicalize_inheritance_bits(psd);
+	canonicalize_inheritance_bits(fsp, psd);
 
 	if (DEBUGLEVEL >= 10) {
 		DEBUG(10,("set_sd for file %s\n", fsp_str_dbg(fsp)));
 		NDR_PRINT_DEBUG(security_descriptor, psd);
 	}
 
-	status = SMB_VFS_FSET_NT_ACL(fsp, security_info_sent, psd);
+	if (fsp->base_fsp != NULL) {
+		/*
+		 * This is a stream handle. Use
+		 * the underlying pathref handle.
+		 */
+		sd_fsp = fsp->base_fsp;
+	}
+	status = SMB_VFS_FSET_NT_ACL(sd_fsp, security_info_sent, psd);
 
 	TALLOC_FREE(psd);
 
@@ -1234,7 +1245,6 @@ static void call_nt_transact_create(connection_struct *conn,
 				fname,
 				ucf_flags,
 				0,
-				NULL,
 				&smb_fname);
 
 	TALLOC_FREE(case_state);
@@ -1339,7 +1349,6 @@ static void call_nt_transact_create(connection_struct *conn,
 	status = SMB_VFS_CREATE_FILE(
 		conn,					/* conn */
 		req,					/* req */
-		&conn->cwd_fsp,				/* dirfsp */
 		smb_fname,				/* fname */
 		access_mask,				/* access_mask */
 		share_access,				/* share_access */
@@ -1429,7 +1438,7 @@ static void call_nt_transact_create(connection_struct *conn,
 	}
 	p += 8;
 
-	fattr = dos_mode(conn, smb_fname);
+	fattr = fdos_mode(fsp);
 	if (fattr == 0) {
 		fattr = FILE_ATTRIBUTE_NORMAL;
 	}
@@ -1469,14 +1478,14 @@ static void call_nt_transact_create(connection_struct *conn,
 		if (lp_ea_support(SNUM(conn))) {
 			size_t num_names = 0;
 			/* Do we have any EA's ? */
-			status = get_ea_names_from_file(
-			    ctx, conn, fsp, smb_fname, NULL, &num_names);
+			status = get_ea_names_from_fsp(
+			    ctx, smb_fname->fsp, NULL, &num_names);
 			if (NT_STATUS_IS_OK(status) && num_names) {
 				file_status &= ~NO_EAS;
 			}
 		}
 
-		status = vfs_streaminfo(conn, NULL, smb_fname, ctx,
+		status = vfs_fstreaminfo(smb_fname->fsp, ctx,
 			&num_streams, &streams);
 		/* There is always one stream, ::$DATA. */
 		if (NT_STATUS_IS_OK(status) && num_streams > 1) {
@@ -1493,9 +1502,7 @@ static void call_nt_transact_create(connection_struct *conn,
 		p += 25;
 		if (fsp->fsp_flags.is_directory ||
 		    fsp->fsp_flags.can_write ||
-		    can_write_to_file(conn,
-				conn->cwd_fsp,
-				smb_fname))
+		    can_write_to_fsp(fsp))
 		{
 			perms = FILE_GENERIC_ALL;
 		} else {
@@ -1546,12 +1553,12 @@ void reply_ntcancel(struct smb_request *req)
  Copy a file.
 ****************************************************************************/
 
-static NTSTATUS copy_internals(TALLOC_CTX *ctx,
-				connection_struct *conn,
-				struct smb_request *req,
-				struct smb_filename *smb_fname_src,
-				struct smb_filename *smb_fname_dst,
-				uint32_t attrs)
+NTSTATUS copy_internals(TALLOC_CTX *ctx,
+			connection_struct *conn,
+			struct smb_request *req,
+			struct smb_filename *smb_fname_src,
+			struct smb_filename *smb_fname_dst,
+			uint32_t attrs)
 {
 	files_struct *fsp1,*fsp2;
 	uint32_t fattr;
@@ -1559,7 +1566,7 @@ static NTSTATUS copy_internals(TALLOC_CTX *ctx,
 	off_t ret=-1;
 	NTSTATUS status = NT_STATUS_OK;
 	struct smb_filename *parent = NULL;
-	bool ok;
+	struct smb_filename *pathref = NULL;
 
 	if (!CAN_WRITE(conn)) {
 		status = NT_STATUS_MEDIA_WRITE_PROTECTED;
@@ -1573,7 +1580,7 @@ static NTSTATUS copy_internals(TALLOC_CTX *ctx,
 	}
 
 	/* Ensure attributes match. */
-	fattr = dos_mode(conn, smb_fname_src);
+	fattr = fdos_mode(smb_fname_src->fsp);
 	if ((fattr & ~attrs) & (FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM)) {
 		status = NT_STATUS_NO_SUCH_FILE;
 		goto out;
@@ -1598,7 +1605,6 @@ static NTSTATUS copy_internals(TALLOC_CTX *ctx,
         status = SMB_VFS_CREATE_FILE(
 		conn,					/* conn */
 		req,					/* req */
-		&conn->cwd_fsp,				/* dirfsp */
 		smb_fname_src,				/* fname */
 		FILE_READ_DATA|FILE_READ_ATTRIBUTES|
 			FILE_READ_EA,			/* access_mask */
@@ -1624,7 +1630,6 @@ static NTSTATUS copy_internals(TALLOC_CTX *ctx,
         status = SMB_VFS_CREATE_FILE(
 		conn,					/* conn */
 		req,					/* req */
-		&conn->cwd_fsp,				/* dirfsp */
 		smb_fname_dst,				/* fname */
 		FILE_WRITE_DATA|FILE_WRITE_ATTRIBUTES|
 			FILE_WRITE_EA,			/* access_mask */
@@ -1669,15 +1674,34 @@ static NTSTATUS copy_internals(TALLOC_CTX *ctx,
 	   creates the file. This isn't the correct thing to do in the copy
 	   case. JRA */
 
-	ok = parent_smb_fname(talloc_tos(),
-			      smb_fname_dst,
-			      &parent,
-			      NULL);
-	if (!ok) {
-		status = NT_STATUS_NO_MEMORY;
+	status = SMB_VFS_PARENT_PATHNAME(conn,
+					 talloc_tos(),
+					 smb_fname_dst,
+					 &parent,
+					 NULL);
+	if (!NT_STATUS_IS_OK(status)) {
 		goto out;
 	}
-	file_set_dosmode(conn, smb_fname_dst, fattr, parent, false);
+	if (smb_fname_dst->fsp == NULL) {
+		status = synthetic_pathref(parent,
+					conn->cwd_fsp,
+					smb_fname_dst->base_name,
+					smb_fname_dst->stream_name,
+					NULL,
+					smb_fname_dst->twrp,
+					smb_fname_dst->flags,
+					&pathref);
+
+		/* should we handle NT_STATUS_OBJECT_NAME_NOT_FOUND specially here ???? */
+		if (!NT_STATUS_IS_OK(status)) {
+			TALLOC_FREE(parent);
+			goto out;
+		}
+		file_set_dosmode(conn, pathref, fattr, parent, false);
+		smb_fname_dst->st.st_ex_mode = pathref->st.st_ex_mode;
+	} else {
+		file_set_dosmode(conn, smb_fname_dst, fattr, parent, false);
+	}
 	TALLOC_FREE(parent);
 
 	if (ret < (off_t)smb_fname_src->st.st_ex_size) {
@@ -1708,8 +1732,6 @@ void reply_ntrename(struct smb_request *req)
 	const char *dst_original_lcomp = NULL;
 	const char *p;
 	NTSTATUS status;
-	bool src_has_wcard = False;
-	bool dest_has_wcard = False;
 	uint32_t attrs;
 	uint32_t ucf_flags_src = ucf_flags_from_smb_request(req);
 	uint32_t ucf_flags_dst = ucf_flags_from_smb_request(req);
@@ -1728,8 +1750,8 @@ void reply_ntrename(struct smb_request *req)
 	rename_type = SVAL(req->vwv+1, 0);
 
 	p = (const char *)req->buf + 1;
-	p += srvstr_get_path_req_wcard(ctx, req, &oldname, p, STR_TERMINATE,
-				       &status, &src_has_wcard);
+	p += srvstr_get_path_req(ctx, req, &oldname, p, STR_TERMINATE,
+				       &status);
 	if (!NT_STATUS_IS_OK(status)) {
 		reply_nterror(req, status);
 		goto out;
@@ -1741,10 +1763,15 @@ void reply_ntrename(struct smb_request *req)
 	}
 
 	p++;
-	p += srvstr_get_path_req_wcard(ctx, req, &newname, p, STR_TERMINATE,
-				       &status, &dest_has_wcard);
+	p += srvstr_get_path_req(ctx, req, &newname, p, STR_TERMINATE,
+				       &status);
 	if (!NT_STATUS_IS_OK(status)) {
 		reply_nterror(req, status);
+		goto out;
+	}
+
+	if (!req->posix_pathnames && ms_has_wild(newname)) {
+		reply_nterror(req, NT_STATUS_OBJECT_PATH_SYNTAX_BAD);
 		goto out;
 	}
 
@@ -1760,45 +1787,17 @@ void reply_ntrename(struct smb_request *req)
 		}
 	}
 
-	/*
-	 * If this is a rename operation, allow wildcards and save the
-	 * destination's last component.
-	 */
-	if (rename_type == RENAME_FLAG_RENAME) {
-		ucf_flags_src |= UCF_COND_ALLOW_WCARD_LCOMP;
-		ucf_flags_dst |= UCF_COND_ALLOW_WCARD_LCOMP;
-	}
-
 	/* rename_internals() calls unix_convert(), so don't call it here. */
 	status = filename_convert(ctx, conn,
 				  oldname,
 				  ucf_flags_src,
 				  0,
-				  NULL,
 				  &smb_fname_old);
 	if (!NT_STATUS_IS_OK(status)) {
 		if (NT_STATUS_EQUAL(status,
 				    NT_STATUS_PATH_NOT_COVERED)) {
 			reply_botherror(req,
 					NT_STATUS_PATH_NOT_COVERED,
-					ERRSRV, ERRbadpath);
-			goto out;
-		}
-		reply_nterror(req, status);
-		goto out;
-	}
-
-	status = filename_convert(ctx, conn,
-				  newname,
-				  ucf_flags_dst,
-				  0,
-				  &dest_has_wcard,
-				  &smb_fname_new);
-	if (!NT_STATUS_IS_OK(status)) {
-		if (NT_STATUS_EQUAL(status,
-				    NT_STATUS_PATH_NOT_COVERED)) {
-			reply_botherror(req,
-				        NT_STATUS_PATH_NOT_COVERED,
 					ERRSRV, ERRbadpath);
 			goto out;
 		}
@@ -1813,6 +1812,23 @@ void reply_ntrename(struct smb_request *req)
 					ucf_flags_dst);
 	if (dst_original_lcomp == NULL) {
 		reply_nterror(req, NT_STATUS_NO_MEMORY);
+		goto out;
+	}
+
+	status = filename_convert(ctx, conn,
+				  newname,
+				  ucf_flags_dst,
+				  0,
+				  &smb_fname_new);
+	if (!NT_STATUS_IS_OK(status)) {
+		if (NT_STATUS_EQUAL(status,
+				    NT_STATUS_PATH_NOT_COVERED)) {
+			reply_botherror(req,
+				        NT_STATUS_PATH_NOT_COVERED,
+					ERRSRV, ERRbadpath);
+			goto out;
+		}
+		reply_nterror(req, status);
 		goto out;
 	}
 
@@ -1841,32 +1857,23 @@ void reply_ntrename(struct smb_request *req)
 						dst_original_lcomp,
 						attrs,
 						false,
-						src_has_wcard,
-						dest_has_wcard,
 						DELETE_ACCESS);
 			break;
 		case RENAME_FLAG_HARD_LINK:
-			if (src_has_wcard || dest_has_wcard) {
-				/* No wildcards. */
-				status = NT_STATUS_OBJECT_PATH_SYNTAX_BAD;
-			} else {
-				status = hardlink_internals(ctx, conn,
-							    req,
-							    false,
-							    smb_fname_old,
-							    smb_fname_new);
-			}
+			status = hardlink_internals(ctx,
+						    conn,
+						    req,
+						    false,
+						    smb_fname_old,
+						    smb_fname_new);
 			break;
 		case RENAME_FLAG_COPY:
-			if (src_has_wcard || dest_has_wcard) {
-				/* No wildcards. */
-				status = NT_STATUS_OBJECT_PATH_SYNTAX_BAD;
-			} else {
-				status = copy_internals(ctx, conn, req,
-							smb_fname_old,
-							smb_fname_new,
-							attrs);
-			}
+			status = copy_internals(ctx,
+						conn,
+						req,
+						smb_fname_old,
+						smb_fname_new,
+						attrs);
 			break;
 		case RENAME_FLAG_MOVE_CLUSTER_INFORMATION:
 			status = NT_STATUS_INVALID_PARAMETER;
@@ -2029,7 +2036,6 @@ static void call_nt_transact_rename(connection_struct *conn,
 	char *params = *ppparams;
 	char *new_name = NULL;
 	files_struct *fsp = NULL;
-	bool dest_has_wcard = False;
 	NTSTATUS status;
 	TALLOC_CTX *ctx = talloc_tos();
 
@@ -2043,25 +2049,23 @@ static void call_nt_transact_rename(connection_struct *conn,
 		return;
 	}
 	if (req->posix_pathnames) {
-		srvstr_get_path_wcard_posix(ctx,
+		srvstr_get_path_posix(ctx,
 				params,
 				req->flags2,
 				&new_name,
 				params+4,
 				parameter_count - 4,
 				STR_TERMINATE,
-				&status,
-				&dest_has_wcard);
+				&status);
 	} else {
-		srvstr_get_path_wcard(ctx,
+		srvstr_get_path(ctx,
 				params,
 				req->flags2,
 				&new_name,
 				params+4,
 				parameter_count - 4,
 				STR_TERMINATE,
-				&status,
-				&dest_has_wcard);
+				&status);
 	}
 
 	if (!NT_STATUS_IS_OK(status)) {
@@ -2136,11 +2140,12 @@ NTSTATUS smbd_do_query_security_desc(connection_struct *conn,
 		return NT_STATUS_ACCESS_DENIED;
 	}
 
-	if (S_ISLNK(fsp->fsp_name->st.st_ex_mode)) {
-		DEBUG(10, ("ACL get on symlink %s denied.\n",
-			fsp_str_dbg(fsp)));
+	status = refuse_symlink_fsp(fsp);
+	if (!NT_STATUS_IS_OK(status)) {
+		DBG_DEBUG("ACL get on symlink %s denied.\n",
+			fsp_str_dbg(fsp));
 		TALLOC_FREE(frame);
-		return NT_STATUS_ACCESS_DENIED;
+		return status;
 	}
 
 	if (security_info_wanted & (SECINFO_DACL|SECINFO_OWNER|
@@ -2162,8 +2167,16 @@ NTSTATUS smbd_do_query_security_desc(connection_struct *conn,
 	    ((security_info_wanted & SECINFO_LABEL) == 0) &&
 	    need_to_read_sd)
 	{
+		files_struct *sd_fsp = fsp;
+		if (fsp->base_fsp != NULL) {
+			/*
+			 * This is a stream handle. Use
+			 * the underlying pathref handle.
+			 */
+			sd_fsp = fsp->base_fsp;
+		}
 		status = SMB_VFS_FGET_NT_ACL(
-			fsp, security_info_wanted, frame, &psd);
+			sd_fsp, security_info_wanted, frame, &psd);
 	} else {
 		status = get_null_nt_acl(frame, &psd);
 	}

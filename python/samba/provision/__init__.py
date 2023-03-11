@@ -26,9 +26,6 @@
 
 __docformat__ = "restructuredText"
 
-from urllib.parse import quote as urllib_quote
-from samba.compat import string_types
-from samba.compat import binary_type
 from base64 import b64encode
 import errno
 import os
@@ -114,6 +111,7 @@ from samba.provision.common import (
 from samba.provision.sambadns import (
     get_dnsadmins_sid,
     setup_ad_dns,
+    create_dns_dir_keytab_link,
     create_dns_update_list
 )
 
@@ -499,21 +497,6 @@ class ProvisionResult(object):
 
         if self.backend_result:
             self.backend_result.report_logger(logger)
-
-
-def check_install(lp, session_info, credentials):
-    """Check whether the current install seems ok.
-
-    :param lp: Loadparm context
-    :param session_info: Session information
-    :param credentials: Credentials
-    """
-    if lp.get("realm") == "":
-        raise Exception("Realm empty")
-    samdb = Ldb(lp.samdb_url(), session_info=session_info,
-                credentials=credentials, lp=lp)
-    if len(samdb.search("(cn=Administrator)")) != 1:
-        raise ProvisioningError("No administrator account found")
 
 
 def findnss(nssfn, names):
@@ -1606,7 +1589,7 @@ def fill_samdb(samdb, lp, names, logger, policyguid,
         ntds_dn = "CN=NTDS Settings,%s" % names.serverdn
         names.ntdsguid = samdb.searchone(basedn=ntds_dn,
                                          attribute="objectGUID", expression="", scope=ldb.SCOPE_BASE).decode('utf8')
-        assert isinstance(names.ntdsguid, string_types)
+        assert isinstance(names.ntdsguid, str)
 
     return samdb
 
@@ -1941,11 +1924,14 @@ def provision_fill(samdb, secrets_ldb, logger, names, paths,
         invocationid = str(uuid.uuid4())
 
     if krbtgtpass is None:
+        # Note that the machinepass value is ignored
+        # as the backend (password_hash.c) will generate its
+        # own random values for the krbtgt keys
         krbtgtpass = samba.generate_random_machine_password(128, 255)
     if machinepass is None:
-        machinepass = samba.generate_random_machine_password(128, 255)
+        machinepass = samba.generate_random_machine_password(120, 120)
     if dnspass is None:
-        dnspass = samba.generate_random_password(128, 255)
+        dnspass = samba.generate_random_password(120, 120)
 
     samdb.transaction_start()
     try:
@@ -2014,7 +2000,7 @@ def provision_fill(samdb, secrets_ldb, logger, names, paths,
 
         domainguid = samdb.searchone(basedn=samdb.get_default_basedn(),
                                      attribute="objectGUID").decode('utf8')
-        assert isinstance(domainguid, string_types)
+        assert isinstance(domainguid, str)
 
     lastProvisionUSNs = get_last_provision_usn(samdb)
     maxUSN = get_max_usn(samdb, str(names.rootdn))
@@ -2273,8 +2259,6 @@ def provision(logger, session_info, smbconf=None,
     if paths.sysvol and not os.path.exists(paths.sysvol):
         os.makedirs(paths.sysvol, 0o775)
 
-    ldapi_url = "ldapi://%s" % urllib_quote(paths.s4_ldapi_path, safe="")
-
     schema = Schema(domainsid, invocationid=invocationid,
                     schemadn=names.schemadn, base_schema=base_schema)
 
@@ -2333,7 +2317,7 @@ def provision(logger, session_info, smbconf=None,
             adminpass = samba.generate_random_password(12, 32)
             adminpass_generated = True
         else:
-            if isinstance(adminpass, binary_type):
+            if isinstance(adminpass, bytes):
                 adminpass = adminpass.decode('utf-8')
             adminpass_generated = False
 
@@ -2381,41 +2365,7 @@ def provision(logger, session_info, smbconf=None,
     secrets_ldb.transaction_commit()
 
     # the commit creates the dns.keytab in the private directory
-    private_dns_keytab_path = os.path.join(paths.private_dir, paths.dns_keytab)
-    bind_dns_keytab_path = os.path.join(paths.binddns_dir, paths.dns_keytab)
-
-    if os.path.isfile(private_dns_keytab_path):
-        if os.path.isfile(bind_dns_keytab_path):
-            try:
-                os.unlink(bind_dns_keytab_path)
-            except OSError as e:
-                logger.error("Failed to remove %s: %s" %
-                             (bind_dns_keytab_path, e.strerror))
-
-        # link the dns.keytab to the bind-dns directory
-        try:
-            os.link(private_dns_keytab_path, bind_dns_keytab_path)
-        except OSError as e:
-            logger.error("Failed to create link %s -> %s: %s" %
-                         (private_dns_keytab_path, bind_dns_keytab_path, e.strerror))
-
-        # chown the dns.keytab in the bind-dns directory
-        if paths.bind_gid is not None:
-            try:
-                os.chmod(paths.binddns_dir, 0o770)
-                os.chown(paths.binddns_dir, -1, paths.bind_gid)
-            except OSError:
-                if 'SAMBA_SELFTEST' not in os.environ:
-                    logger.info("Failed to chown %s to bind gid %u",
-                                paths.binddns_dir, paths.bind_gid)
-
-            try:
-                os.chmod(bind_dns_keytab_path, 0o640)
-                os.chown(bind_dns_keytab_path, -1, paths.bind_gid)
-            except OSError:
-                if 'SAMBA_SELFTEST' not in os.environ:
-                    logger.info("Failed to chown %s to bind gid %u",
-                                bind_dns_keytab_path, paths.bind_gid)
+    create_dns_dir_keytab_link(logger, paths)
 
     result = ProvisionResult()
     result.server_role = serverrole
@@ -2444,13 +2394,13 @@ def provision(logger, session_info, smbconf=None,
     return result
 
 
-def provision_become_dc(smbconf=None, targetdir=None,
-                        realm=None, rootdn=None, domaindn=None, schemadn=None, configdn=None,
-                        serverdn=None, domain=None, hostname=None, domainsid=None,
-                        adminpass=None, krbtgtpass=None, domainguid=None, policyguid=None,
-                        policyguid_dc=None, invocationid=None, machinepass=None, dnspass=None,
-                        dns_backend=None, root=None, nobody=None, users=None,
-                        backup=None, serverrole=None, sitename=None, debuglevel=1, use_ntvfs=False):
+def provision_become_dc(smbconf=None, targetdir=None, realm=None,
+                        rootdn=None, domaindn=None, schemadn=None,
+                        configdn=None, serverdn=None, domain=None,
+                        hostname=None, domainsid=None,
+                        machinepass=None, dnspass=None,
+                        dns_backend=None, sitename=None, debuglevel=1,
+                        use_ntvfs=False):
 
     logger = logging.getLogger("provision")
     samba.set_debug_level(debuglevel)

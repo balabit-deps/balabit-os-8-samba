@@ -38,11 +38,21 @@
 #include "../lib/util/tevent_ntstatus.h"
 #include "libcli/raw/smb.h"
 #include "../libcli/named_pipe_auth/npa_tstream.h"
-#include "smbd/process_model.h"
+#include "samba/process_model.h"
 
-struct dcesrv_context_callbacks srv_callbacks = {
+static void skip_become_root(void)
+{
+}
+
+static void skip_unbecome_root(void)
+{
+}
+
+static struct dcesrv_context_callbacks srv_callbacks = {
 	.log.successful_authz = log_successful_dcesrv_authz_event,
 	.auth.gensec_prepare = dcesrv_gensec_prepare,
+	.auth.become_root = skip_become_root,
+	.auth.unbecome_root = skip_unbecome_root,
 	.assoc_group.find = dcesrv_assoc_group_find,
 };
 
@@ -82,7 +92,7 @@ static NTSTATUS dcesrv_init_endpoints(struct task_server *task,
 	 * process operations. This is not the most elegant solution, but it is
 	 * the least ugly, and is confined to the next block of code.
 	 */
-	if (use_single_process == true) {
+	if (use_single_process) {
 		model_ops = process_model_startup("single");
 		if (model_ops == NULL) {
 			DBG_ERR("Unable to load single process model");

@@ -17,6 +17,11 @@ bld.SAMBA_BINARY('fuzz_tiniparser',
                  deps='fuzzing tiniparser talloc afl-fuzz-main',
                  fuzzer=True)
 
+bld.SAMBA_BINARY('fuzz_parse_lpq_entry',
+                 source='fuzz_parse_lpq_entry.c',
+                 deps='fuzzing  afl-fuzz-main smbd_base',
+                 fuzzer=True)
+
 bld.SAMBA_BINARY('fuzz_oLschema2ldif',
                  source='fuzz_oLschema2ldif.c',
                  deps='fuzzing oLschema2ldif-lib afl-fuzz-main',
@@ -70,6 +75,16 @@ bld.SAMBA_BINARY('fuzz_ldb_parse_binary_decode',
 bld.SAMBA_BINARY('fuzz_ldb_parse_tree',
                  source='fuzz_ldb_parse_tree.c',
                  deps='fuzzing ldb afl-fuzz-main',
+                 fuzzer=True)
+
+bld.SAMBA_BINARY('fuzz_dcerpc_parse_binding',
+                 source='fuzz_dcerpc_parse_binding.c',
+                 deps='fuzzing dcerpc afl-fuzz-main',
+                 fuzzer=True)
+
+bld.SAMBA_BINARY('fuzz_cli_credentials_parse_string',
+                 source='fuzz_cli_credentials_parse_string.c',
+                 deps='fuzzing samba-credentials afl-fuzz-main',
                  fuzzer=True)
 
 # The fuzz_type and fuzz_function parameters make the built

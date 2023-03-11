@@ -302,8 +302,8 @@ static struct aio_open_private_data *create_private_open_data(
 		return NULL;
 	}
 
-	if (dirfsp->fh->fd != AT_FDCWD) {
-		opd->dir_fd = dirfsp->fh->fd;
+	if (fsp_get_io_fd(dirfsp) != AT_FDCWD) {
+		opd->dir_fd = fsp_get_io_fd(dirfsp);
 	} else {
 #if defined(O_DIRECTORY)
 		opd->dir_fd = open(".", O_RDONLY|O_DIRECTORY);
@@ -464,9 +464,16 @@ static int aio_pthread_openat_fn(vfs_handle_struct *handle,
 		return -1;
 	}
 
+	if (fsp->conn->sconn->client->server_multi_channel_enabled) {
+		/*
+		 * This module is not compatible with multi channel yet.
+		 */
+		aio_allow_open = false;
+	}
+
 	if (!aio_allow_open) {
 		/* aio opens turned off. */
-		return openat(dirfsp->fh->fd,
+		return openat(fsp_get_io_fd(dirfsp),
 			      smb_fname->base_name,
 			      flags,
 			      mode);
@@ -474,7 +481,7 @@ static int aio_pthread_openat_fn(vfs_handle_struct *handle,
 
 	if (!(flags & O_CREAT)) {
 		/* Only creates matter. */
-		return openat(dirfsp->fh->fd,
+		return openat(fsp_get_io_fd(dirfsp),
 			      smb_fname->base_name,
 			      flags,
 			      mode);
@@ -482,7 +489,7 @@ static int aio_pthread_openat_fn(vfs_handle_struct *handle,
 
 	if (!(flags & O_EXCL)) {
 		/* Only creates with O_EXCL matter. */
-		return openat(dirfsp->fh->fd,
+		return openat(fsp_get_io_fd(dirfsp),
 			      smb_fname->base_name,
 			      flags,
 			      mode);

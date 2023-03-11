@@ -69,10 +69,13 @@
 #include "libcli/smb/smb_constants.h"
 #include "tdb.h"
 #include "librpc/gen_ndr/nbt.h"
+#include "librpc/gen_ndr/security.h"
 #include "libds/common/roles.h"
 #include "lib/util/samba_util.h"
 #include "libcli/auth/ntlm_check.h"
 #include "lib/crypto/gnutls_helpers.h"
+#include "lib/util/smb_strtox.h"
+#include "auth/credentials/credentials.h"
 
 #ifdef HAVE_HTTPCONNECTENCRYPT
 #include <cups/http.h>
@@ -728,76 +731,6 @@ struct loadparm_service *lpcfg_add_service(struct loadparm_context *lp_ctx,
 }
 
 /**
- * Add a new home service, with the specified home directory, defaults coming
- * from service ifrom.
- */
-
-bool lpcfg_add_home(struct loadparm_context *lp_ctx,
-		 const char *pszHomename,
-		 struct loadparm_service *default_service,
-		 const char *user, const char *pszHomedir)
-{
-	struct loadparm_service *service;
-
-	service = lpcfg_add_service(lp_ctx, default_service, pszHomename);
-
-	if (service == NULL)
-		return false;
-
-	if (!(*(default_service->path))
-	    || strequal(default_service->path, lp_ctx->sDefault->path)) {
-		service->path = talloc_strdup(service, pszHomedir);
-	} else {
-		service->path = string_sub_talloc(service, lpcfg_path(default_service, lp_ctx->sDefault, service), "%H", pszHomedir);
-	}
-
-	if (!(*(service->comment))) {
-		service->comment = talloc_asprintf(service, "Home directory of %s", user);
-	}
-	service->available = default_service->available;
-	service->browseable = default_service->browseable;
-
-	DEBUG(3, ("adding home's share [%s] for user '%s' at '%s'\n",
-		  pszHomename, user, service->path));
-
-	return true;
-}
-
-/**
- * Add a new printer service, with defaults coming from service iFrom.
- */
-
-bool lpcfg_add_printer(struct loadparm_context *lp_ctx,
-		       const char *pszPrintername,
-		       struct loadparm_service *default_service)
-{
-	const char *comment = "From Printcap";
-	struct loadparm_service *service;
-	service = lpcfg_add_service(lp_ctx, default_service, pszPrintername);
-
-	if (service == NULL)
-		return false;
-
-	/* note that we do NOT default the availability flag to True - */
-	/* we take it from the default service passed. This allows all */
-	/* dynamic printers to be disabled by disabling the [printers] */
-	/* entry (if/when the 'available' keyword is implemented!).    */
-
-	/* the printer name is set to the service name. */
-	lpcfg_string_set(service, &service->_printername, pszPrintername);
-	lpcfg_string_set(service, &service->comment, comment);
-	service->browseable = default_service->browseable;
-	/* Printers cannot be read_only. */
-	service->read_only = false;
-	/* Printer services must be printable. */
-	service->printable = true;
-
-	DEBUG(3, ("adding printer service %s\n", pszPrintername));
-
-	return true;
-}
-
-/**
  * Map a parameter's string representation to something we can use.
  * Returns False if the parameter string is not recognised, else TRUE.
  */
@@ -866,6 +799,16 @@ bool lpcfg_parm_is_cmdline(struct loadparm_context *lp_ctx, const char *name)
 	if (parmnum == -1) return false;
 
 	return lp_ctx->flags[parmnum] & FLAG_CMDLINE;
+}
+
+bool lpcfg_parm_is_unspecified(struct loadparm_context *lp_ctx, const char *name)
+{
+	int parmnum;
+
+	parmnum = lpcfg_map_parameter(name);
+	if (parmnum == -1) return false;
+
+	return lp_ctx->flags[parmnum] & FLAG_DEFAULT;
 }
 
 /**
@@ -1099,39 +1042,6 @@ void add_to_file_list(TALLOC_CTX *mem_ctx, struct file_lists **list,
 fail:
 	DEBUG(0, ("Unable to add file to file list: %s\n", fname));
 
-}
-
-/*******************************************************************
- Check if a config file has changed date.
-********************************************************************/
-bool lpcfg_file_list_changed(struct loadparm_context *lp_ctx)
-{
-	struct file_lists *f;
-	DEBUG(6, ("lpcfg_file_list_changed()\n"));
-
-	for (f = lp_ctx->file_lists; f != NULL; f = f->next) {
-		char *n2;
-		time_t mod_time;
-
-		n2 = standard_sub_basic(lp_ctx, f->name);
-
-		DEBUGADD(6, ("file %s -> %s  last mod_time: %s\n",
-			     f->name, n2, ctime(&f->modtime)));
-
-		mod_time = file_modtime(n2);
-
-		if (mod_time && ((f->modtime != mod_time) || (f->subfname == NULL) || (strcmp(n2, f->subfname) != 0))) {
-			DEBUGADD(6, ("file %s modified: %s\n", n2,
-				  ctime(&mod_time)));
-			f->modtime = mod_time;
-			talloc_free(f->subfname);
-			f->subfname = talloc_strdup(f, n2);
-			TALLOC_FREE(n2);
-			return true;
-		}
-		TALLOC_FREE(n2);
-	}
-	return false;
 }
 
 /*
@@ -1388,19 +1298,6 @@ bool handle_ldap_debug_level(struct loadparm_context *lp_ctx, struct loadparm_se
 
 	if (lp_ctx->s3_fns) {
 		lp_ctx->s3_fns->init_ldap_debugging();
-	}
-	return true;
-}
-
-bool handle_netbios_aliases(struct loadparm_context *lp_ctx, struct loadparm_service *service,
-			    const char *pszParmValue, char **ptr)
-{
-	TALLOC_FREE(lp_ctx->globals->netbios_aliases);
-	lp_ctx->globals->netbios_aliases = str_list_make_v3_const(lp_ctx->globals->ctx,
-								  pszParmValue, NULL);
-
-	if (lp_ctx->s3_fns) {
-		return lp_ctx->s3_fns->set_netbios_aliases(lp_ctx->globals->netbios_aliases);
 	}
 	return true;
 }
@@ -1805,6 +1702,149 @@ out:
 	}
 	TALLOC_FREE(valid_values);
 	return value_is_valid;
+}
+
+bool handle_kdc_default_domain_supported_enctypes(struct loadparm_context *lp_ctx,
+						  struct loadparm_service *service,
+						  const char *pszParmValue, char **ptr)
+{
+	char **enctype_list = NULL;
+	char **enctype = NULL;
+	uint32_t result = 0;
+	bool ok = true;
+
+	enctype_list = str_list_make(NULL, pszParmValue, NULL);
+	if (enctype_list == NULL) {
+		DBG_ERR("OOM: failed to make string list from %s\n",
+			pszParmValue);
+		ok = false;
+		goto out;
+	}
+
+	for (enctype = enctype_list; *enctype != NULL; ++enctype) {
+		if (strwicmp(*enctype, "arcfour-hmac-md5") == 0 ||
+		    strwicmp(*enctype, "rc4-hmac") == 0)
+		{
+			result |= KERB_ENCTYPE_RC4_HMAC_MD5;
+		}
+		else if (strwicmp(*enctype, "aes128-cts-hmac-sha1-96") == 0 ||
+			 strwicmp(*enctype, "aes128-cts") == 0)
+		{
+			result |= KERB_ENCTYPE_AES128_CTS_HMAC_SHA1_96;
+		}
+		else if (strwicmp(*enctype, "aes256-cts-hmac-sha1-96") == 0 ||
+			 strwicmp(*enctype, "aes256-cts") == 0)
+		{
+			result |= KERB_ENCTYPE_AES256_CTS_HMAC_SHA1_96;
+		}
+		else if (strwicmp(*enctype, "aes256-cts-hmac-sha1-96-sk") == 0 ||
+			 strwicmp(*enctype, "aes256-cts-sk") == 0)
+		{
+			result |= KERB_ENCTYPE_AES256_CTS_HMAC_SHA1_96_SK;
+		}
+		else {
+			const char *bitstr = *enctype;
+			int base;
+			int error;
+			unsigned long bit;
+
+			/* See if the bit's specified in hexadecimal. */
+			if (bitstr[0] == '0' &&
+			    (bitstr[1] == 'x' || bitstr[2] == 'X'))
+			{
+				base = 16;
+				bitstr += 2;
+			}
+			else {
+				base = 10;
+			}
+
+			bit = smb_strtoul(bitstr, NULL, base, &error, SMB_STR_FULL_STR_CONV);
+			if (error) {
+				DBG_ERR("WARNING: Ignoring invalid value '%s' "
+					"for parameter 'kdc default domain supported enctypes'\n",
+					*enctype);
+				ok = false;
+			} else {
+				result |= bit;
+			}
+		}
+	}
+
+	*(int *)ptr = result;
+out:
+	TALLOC_FREE(enctype_list);
+
+	return ok;
+}
+
+bool handle_kdc_supported_enctypes(struct loadparm_context *lp_ctx,
+				   struct loadparm_service *service,
+				   const char *pszParmValue, char **ptr)
+{
+	char **enctype_list = NULL;
+	char **enctype = NULL;
+	uint32_t result = 0;
+	bool ok = true;
+
+	enctype_list = str_list_make(NULL, pszParmValue, NULL);
+	if (enctype_list == NULL) {
+		DBG_ERR("OOM: failed to make string list from %s\n",
+			pszParmValue);
+		ok = false;
+		goto out;
+	}
+
+	for (enctype = enctype_list; *enctype != NULL; ++enctype) {
+		if (strwicmp(*enctype, "arcfour-hmac-md5") == 0 ||
+		    strwicmp(*enctype, "rc4-hmac") == 0)
+		{
+			result |= KERB_ENCTYPE_RC4_HMAC_MD5;
+		}
+		else if (strwicmp(*enctype, "aes128-cts-hmac-sha1-96") == 0 ||
+			 strwicmp(*enctype, "aes128-cts") == 0)
+		{
+			result |= KERB_ENCTYPE_AES128_CTS_HMAC_SHA1_96;
+		}
+		else if (strwicmp(*enctype, "aes256-cts-hmac-sha1-96") == 0 ||
+			 strwicmp(*enctype, "aes256-cts") == 0)
+		{
+			result |= KERB_ENCTYPE_AES256_CTS_HMAC_SHA1_96;
+		}
+		else {
+			const char *bitstr = *enctype;
+			int base;
+			int error;
+			unsigned long bit;
+
+			/* See if the bit's specified in hexadecimal. */
+			if (bitstr[0] == '0' &&
+			    (bitstr[1] == 'x' || bitstr[2] == 'X'))
+			{
+				base = 16;
+				bitstr += 2;
+			}
+			else {
+				base = 10;
+			}
+
+			bit = smb_strtoul(bitstr, NULL, base, &error, SMB_STR_FULL_STR_CONV);
+			if (error) {
+				DBG_ERR("WARNING: Ignoring invalid value '%s' "
+					"for parameter 'kdc default domain supported enctypes'\n",
+					*enctype);
+				ok = false;
+			} else {
+				result |= bit;
+			}
+		}
+	}
+
+	*(int *)ptr = result;
+out:
+	TALLOC_FREE(enctype_list);
+
+	return ok;
 }
 
 static bool set_variable(TALLOC_CTX *mem_ctx, struct loadparm_service *service,
@@ -2407,11 +2447,14 @@ bool lpcfg_dump_a_parameter(struct loadparm_context *lp_ctx,
 				local_parm_name, parm_opt);
 			if (parm_opt_value) {
 				fprintf(f, "%s\n", parm_opt_value);
+				TALLOC_FREE(local_parm_name);
 				return true;
 			}
 		}
+		TALLOC_FREE(local_parm_name);
 		return false;
 	}
+	TALLOC_FREE(local_parm_name);
 
 	/* parameter is not parametric, search the table */
 	parm = lpcfg_parm_struct(lp_ctx, parm_name);
@@ -2561,31 +2604,6 @@ void init_printer_values(struct loadparm_context *lp_ctx, TALLOC_CTX *ctx,
 	}
 }
 
-/**
- * Unload unused services.
- */
-
-void lpcfg_killunused(struct loadparm_context *lp_ctx,
-		   struct smbsrv_connection *smb,
-		   bool (*snumused) (struct smbsrv_connection *, int))
-{
-	int i;
-
-	if (lp_ctx->s3_fns != NULL) {
-		smb_panic("Cannot be used from an s3 loadparm ctx");
-	}
-
-	for (i = 0; i < lp_ctx->iNumServices; i++) {
-		if (lp_ctx->services[i] == NULL)
-			continue;
-
-		if (!snumused || !snumused(smb, i)) {
-			talloc_free(lp_ctx->services[i]);
-			lp_ctx->services[i] = NULL;
-		}
-	}
-}
-
 
 static int lpcfg_destructor(struct loadparm_context *lp_ctx)
 {
@@ -2689,8 +2707,6 @@ struct loadparm_context *loadparm_init(TALLOC_CTX *mem_ctx)
 	lpcfg_do_global_parameter(lp_ctx, "debug uid", "No");
 	lpcfg_do_global_parameter(lp_ctx, "debug class", "No");
 
-	lpcfg_do_global_parameter(lp_ctx, "share backend", "classic");
-
 	lpcfg_do_global_parameter(lp_ctx, "server role", "auto");
 	lpcfg_do_global_parameter(lp_ctx, "domain logons", "No");
 	lpcfg_do_global_parameter(lp_ctx, "domain master", "Auto");
@@ -2791,8 +2807,9 @@ struct loadparm_context *loadparm_init(TALLOC_CTX *mem_ctx)
 
 	lpcfg_do_global_parameter(lp_ctx, "winbind separator", "\\");
 	lpcfg_do_global_parameter(lp_ctx, "winbind sealed pipes", "True");
-	lpcfg_do_global_parameter(lp_ctx, "winbind scan trusted domains", "True");
+	lpcfg_do_global_parameter(lp_ctx, "winbind scan trusted domains", "False");
 	lpcfg_do_global_parameter(lp_ctx, "require strong key", "True");
+	lpcfg_do_global_parameter(lp_ctx, "reject md5 servers", "True");
 	lpcfg_do_global_parameter(lp_ctx, "winbindd socket directory", dyn_WINBINDD_SOCKET_DIR);
 	lpcfg_do_global_parameter(lp_ctx, "ntp signd socket directory", dyn_NTP_SIGND_SOCKET_DIR);
 	lpcfg_do_global_parameter_var(lp_ctx, "gpo update command", "%s/samba-gpupdate", dyn_SCRIPTSBINDIR);
@@ -2849,6 +2866,8 @@ struct loadparm_context *loadparm_init(TALLOC_CTX *mem_ctx)
 	lpcfg_do_global_parameter(lp_ctx, "winbind nss info", "template");
 
 	lpcfg_do_global_parameter(lp_ctx, "server schannel", "True");
+	lpcfg_do_global_parameter(lp_ctx, "server schannel require seal", "True");
+	lpcfg_do_global_parameter(lp_ctx, "reject md5 clients", "True");
 
 	lpcfg_do_global_parameter(lp_ctx, "short preserve case", "True");
 
@@ -3052,6 +3071,8 @@ struct loadparm_context *loadparm_init(TALLOC_CTX *mem_ctx)
 
 	lpcfg_do_global_parameter(lp_ctx, "smb2 leases", "yes");
 
+	lpcfg_do_global_parameter(lp_ctx, "server multi channel support", "yes");
+
 	lpcfg_do_global_parameter(lp_ctx, "kerberos encryption types", "all");
 
 	lpcfg_do_global_parameter(lp_ctx,
@@ -3078,6 +3099,47 @@ struct loadparm_context *loadparm_init(TALLOC_CTX *mem_ctx)
 		lp_ctx, "ldap max authenticated request size", "16777216");
 	lpcfg_do_global_parameter(
 		lp_ctx, "ldap max search request size", "256000");
+
+	/* Async DNS query timeout in seconds. */
+	lpcfg_do_global_parameter(lp_ctx, "async dns timeout", "10");
+
+	lpcfg_do_global_parameter(lp_ctx,
+				  "client smb encrypt",
+				  "default");
+
+	lpcfg_do_global_parameter(lp_ctx,
+				  "client use kerberos",
+				  "desired");
+
+	lpcfg_do_global_parameter(lp_ctx,
+				  "client protection",
+				  "default");
+
+	lpcfg_do_global_parameter(lp_ctx,
+				  "smbd max xattr size",
+				  "65536");
+
+	lpcfg_do_global_parameter(lp_ctx,
+				  "acl flag inherited canonicalization",
+				  "yes");
+
+	lpcfg_do_global_parameter(lp_ctx,
+				  "winbind use krb5 enterprise principals",
+				  "yes");
+
+	lpcfg_do_global_parameter(lp_ctx,
+				  "client smb3 signing algorithms",
+				  DEFAULT_SMB3_SIGNING_ALGORITHMS);
+	lpcfg_do_global_parameter(lp_ctx,
+				  "server smb3 signing algorithms",
+				  DEFAULT_SMB3_SIGNING_ALGORITHMS);
+
+	lpcfg_do_global_parameter(lp_ctx,
+				  "client smb3 encryption algorithms",
+				  DEFAULT_SMB3_ENCRYPTION_ALGORITHMS);
+	lpcfg_do_global_parameter(lp_ctx,
+				  "server smb3 encryption algorithms",
+				  DEFAULT_SMB3_ENCRYPTION_ALGORITHMS);
 
 	lpcfg_do_global_parameter(lp_ctx,
 				  "min domain uid",
@@ -3401,47 +3463,6 @@ const char *lpcfg_servicename(const struct loadparm_service *service)
 	return service ? lpcfg_string((const char *)service->szService) : NULL;
 }
 
-/**
- * A useful volume label function.
- */
-const char *lpcfg_volume_label(struct loadparm_service *service, struct loadparm_service *sDefault)
-{
-	const char *ret;
-	ret = lpcfg_string((const char *)((service != NULL && service->volume != NULL) ?
-				       service->volume : sDefault->volume));
-	if (!*ret)
-		return lpcfg_servicename(service);
-	return ret;
-}
-
-/**
- * Return the correct printer name.
- */
-const char *lpcfg_printername(struct loadparm_service *service, struct loadparm_service *sDefault)
-{
-	const char *ret;
-	ret = lpcfg_string((const char *)((service != NULL && service->_printername != NULL) ?
-				       service->_printername : sDefault->_printername));
-	if (ret == NULL || (ret != NULL && *ret == '\0'))
-		ret = lpcfg_servicename(service);
-
-	return ret;
-}
-
-
-/**
- * Return the max print jobs per queue.
- */
-int lpcfg_maxprintjobs(struct loadparm_service *service, struct loadparm_service *sDefault)
-{
-	int maxjobs = lpcfg_max_print_jobs(service, sDefault);
-
-	if (maxjobs <= 0 || maxjobs >= PRINT_MAX_JOBID)
-		maxjobs = PRINT_MAX_JOBID - 1;
-
-	return maxjobs;
-}
-
 struct smb_iconv_handle *lpcfg_iconv_handle(struct loadparm_context *lp_ctx)
 {
 	if (lp_ctx == NULL) {
@@ -3560,6 +3581,15 @@ int lpcfg_client_ipc_signing(struct loadparm_context *lp_ctx)
 	return client_ipc_signing;
 }
 
+enum credentials_use_kerberos lpcfg_client_use_kerberos(struct loadparm_context *lp_ctx)
+{
+	if (lpcfg_weak_crypto(lp_ctx) == SAMBA_WEAK_CRYPTO_DISALLOWED) {
+		return CRED_USE_KERBEROS_REQUIRED;
+	}
+
+	return lpcfg__client_use_kerberos(lp_ctx);
+}
+
 bool lpcfg_server_signing_allowed(struct loadparm_context *lp_ctx, bool *mandatory)
 {
 	bool allowed = true;
@@ -3674,4 +3704,34 @@ char *lpcfg_substituted_string(TALLOC_CTX *mem_ctx,
 					     lp_sub,
 					     raw_value,
 					     lp_sub->private_data);
+}
+
+/**
+ * @brief Parse a string value of a given parameter to its integer enum value.
+ *
+ * @param[in]  param_name    The parameter name (e.g. 'client smb encrypt')
+ *
+ * @param[in]  param_value   The parameter value (e.g. 'required').
+ *
+ * @return The integer value of the enum the param_value matches or INT32_MIN
+ * on error.
+ */
+int32_t lpcfg_parse_enum_vals(const char *param_name,
+			      const char *param_value)
+{
+	struct parm_struct *parm = NULL;
+	int32_t ret = INT32_MIN;
+	bool ok;
+
+	parm = lpcfg_parm_struct(NULL, param_name);
+	if (parm == NULL) {
+		return INT32_MIN;
+	}
+
+	ok = lp_set_enum_parm(parm, param_value, &ret);
+	if (!ok) {
+		return INT32_MIN;
+	}
+
+	return ret;
 }

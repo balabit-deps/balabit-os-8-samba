@@ -14,8 +14,6 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
-
-from __future__ import print_function
 """Tests for DSDB audit logging.
 """
 
@@ -66,7 +64,7 @@ class AuditLogTestBase(samba.tests.TestCase):
         self.remoteAddress = client_ip
 
         #
-        # Check the remote address of a message against the one beimg used
+        # Check the remote address of a message against the one being used
         # for the tests.
         #
         def isRemote(message):

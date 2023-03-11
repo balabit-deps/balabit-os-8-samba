@@ -237,12 +237,12 @@ _PUBLIC_ size_t strhex_to_str(char *p, size_t p_len, const char *strhex, size_t 
 /** 
  * Parse a hex string and return a data blob. 
  */
-_PUBLIC_ _PURE_ DATA_BLOB strhex_to_data_blob(TALLOC_CTX *mem_ctx, const char *strhex) ;
+_PUBLIC_ DATA_BLOB strhex_to_data_blob(TALLOC_CTX *mem_ctx, const char *strhex) ;
 
 /**
  * Parse a hex dump and return a data blob
  */
-_PUBLIC_ _PURE_ DATA_BLOB hexdump_to_data_blob(TALLOC_CTX *mem_ctx, const char *hexdump, size_t len);
+_PUBLIC_ DATA_BLOB hexdump_to_data_blob(TALLOC_CTX *mem_ctx, const char *hexdump, size_t len);
 
 /**
  * Print a buf in hex. Assumes dst is at least (srclen*2)+1 large.
@@ -313,20 +313,6 @@ _PUBLIC_ bool conv_str_size_error(const char * str, uint64_t * val);
 _PUBLIC_ bool conv_str_u64(const char * str, uint64_t * val);
 
 /**
-return the number of bytes occupied by a buffer in CH_UTF16 format
-the result includes the null termination
-**/
-_PUBLIC_ size_t utf16_len(const void *buf);
-
-/**
-return the number of bytes occupied by a buffer in CH_UTF16 format
-the result includes the null termination
-limited by 'n' bytes
-**/
-_PUBLIC_ size_t utf16_len_n(const void *src, size_t n);
-_PUBLIC_ size_t ucs2_align(const void *base_ptr, const void *p, int flags);
-
-/**
  * @brief Constant time compare to memory regions.
  *
  * @param[in]  s1  The first memory region to compare.
@@ -394,7 +380,7 @@ load a file into memory from a fd.
 _PUBLIC_ char *fd_load(int fd, size_t *size, size_t maxsize, TALLOC_CTX *mem_ctx);
 
 
-char **file_lines_parse(char *p, size_t size, int *numlines, TALLOC_CTX *mem_ctx);
+char **file_lines_parse(const char *p, size_t size, int *numlines, TALLOC_CTX *mem_ctx);
 
 /**
 load a file into memory

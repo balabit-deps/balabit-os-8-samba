@@ -479,6 +479,10 @@ static int _pam_parse(const pam_handle_t *pamh,
 		ctrl |= WINBIND_MKHOMEDIR;
 	}
 
+	if (tiniparser_getboolean(d, "global:pwd_change_prompt", false)) {
+		ctrl |= WINBIND_PWD_CHANGE_PROMPT;
+	}
+
 config_from_pam:
 	/* step through arguments */
 	for (i=argc,v=argv; i-- > 0; ++v) {
@@ -522,6 +526,8 @@ config_from_pam:
 		else if (!strncasecmp(*v, "warn_pwd_expire",
 			strlen("warn_pwd_expire")))
 			ctrl |= WINBIND_WARN_PWD_EXPIRE;
+		else if (!strcasecmp(*v, "pwd_change_prompt"))
+			ctrl |= WINBIND_PWD_CHANGE_PROMPT;
 		else if (type != PAM_WINBIND_CLEANUP) {
 			__pam_log(pamh, ctrl, LOG_ERR,
 				 "pam_parse: unknown option: %s", *v);
@@ -637,7 +643,7 @@ static const struct ntstatus_errors {
 	{"NT_STATUS_PWD_TOO_SHORT",
 		N_("Password too short")},
 	{"NT_STATUS_PWD_TOO_RECENT",
-		N_("The password of this user is too recent to change")},
+		N_("The password was recently changed and cannot be changed again before %s")},
 	{"NT_STATUS_PWD_HISTORY_CONFLICT",
 		N_("Password is already in password history")},
 	{"NT_STATUS_PASSWORD_EXPIRED",
@@ -976,7 +982,8 @@ static bool _pam_send_password_expiry_message(struct pwb_context *ctx,
 		 * successfully sent the warning message.
 		 * Give the user a chance to change pwd.
 		 */
-		if (ret == PAM_SUCCESS) {
+		if (ret == PAM_SUCCESS &&
+		    (ctx->ctrl & WINBIND_PWD_CHANGE_PROMPT)) {
 			if (change_pwd) {
 				retval = _pam_winbind_change_pwd(ctx);
 				if (retval) {
@@ -1006,7 +1013,8 @@ static bool _pam_send_password_expiry_message(struct pwb_context *ctx,
 		 * successfully sent the warning message.
 		 * Give the user a chance to change pwd.
 		 */
-		if (ret == PAM_SUCCESS) {
+		if (ret == PAM_SUCCESS &&
+		    (ctx->ctrl & WINBIND_PWD_CHANGE_PROMPT)) {
 			if (change_pwd) {
 				retval = _pam_winbind_change_pwd(ctx);
 				if (retval) {
@@ -1582,14 +1590,23 @@ static int _pam_create_homedir(struct pwb_context *ctx,
 			       const char *dirname,
 			       mode_t mode)
 {
-	struct stat sbuf;
+	int ret;
 
-	if (stat(dirname, &sbuf) == 0) {
-		return PAM_SUCCESS;
+	ret = mkdir(dirname, mode);
+	if (ret != 0 && errno == EEXIST) {
+		struct stat sbuf;
+
+		ret = stat(dirname, &sbuf);
+		if (ret != 0) {
+			return PAM_PERM_DENIED;
+		}
+
+		if (!S_ISDIR(sbuf.st_mode)) {
+			return PAM_PERM_DENIED;
+		}
 	}
 
-	if (mkdir(dirname, mode) != 0) {
-
+	if (ret != 0) {
 		_make_remark_format(ctx, PAM_TEXT_INFO,
 				    _("Creating directory: %s failed: %s"),
 				    dirname, strerror(errno));
@@ -2040,8 +2057,18 @@ static int winbind_chauthtok_request(struct pwb_context *ctx,
 			case WBC_PWD_CHANGE_NO_ERROR:
 				if ((min_pwd_age > 0) &&
 				    (pwd_last_set + min_pwd_age > time(NULL))) {
-					PAM_WB_REMARK_DIRECT(ctx,
-					     "NT_STATUS_PWD_TOO_RECENT");
+					time_t next_change = pwd_last_set + min_pwd_age;
+#if defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wformat-nonliteral"
+#endif
+					_make_remark_format(ctx, PAM_ERROR_MSG,
+						_get_ntstatus_error_string("NT_STATUS_PWD_TOO_RECENT"),
+						ctime(&next_change));
+#if defined(__clang__)
+#pragma clang diagnostic pop
+#endif
+					goto done;
 				}
 				break;
 			case WBC_PWD_CHANGE_PASSWORD_TOO_SHORT:

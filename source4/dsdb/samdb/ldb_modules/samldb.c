@@ -45,6 +45,9 @@
 #include "libds/common/flag_mapping.h"
 #include "system/network.h"
 #include "librpc/gen_ndr/irpc.h"
+#include "lib/util/smb_strtox.h"
+
+#undef strcasecmp
 
 struct samldb_ctx;
 enum samldb_add_type {
@@ -748,7 +751,7 @@ static int samldb_schema_add_handle_linkid(struct samldb_ctx *ac)
 		return ret;
 	}
 
-	if (el == NULL) {
+	if (el == NULL || el->num_values == 0) {
 		return LDB_SUCCESS;
 	}
 
@@ -916,7 +919,7 @@ static int samldb_schema_add_handle_mapiid(struct samldb_ctx *ac)
 		return ret;
 	}
 
-	if (el == NULL) {
+	if (el == NULL || el->num_values == 0) {
 		return LDB_SUCCESS;
 	}
 
@@ -1057,7 +1060,7 @@ static bool samldb_krbtgtnumber_available(struct samldb_ctx *ac,
 				 LDB_SCOPE_SUBTREE, no_attrs,
 				 DSDB_FLAG_NEXT_MODULE,
 				 ac->req,
-				 "(msDC-SecondaryKrbTgtNumber=%u)",
+				 "(msDS-SecondaryKrbTgtNumber=%u)",
 				 krbtgt_number);
 	if (ret == LDB_SUCCESS && res->count == 0) {
 		talloc_free(tmp_ctx);
@@ -1075,7 +1078,7 @@ static int samldb_rodc_add(struct samldb_ctx *ac)
 	int ret;
 	struct ldb_val newpass_utf16;
 
-	/* find a unused msDC-SecondaryKrbTgtNumber */
+	/* find a unused msDS-SecondaryKrbTgtNumber */
 	i_start = generate_random() & 0xFFFF;
 	if (i_start == 0) {
 		i_start = 1;
@@ -1100,14 +1103,11 @@ static int samldb_rodc_add(struct samldb_ctx *ac)
 	return LDB_ERR_OTHER;
 
 found:
-	ret = ldb_msg_add_empty(ac->msg, "msDS-SecondaryKrbTgtNumber",
-				LDB_FLAG_INTERNAL_DISABLE_VALIDATION, NULL);
-	if (ret != LDB_SUCCESS) {
-		return ldb_operr(ldb);
-	}
 
-	ret = samdb_msg_add_uint(ldb, ac->msg, ac->msg,
-				 "msDS-SecondaryKrbTgtNumber", krbtgt_number);
+	ldb_msg_remove_attr(ac->msg, "msDS-SecondaryKrbTgtNumber");
+	ret = samdb_msg_append_uint(ldb, ac->msg, ac->msg,
+				    "msDS-SecondaryKrbTgtNumber", krbtgt_number,
+				    LDB_FLAG_INTERNAL_DISABLE_VALIDATION);
 	if (ret != LDB_SUCCESS) {
 		return ldb_operr(ldb);
 	}
@@ -1789,7 +1789,7 @@ static int samldb_objectclass_trigger(struct samldb_ctx *ac)
 	struct ldb_context *ldb = ldb_module_get_ctx(ac->module);
 	void *skip_allocate_sids = ldb_get_opaque(ldb,
 						  "skip_allocate_sids");
-	struct ldb_message_element *el, *el2;
+	struct ldb_message_element *el;
 	struct dom_sid *sid;
 	int ret;
 
@@ -1923,23 +1923,17 @@ static int samldb_objectclass_trigger(struct samldb_ctx *ac)
 		/* "isCriticalSystemObject" might be set */
 		if (user_account_control &
 		    (UF_SERVER_TRUST_ACCOUNT | UF_PARTIAL_SECRETS_ACCOUNT)) {
-			ret = ldb_msg_add_string(ac->msg, "isCriticalSystemObject",
-						 "TRUE");
+			ret = ldb_msg_add_string_flags(ac->msg, "isCriticalSystemObject",
+						       "TRUE", LDB_FLAG_MOD_REPLACE);
 			if (ret != LDB_SUCCESS) {
 				return ret;
 			}
-			el2 = ldb_msg_find_element(ac->msg,
-						   "isCriticalSystemObject");
-			el2->flags = LDB_FLAG_MOD_REPLACE;
 		} else if (user_account_control & UF_WORKSTATION_TRUST_ACCOUNT) {
-			ret = ldb_msg_add_string(ac->msg, "isCriticalSystemObject",
-						 "FALSE");
+			ret = ldb_msg_add_string_flags(ac->msg, "isCriticalSystemObject",
+						       "FALSE", LDB_FLAG_MOD_REPLACE);
 			if (ret != LDB_SUCCESS) {
 				return ret;
 			}
-			el2 = ldb_msg_find_element(ac->msg,
-						   "isCriticalSystemObject");
-			el2->flags = LDB_FLAG_MOD_REPLACE;
 		}
 
 		/* Step 1.4: "userAccountControl" -> "primaryGroupID" mapping */
@@ -2015,14 +2009,13 @@ static int samldb_objectclass_trigger(struct samldb_ctx *ac)
 				ldb_set_errstring(ldb, "samldb: Unrecognized account type!");
 				return LDB_ERR_UNWILLING_TO_PERFORM;
 			}
-			ret = samdb_msg_add_uint(ldb, ac->msg, ac->msg,
-						 "sAMAccountType",
-						 account_type);
+			ret = samdb_msg_add_uint_flags(ldb, ac->msg, ac->msg,
+						       "sAMAccountType",
+						       account_type,
+						       LDB_FLAG_MOD_REPLACE);
 			if (ret != LDB_SUCCESS) {
 				return ret;
 			}
-			el2 = ldb_msg_find_element(ac->msg, "sAMAccountType");
-			el2->flags = LDB_FLAG_MOD_REPLACE;
 		}
 		break;
 	}
@@ -2312,7 +2305,8 @@ static int samldb_prim_group_trigger(struct samldb_ctx *ac)
 static int samldb_check_user_account_control_invariants(struct samldb_ctx *ac,
 						    uint32_t user_account_control)
 {
-	int i, ret = 0;
+	size_t i;
+	int ret = 0;
 	bool need_check = false;
 	const struct uac_to_guid {
 		uint32_t uac;
@@ -2553,7 +2547,8 @@ static int samldb_check_user_account_control_acl(struct samldb_ctx *ac,
 						 uint32_t user_account_control,
 						 uint32_t user_account_control_old)
 {
-	int i, ret = 0;
+	size_t i;
+	int ret = 0;
 	bool need_acl_check = false;
 	struct security_token *user_token;
 	struct security_descriptor *domain_sd;
@@ -2940,26 +2935,23 @@ static int samldb_user_account_control_change(struct samldb_ctx *ac)
 	}
 
 	if (old_atype != new_atype) {
-		ret = samdb_msg_add_uint(ldb, ac->msg, ac->msg,
-					 "sAMAccountType", new_atype);
+		ret = samdb_msg_append_uint(ldb, ac->msg, ac->msg,
+					    "sAMAccountType", new_atype,
+					    LDB_FLAG_MOD_REPLACE);
 		if (ret != LDB_SUCCESS) {
 			return ret;
 		}
-		el = ldb_msg_find_element(ac->msg, "sAMAccountType");
-		el->flags = LDB_FLAG_MOD_REPLACE;
 	}
 
 	/* As per MS-SAMR 3.1.1.8.10 these flags have not to be set */
 	if ((clear_uac & UF_LOCKOUT) && (old_lockoutTime != 0)) {
 		/* "lockoutTime" reset as per MS-SAMR 3.1.1.8.10 */
 		ldb_msg_remove_attr(ac->msg, "lockoutTime");
-		ret = samdb_msg_add_uint64(ldb, ac->msg, ac->msg, "lockoutTime",
-					   (NTTIME)0);
+		ret = samdb_msg_append_uint64(ldb, ac->msg, ac->msg, "lockoutTime",
+					      (NTTIME)0, LDB_FLAG_MOD_REPLACE);
 		if (ret != LDB_SUCCESS) {
 			return ret;
 		}
-		el = ldb_msg_find_element(ac->msg, "lockoutTime");
-		el->flags = LDB_FLAG_MOD_REPLACE;
 	}
 
 	/*
@@ -2970,14 +2962,12 @@ static int samldb_user_account_control_change(struct samldb_ctx *ac)
 	 * creating the attribute.
 	 */
 	if (old_is_critical != new_is_critical || old_atype != new_atype) {
-		ret = ldb_msg_add_string(ac->msg, "isCriticalSystemObject",
-					 new_is_critical ? "TRUE": "FALSE");
+		ret = ldb_msg_append_string(ac->msg, "isCriticalSystemObject",
+					    new_is_critical ? "TRUE": "FALSE",
+					    LDB_FLAG_MOD_REPLACE);
 		if (ret != LDB_SUCCESS) {
 			return ret;
 		}
-		el = ldb_msg_find_element(ac->msg,
-					   "isCriticalSystemObject");
-		el->flags = LDB_FLAG_MOD_REPLACE;
 	}
 
 	if (!ldb_msg_find_element(ac->msg, "primaryGroupID") &&
@@ -2990,14 +2980,12 @@ static int samldb_user_account_control_change(struct samldb_ctx *ac)
 			}
 		}
 
-		ret = samdb_msg_add_uint(ldb, ac->msg, ac->msg,
-					 "primaryGroupID", new_pgrid);
+		ret = samdb_msg_append_uint(ldb, ac->msg, ac->msg,
+					    "primaryGroupID", new_pgrid,
+					    LDB_FLAG_MOD_REPLACE);
 		if (ret != LDB_SUCCESS) {
 			return ret;
 		}
-		el = ldb_msg_find_element(ac->msg,
-					   "primaryGroupID");
-		el->flags = LDB_FLAG_MOD_REPLACE;
 	}
 
 	/* Propagate eventual "userAccountControl" attribute changes */
@@ -3200,13 +3188,12 @@ static int samldb_lockout_time(struct samldb_ctx *ac)
 
 	/* lockoutTime == 0 resets badPwdCount */
 	ldb_msg_remove_attr(ac->msg, "badPwdCount");
-	ret = samdb_msg_add_int(ldb, ac->msg, ac->msg,
-				"badPwdCount", 0);
+	ret = samdb_msg_append_int(ldb, ac->msg, ac->msg,
+				   "badPwdCount", 0,
+				   LDB_FLAG_MOD_REPLACE);
 	if (ret != LDB_SUCCESS) {
 		return ret;
 	}
-	el = ldb_msg_find_element(ac->msg, "badPwdCount");
-	el->flags = LDB_FLAG_MOD_REPLACE;
 
 	return LDB_SUCCESS;
 }
@@ -3304,13 +3291,11 @@ static int samldb_group_type_change(struct samldb_ctx *ac)
 		ldb_set_errstring(ldb, "samldb: Unrecognized account type!");
 		return LDB_ERR_UNWILLING_TO_PERFORM;
 	}
-	ret = samdb_msg_add_uint(ldb, ac->msg, ac->msg, "sAMAccountType",
-				 account_type);
+	ret = samdb_msg_append_uint(ldb, ac->msg, ac->msg, "sAMAccountType",
+				    account_type, LDB_FLAG_MOD_REPLACE);
 	if (ret != LDB_SUCCESS) {
 		return ret;
 	}
-	el = ldb_msg_find_element(ac->msg, "sAMAccountType");
-	el->flags = LDB_FLAG_MOD_REPLACE;
 
 	return LDB_SUCCESS;
 }
@@ -5696,7 +5681,7 @@ static int samldb_extended_create_own_rid_set(struct ldb_module *module, struct 
 
 	if (req->op.extended.data != NULL) {
 		ldb_set_errstring(ldb,
-				  "samldb_extended_allocate_rid_pool_for_us: invalid extended data (should be NULL)");
+				  "samldb_extended_create_own_rid_set: invalid extended data (should be NULL)");
 		return LDB_ERR_PROTOCOL_ERROR;
 	}
 

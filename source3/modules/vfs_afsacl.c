@@ -25,6 +25,7 @@
 #include "../libcli/security/dom_sid.h"
 #include "passdb.h"
 #include "lib/afs/afs_settoken.h"
+#include "lib/util/string_wrappers.h"
 
 #undef DBGC_CLASS
 #define DBGC_CLASS DBGC_VFS
@@ -690,7 +691,7 @@ static size_t afs_fto_nt_acl(struct afs_acl *afs_acl,
 {
 	SMB_STRUCT_STAT sbuf;
 
-	if (fsp->fh->fd == -1) {
+	if (fsp_get_pathref_fd(fsp) == -1) {
 		/* Get the stat struct for the owner info. */
 		return afs_to_nt_acl(afs_acl, fsp->conn, fsp->fsp_name,
 				     security_info, mem_ctx, ppdesc);
@@ -1035,34 +1036,6 @@ static NTSTATUS afsacl_fget_nt_acl(struct vfs_handle_struct *handle,
 	return (sd_size != 0) ? NT_STATUS_OK : NT_STATUS_ACCESS_DENIED;
 }
 
-static NTSTATUS afsacl_get_nt_acl_at(struct vfs_handle_struct *handle,
-				struct files_struct *dirfsp,
-				const struct smb_filename *smb_fname,
-				uint32_t security_info,
-				TALLOC_CTX *mem_ctx,
-				struct security_descriptor **ppdesc)
-{
-	struct afs_acl acl;
-	size_t sd_size;
-
-	SMB_ASSERT(dirfsp == handle->conn->cwd_fsp);
-
-	DEBUG(5, ("afsacl_get_nt_acl: %s\n", smb_fname->base_name));
-
-	sidpts = lp_parm_bool(SNUM(handle->conn), "afsacl", "sidpts", false);
-
-	if (!afs_get_afs_acl(smb_fname->base_name, &acl)) {
-		return NT_STATUS_ACCESS_DENIED;
-	}
-
-	sd_size = afs_to_nt_acl(&acl, handle->conn, smb_fname, security_info,
-				mem_ctx, ppdesc);
-
-	free_afs_acl(&acl);
-
-	return (sd_size != 0) ? NT_STATUS_OK : NT_STATUS_ACCESS_DENIED;
-}
-
 static NTSTATUS afsacl_fset_nt_acl(vfs_handle_struct *handle,
 			 files_struct *fsp,
 			 uint32_t security_info_sent,
@@ -1091,17 +1064,6 @@ static int afsacl_connect(vfs_handle_struct *handle,
 }
 
 /* We don't have a linear form of the AFS ACL yet */
-static int afsacl_sys_acl_blob_get_file(vfs_handle_struct *handle,
-			const struct smb_filename *smb_fname,
-			TALLOC_CTX *mem_ctx,
-			char **blob_description,
-			DATA_BLOB *blob)
-{
-	errno = ENOSYS;
-	return -1;
-}
-
-/* We don't have a linear form of the AFS ACL yet */
 static int afsacl_sys_acl_blob_get_fd(vfs_handle_struct *handle, files_struct *fsp, TALLOC_CTX *mem_ctx, char **blob_description, DATA_BLOB *blob)
 {
 	errno = ENOSYS;
@@ -1111,9 +1073,7 @@ static int afsacl_sys_acl_blob_get_fd(vfs_handle_struct *handle, files_struct *f
 static struct vfs_fn_pointers vfs_afsacl_fns = {
 	.connect_fn = afsacl_connect,
 	.fget_nt_acl_fn = afsacl_fget_nt_acl,
-	.get_nt_acl_at_fn = afsacl_get_nt_acl_at,
 	.fset_nt_acl_fn = afsacl_fset_nt_acl,
-	.sys_acl_blob_get_file_fn = afsacl_sys_acl_blob_get_file,
 	.sys_acl_blob_get_fd_fn = afsacl_sys_acl_blob_get_fd
 };
 

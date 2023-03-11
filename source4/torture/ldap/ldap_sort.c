@@ -26,7 +26,7 @@
 #include <ldb_errors.h>
 #include "ldb_wrap.h"
 #include "param/param.h"
-#include "lib/cmdline/popt_common.h" 
+#include "lib/cmdline/cmdline.h"
 #include "libcli/ldap/ldap_client.h"
 #include "torture/smbtorture.h"
 #include "torture/ldap/proto.h"
@@ -39,7 +39,6 @@ bool torture_ldap_sort(struct torture_context *torture)
 	bool ret = false;
 	const char *host = torture_setting_string(torture, "host", NULL);
 	char *url;
-	int i;
 	codepoint_t j;
 	struct ldb_message_element *elem;
 	struct ldb_message *msg;
@@ -62,7 +61,7 @@ bool torture_ldap_sort(struct torture_context *torture)
 
 	ldb = ldb_wrap_connect(torture, torture->ev, torture->lp_ctx, url,
 						 NULL,
-						 popt_get_cmdline_credentials(),
+						 samba_cmdline_get_creds(),
 						 0);
 	torture_assert(torture, ldb, "Failed to make LDB connection to target");
 
@@ -96,6 +95,7 @@ bool torture_ldap_sort(struct torture_context *torture)
 
 	ret = true;
 	if (ctx->count > 1) {
+		unsigned int i;
 		for (i=0;i<ctx->count;i++) {
 			msg = ctx->msgs[i];
 			elem = ldb_msg_find_element(msg,"cn");

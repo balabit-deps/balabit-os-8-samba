@@ -165,10 +165,8 @@ const char *smb_fname_str_dbg(const struct smb_filename *smb_fname)
 		return "";
 	}
 
-	fname = talloc_asprintf(talloc_tos(),
-				"%s {%s}",
-				fname,
-				tstr);
+	fname = talloc_asprintf_append_buffer(
+		fname, " {%s}", tstr);
 	if (fname == NULL) {
 		return "";
 	}
@@ -187,21 +185,6 @@ const char *fsp_str_dbg(const struct files_struct *fsp)
 		return "";
 	}
 
-	if (fsp->dirfsp == NULL || fsp->dirfsp == fsp->conn->cwd_fsp) {
-		return name;
-	}
-
-	if (ISDOT(fsp->dirfsp->fsp_name->base_name)) {
-		return name;
-	}
-
-	name = talloc_asprintf(talloc_tos(),
-			       "%s/%s",
-			       fsp->dirfsp->fsp_name->base_name,
-			       fsp->fsp_name->base_name);
-	if (name == NULL) {
-		return "";
-	}
 	return name;
 }
 
@@ -284,69 +267,6 @@ struct smb_filename *cp_smb_filename(TALLOC_CTX *mem_ctx,
 	out->st = in->st;
 	out->twrp = in->twrp;
 	return out;
-}
-
-/**
- * Return allocated parent directory and basename of path
- *
- * Note: if requesting name, it is returned as talloc child of the
- * parent. Freeing the parent is thus sufficient to free both.
- */
-bool parent_smb_fname(TALLOC_CTX *mem_ctx,
-		      const struct smb_filename *path,
-		      struct smb_filename **_parent,
-		      struct smb_filename  **_name)
-{
-	TALLOC_CTX *frame = talloc_stackframe();
-	struct smb_filename *parent = NULL;
-	struct smb_filename *name = NULL;
-	char *p = NULL;
-
-	parent = cp_smb_filename(frame, path);
-	if (parent == NULL) {
-		TALLOC_FREE(frame);
-		return false;
-	}
-	TALLOC_FREE(parent->stream_name);
-	SET_STAT_INVALID(parent->st);
-
-	p = strrchr_m(parent->base_name, '/'); /* Find final '/', if any */
-	if (p == NULL) {
-		TALLOC_FREE(parent->base_name);
-		parent->base_name = talloc_strdup(parent, ".");
-		if (parent->base_name == NULL) {
-			TALLOC_FREE(frame);
-			return false;
-		}
-		p = path->base_name;
-	} else {
-		*p = '\0';
-		p++;
-	}
-
-	if (_name == NULL) {
-		*_parent = talloc_move(mem_ctx, &parent);
-		TALLOC_FREE(frame);
-		return true;
-	}
-
-	name = cp_smb_filename(frame, path);
-	if (name == NULL) {
-		TALLOC_FREE(frame);
-		return false;
-	}
-	TALLOC_FREE(name->base_name);
-
-	name->base_name = talloc_strdup(name, p);
-	if (name == NULL) {
-		TALLOC_FREE(frame);
-		return false;
-	}
-
-	*_parent = talloc_move(mem_ctx, &parent);
-	*_name = talloc_move(*_parent, &name);
-	TALLOC_FREE(frame);
-	return true;
 }
 
 static void assert_valid_stream_smb_fname(const struct smb_filename *smb_fname)

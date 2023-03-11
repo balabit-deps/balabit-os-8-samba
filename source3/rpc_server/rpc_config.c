@@ -23,6 +23,7 @@
 #include "rpc_server/rpc_server.h"
 #include "lib/param/param.h"
 #include "librpc/rpc/dcesrv_core.h"
+#include "lib/global_contexts.h"
 
 #undef DBGC_CLASS
 #define DBGC_CLASS DBGC_RPC_SRV
@@ -30,6 +31,8 @@
 static struct dcesrv_context_callbacks srv_callbacks = {
 	.log.successful_authz = dcesrv_log_successful_authz,
 	.auth.gensec_prepare = dcesrv_auth_gensec_prepare,
+	.auth.become_root = become_root,
+	.auth.unbecome_root = unbecome_root,
 	.assoc_group.find = dcesrv_assoc_group_find,
 };
 

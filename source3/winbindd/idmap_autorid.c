@@ -80,6 +80,7 @@
 #include "../libcli/security/dom_sid.h"
 #include "libsmb/samlogon_cache.h"
 #include "passdb/machine_sid.h"
+#include "lib/util/string_wrappers.h"
 
 #undef DBGC_CLASS
 #define DBGC_CLASS DBGC_IDMAP
@@ -855,9 +856,10 @@ static NTSTATUS idmap_autorid_initialize(struct idmap_domain *dom)
 	config->maxranges = (dom->high_id - dom->low_id + 1) /
 	    config->rangesize;
 
-	if (config->maxranges == 0) {
-		DEBUG(1, ("Allowed uid range is smaller than rangesize. "
-			  "Increase uid range or decrease rangesize.\n"));
+	if (config->maxranges < 2) {
+		DBG_WARNING("Allowed idmap range is not a least double the "
+			    "size of the rangesize. Please increase idmap "
+			    "range.\n");
 		status = NT_STATUS_INVALID_PARAMETER;
 		goto error;
 	}

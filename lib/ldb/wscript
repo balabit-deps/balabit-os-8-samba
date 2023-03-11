@@ -1,8 +1,8 @@
 #!/usr/bin/env python
 
 APPNAME = 'ldb'
-# For Samba 4.13.x
-VERSION = '2.2.3'
+# For Samba 4.15.x
+VERSION = '2.4.4'
 
 import sys, os
 

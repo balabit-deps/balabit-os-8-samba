@@ -130,8 +130,8 @@ static int set_sys_acl_conn(const char *fname,
 {
 	int ret;
 	struct smb_filename *smb_fname = NULL;
-
 	TALLOC_CTX *frame = talloc_stackframe();
+	NTSTATUS status;
 
 	smb_fname = synthetic_smb_fname_split(frame,
 					fname,
@@ -141,7 +141,20 @@ static int set_sys_acl_conn(const char *fname,
 		return -1;
 	}
 
-	ret = SMB_VFS_SYS_ACL_SET_FILE( conn, smb_fname, acltype, theacl);
+	ret = vfs_stat(conn, smb_fname);
+	if (ret == -1) {
+		TALLOC_FREE(frame);
+		return -1;
+	}
+
+	status = openat_pathref_fsp(conn->cwd_fsp, smb_fname);
+	if (!NT_STATUS_IS_OK(status)) {
+		TALLOC_FREE(frame);
+		errno = map_errno_from_nt_status(status);
+		return -1;
+	}
+
+	ret = SMB_VFS_SYS_ACL_SET_FD(smb_fname->fsp, acltype, theacl);
 
 	TALLOC_FREE(frame);
 	return ret;
@@ -155,7 +168,7 @@ static NTSTATUS init_files_struct(TALLOC_CTX *mem_ctx,
 				  struct files_struct **_fsp)
 {
 	struct smb_filename *smb_fname = NULL;
-	int ret;
+	int fd;
 	mode_t saved_umask;
 	struct files_struct *fsp;
 	struct files_struct *fspcwd = NULL;
@@ -165,7 +178,7 @@ static NTSTATUS init_files_struct(TALLOC_CTX *mem_ctx,
 	if (fsp == NULL) {
 		return NT_STATUS_NO_MEMORY;
 	}
-	fsp->fh = talloc(fsp, struct fd_handle);
+	fsp->fh = fd_handle_create(fsp);
 	if (fsp->fh == NULL) {
 		return NT_STATUS_NO_MEMORY;
 	}
@@ -191,30 +204,31 @@ static NTSTATUS init_files_struct(TALLOC_CTX *mem_ctx,
 	 */
 	saved_umask = umask(0);
 
-	fsp->fh->fd = SMB_VFS_OPENAT(conn,
-				     fspcwd,
-				     smb_fname,
-				     fsp,
-				     flags,
-				     00644);
+	fd = SMB_VFS_OPENAT(conn,
+			    fspcwd,
+			    smb_fname,
+			    fsp,
+			    flags,
+			    00644);
 
 	umask(saved_umask);
 
-	if (fsp->fh->fd == -1) {
+	if (fd == -1) {
 		int err = errno;
 		if (err == ENOENT) {
 			return NT_STATUS_OBJECT_NAME_NOT_FOUND;
 		}
 		return NT_STATUS_INVALID_PARAMETER;
 	}
+	fsp_set_fd(fsp, fd);
 
-	ret = SMB_VFS_FSTAT(fsp, &smb_fname->st);
-	if (ret == -1) {
+	status = vfs_stat_fsp(fsp);
+	if (!NT_STATUS_IS_OK(status)) {
 		/* If we have an fd, this stat should succeed. */
 		DEBUG(0,("Error doing fstat on open file %s (%s)\n",
 			 smb_fname_str_dbg(smb_fname),
-			 strerror(errno) ));
-		return map_nt_error_from_unix(errno);
+			 nt_errstr(status) ));
+		return status;
 	}
 
 	fsp->file_id = vfs_file_id_from_sbuf(conn, &smb_fname->st);
@@ -266,7 +280,7 @@ static NTSTATUS set_nt_acl_conn(const char *fname,
 		return status;
 	}
 
-	status = SMB_VFS_FSET_NT_ACL(fsp, security_info_sent, sd);
+	status = SMB_VFS_FSET_NT_ACL(metadata_fsp(fsp), security_info_sent, sd);
 	if (!NT_STATUS_IS_OK(status)) {
 		DEBUG(0,("set_nt_acl_no_snum: fset_nt_acl returned %s.\n", nt_errstr(status)));
 	}
@@ -285,27 +299,36 @@ static NTSTATUS get_nt_acl_conn(TALLOC_CTX *mem_ctx,
 {
 	TALLOC_CTX *frame = talloc_stackframe();
 	NTSTATUS status;
-	struct smb_filename *smb_fname = synthetic_smb_fname(talloc_tos(),
+	int ret;
+	struct smb_filename *smb_fname =  NULL;
+
+	smb_fname = synthetic_smb_fname_split(frame,
 					fname,
-					NULL,
-					NULL,
-					0,
-					lp_posix_pathnames() ?
-						SMB_FILENAME_POSIX_PATH : 0);
+					lp_posix_pathnames());
 
 	if (smb_fname == NULL) {
 		TALLOC_FREE(frame);
 		return NT_STATUS_NO_MEMORY;
 	}
 
-	status = SMB_VFS_GET_NT_ACL_AT(conn,
-				conn->cwd_fsp,
-				smb_fname,
+	ret = vfs_stat(conn, smb_fname);
+	if (ret == -1) {
+		TALLOC_FREE(frame);
+		return NT_STATUS_OBJECT_NAME_NOT_FOUND;
+	}
+
+	status = openat_pathref_fsp(conn->cwd_fsp, smb_fname);
+	if (!NT_STATUS_IS_OK(status)) {
+		TALLOC_FREE(frame);
+		return status;
+	}
+
+	status = SMB_VFS_FGET_NT_ACL(metadata_fsp(smb_fname->fsp),
 				security_info_wanted,
 				mem_ctx,
 				sd);
 	if (!NT_STATUS_IS_OK(status)) {
-		DBG_ERR("get_nt_acl_at returned %s.\n",
+		DBG_ERR("fget_nt_acl_at returned %s.\n",
 			nt_errstr(status));
 	}
 
@@ -633,10 +656,13 @@ static PyObject *py_smbd_unlink(PyObject *self, PyObject *args, PyObject *kwargs
 	connection_struct *conn;
 	int ret;
 	struct smb_filename *smb_fname = NULL;
+	struct smb_filename *parent_fname = NULL;
+	struct smb_filename *at_fname = NULL;
 	PyObject *py_session = Py_None;
 	struct auth_session_info *session_info = NULL;
 	char *fname, *service = NULL;
 	TALLOC_CTX *frame;
+	NTSTATUS status;
 
 	frame = talloc_stackframe();
 
@@ -679,9 +705,19 @@ static PyObject *py_smbd_unlink(PyObject *self, PyObject *args, PyObject *kwargs
 		return PyErr_NoMemory();
 	}
 
+	status = parent_pathref(frame,
+				conn->cwd_fsp,
+				smb_fname,
+				&parent_fname,
+				&at_fname);
+	if (!NT_STATUS_IS_OK(status)) {
+		TALLOC_FREE(frame);
+		return PyErr_NoMemory();
+	}
+
 	ret = SMB_VFS_UNLINKAT(conn,
-			conn->cwd_fsp,
-			smb_fname,
+			parent_fname->fsp,
+			at_fname,
 			0);
 	if (ret != 0) {
 		TALLOC_FREE(frame);
@@ -944,6 +980,8 @@ static PyObject *py_smbd_get_sys_acl(PyObject *self, PyObject *args, PyObject *k
 	connection_struct *conn;
 	char *service = NULL;
 	struct smb_filename *smb_fname = NULL;
+	NTSTATUS status;
+	int ret;
 
 	if (!PyArg_ParseTupleAndKeywords(args, kwargs, "siO|z",
 					 discard_const_p(char *, kwnames),
@@ -984,7 +1022,20 @@ static PyObject *py_smbd_get_sys_acl(PyObject *self, PyObject *args, PyObject *k
 		TALLOC_FREE(frame);
 		return NULL;
 	}
-	acl = SMB_VFS_SYS_ACL_GET_FILE( conn, smb_fname, acl_type, frame);
+	ret = vfs_stat(conn, smb_fname);
+	if (ret == -1) {
+		TALLOC_FREE(frame);
+		return PyErr_SetFromErrno(PyExc_OSError);
+	}
+
+	status = openat_pathref_fsp(conn->cwd_fsp, smb_fname);
+	if (!NT_STATUS_IS_OK(status)) {
+		TALLOC_FREE(frame);
+		PyErr_SetNTSTATUS(status);
+		return NULL;
+	}
+
+	acl = SMB_VFS_SYS_ACL_GET_FD(smb_fname->fsp, acl_type, frame);
 	if (!acl) {
 		TALLOC_FREE(frame);
 		return PyErr_SetFromErrno(PyExc_OSError);
@@ -1011,6 +1062,9 @@ static PyObject *py_smbd_mkdir(PyObject *self, PyObject *args, PyObject *kwargs)
 	TALLOC_CTX *frame = talloc_stackframe();
 	struct connection_struct *conn = NULL;
 	struct smb_filename *smb_fname = NULL;
+	struct smb_filename *parent_fname = NULL;
+	struct smb_filename *base_name = NULL;
+	NTSTATUS status;
 	int ret;
 	mode_t saved_umask;
 
@@ -1061,13 +1115,23 @@ static PyObject *py_smbd_mkdir(PyObject *self, PyObject *args, PyObject *kwargs)
 		return NULL;
 	}
 
+	status = parent_pathref(talloc_tos(),
+				conn->cwd_fsp,
+				smb_fname,
+				&parent_fname,
+				&base_name);
+	if (!NT_STATUS_IS_OK(status)) {
+		TALLOC_FREE(frame);
+		return NULL;
+	}
+
 	/* we want total control over the permissions on created files,
 	   so set our umask to 0 */
 	saved_umask = umask(0);
 
 	ret = SMB_VFS_MKDIRAT(conn,
-			conn->cwd_fsp,
-			smb_fname,
+			parent_fname->fsp,
+			base_name,
 			00755);
 
 	umask(saved_umask);

@@ -20,12 +20,14 @@
 
 #include "includes.h"
 #include "system/filesys.h"
+#include "locking/share_mode_lock.h"
 #include "smbd/smbd.h"
 #include "smbd/globals.h"
 #include "libcli/security/security.h"
 #include "lib/util/bitmap.h"
 #include "../lib/util/memcache.h"
 #include "../librpc/gen_ndr/open_files.h"
+#include "lib/util/string_wrappers.h"
 
 /*
    This module implements directory related functions for Samba.
@@ -86,6 +88,8 @@ static struct smb_Dir *OpenDir_fsp(TALLOC_CTX *mem_ctx, connection_struct *conn,
 static void DirCacheAdd(struct smb_Dir *dir_hnd, const char *name, long offset);
 
 static int smb_Dir_destructor(struct smb_Dir *dir_hnd);
+
+static bool SearchDir(struct smb_Dir *dir_hnd, const char *name, long *poffset);
 
 #define INVALID_DPTR_KEY (-3)
 
@@ -203,7 +207,6 @@ NTSTATUS dptr_create(connection_struct *conn,
 		bool expect_close,
 		uint16_t spid,
 		const char *wcard,
-		bool wcard_has_wild,
 		uint32_t attr,
 		struct dptr_struct **dptr_ret)
 {
@@ -260,7 +263,7 @@ NTSTATUS dptr_create(connection_struct *conn,
 			(wcard[0] == '.' && wcard[1] == 0)) {
 		dptr->has_wild = True;
 	} else {
-		dptr->has_wild = wcard_has_wild;
+		dptr->has_wild = ms_has_wild(dptr->wcard);
 	}
 
 	dptr->attr = attr;
@@ -397,33 +400,6 @@ void dptr_set_priv(struct dptr_struct *dptr)
  Return the next visible file name, skipping veto'd and invisible files.
 ****************************************************************************/
 
-static const char *dptr_normal_ReadDirName(struct dptr_struct *dptr,
-					   long *poffset, SMB_STRUCT_STAT *pst,
-					   char **ptalloced)
-{
-	/* Normal search for the next file. */
-	const char *name;
-	char *talloced = NULL;
-
-	while ((name = ReadDirName(dptr->dir_hnd, poffset, pst, &talloced))
-	       != NULL) {
-		if (is_visible_file(dptr->conn,
-				dptr->dir_hnd,
-				name,
-				pst,
-				true)) {
-			*ptalloced = talloced;
-			return name;
-		}
-		TALLOC_FREE(talloced);
-	}
-	return NULL;
-}
-
-/****************************************************************************
- Return the next visible file name, skipping veto'd and invisible files.
-****************************************************************************/
-
 static char *dptr_ReadDirName(TALLOC_CTX *ctx,
 			      struct dptr_struct *dptr,
 			      long *poffset,
@@ -440,7 +416,7 @@ static char *dptr_ReadDirName(TALLOC_CTX *ctx,
 	SET_STAT_INVALID(*pst);
 
 	if (dptr->has_wild || dptr->did_stat) {
-		name_temp = dptr_normal_ReadDirName(dptr, poffset, pst,
+		name_temp = ReadDirName(dptr->dir_hnd, poffset, pst,
 						    &talloced);
 		if (name_temp == NULL) {
 			return NULL;
@@ -464,19 +440,6 @@ static char *dptr_ReadDirName(TALLOC_CTX *ctx,
 
 	dptr->did_stat = true;
 
-	/* First check if it should be visible. */
-	if (!is_visible_file(dptr->conn,
-			dptr->dir_hnd,
-			dptr->wcard,
-			pst,
-			true)) {
-		/* This only returns false if the file was found, but
-		   is explicitly not visible. Set us to end of
-		   directory, but return NULL as we know we can't ever
-		   find it. */
-		goto ret;
-	}
-
 	if (VALID_STAT(*pst)) {
 		name = talloc_strdup(ctx, dptr->wcard);
 		goto ret;
@@ -492,10 +455,11 @@ static char *dptr_ReadDirName(TALLOC_CTX *ctx,
 	/* Create an smb_filename with stream_name == NULL. */
 	smb_fname_base = (struct smb_filename) {
 		.base_name = pathreal,
+		.flags = dptr->dir_hnd->fsp->fsp_name->flags,
 		.twrp = dptr->smb_dname->twrp,
 	};
 
-	if (SMB_VFS_STAT(dptr->conn, &smb_fname_base) == 0) {
+	if (vfs_stat(dptr->conn, &smb_fname_base) == 0) {
 		*pst = smb_fname_base.st;
 		name = talloc_strdup(ctx, dptr->wcard);
 		goto clean;
@@ -537,7 +501,7 @@ static char *dptr_ReadDirName(TALLOC_CTX *ctx,
 
 	TALLOC_FREE(pathreal);
 
-	name_temp = dptr_normal_ReadDirName(dptr, poffset, pst, &talloced);
+	name_temp = ReadDirName(dptr->dir_hnd, poffset, pst, &talloced);
 	if (name_temp == NULL) {
 		return NULL;
 	}
@@ -557,7 +521,7 @@ ret:
 }
 
 /****************************************************************************
- Search for a file by name, skipping veto'ed and not visible files.
+ Search for a file by name.
 ****************************************************************************/
 
 bool dptr_SearchDir(struct dptr_struct *dptr, const char *name, long *poffset, SMB_STRUCT_STAT *pst)
@@ -733,6 +697,11 @@ files_struct *dptr_fetch_fsp(struct smbd_server_connection *sconn,
 	return dptr->dir_hnd->fsp;
 }
 
+struct files_struct *dir_hnd_fetch_fsp(struct smb_Dir *dir_hnd)
+{
+	return dir_hnd->fsp;
+}
+
 /****************************************************************************
  Fetch the fsp associated with the dptr_num.
 ****************************************************************************/
@@ -768,7 +737,7 @@ bool smbd_dirptr_get_entry(TALLOC_CTX *ctx,
 			   uint32_t dirtype,
 			   bool dont_descend,
 			   bool ask_sharemode,
-			   bool get_dosmode,
+			   bool get_dosmode_in,
 			   bool (*match_fn)(TALLOC_CTX *ctx,
 					    void *private_data,
 					    const char *dname,
@@ -776,6 +745,8 @@ bool smbd_dirptr_get_entry(TALLOC_CTX *ctx,
 					    char **_fname),
 			   bool (*mode_fn)(TALLOC_CTX *ctx,
 					   void *private_data,
+					   struct files_struct *dirfsp,
+					   struct smb_filename *atname,
 					   struct smb_filename *smb_fname,
 					   bool get_dosmode,
 					   uint32_t *_mode),
@@ -790,6 +761,8 @@ bool smbd_dirptr_get_entry(TALLOC_CTX *ctx,
 	size_t pathlen;
 	const char *dpath = dirptr->smb_dname->base_name;
 	bool dirptr_path_is_dot = ISDOT(dpath);
+	NTSTATUS status;
+	int ret;
 
 	*_smb_fname = NULL;
 	*_mode = 0;
@@ -805,8 +778,11 @@ bool smbd_dirptr_get_entry(TALLOC_CTX *ctx,
 		bool isdots;
 		char *fname = NULL;
 		char *pathreal = NULL;
-		struct smb_filename smb_fname;
+		struct smb_filename *atname = NULL;
+		struct smb_filename *smb_fname = NULL;
 		uint32_t mode = 0;
+		bool check_dfs_symlink = false;
+		bool get_dosmode = get_dosmode_in;
 		bool ok;
 
 		cur_offset = dptr_TellDir(dirptr);
@@ -822,6 +798,11 @@ bool smbd_dirptr_get_entry(TALLOC_CTX *ctx,
 
 		isdots = (ISDOT(dname) || ISDOTDOT(dname));
 		if (dont_descend && !isdots) {
+			TALLOC_FREE(dname);
+			continue;
+		}
+
+		if (IS_VETO_PATH(conn, dname)) {
 			TALLOC_FREE(dname);
 			continue;
 		}
@@ -868,45 +849,188 @@ bool smbd_dirptr_get_entry(TALLOC_CTX *ctx,
 		}
 
 		/* Create smb_fname with NULL stream_name. */
-		smb_fname = (struct smb_filename) {
-			.base_name = pathreal,
-			.st = sbuf,
-			.twrp = dirptr->smb_dname->twrp,
-		};
-
-		ok = mode_fn(ctx, private_data, &smb_fname, get_dosmode, &mode);
-		if (!ok) {
+		smb_fname = synthetic_smb_fname(talloc_tos(),
+						pathreal,
+						NULL,
+						&sbuf,
+						dirptr->smb_dname->twrp,
+						dirptr->smb_dname->flags);
+		TALLOC_FREE(pathreal);
+		if (smb_fname == NULL) {
 			TALLOC_FREE(dname);
 			TALLOC_FREE(fname);
-			TALLOC_FREE(pathreal);
+			return false;
+		}
+
+		if (!VALID_STAT(smb_fname->st)) {
+			/*
+			 * If stat() fails with ENOENT it might be a
+			 * msdfs-symlink in Windows context, this is checked
+			 * below, for now we just want to fill stat info as good
+			 * as we can.
+			 */
+			ret = vfs_stat(conn, smb_fname);
+			if (ret != 0 && errno != ENOENT) {
+				TALLOC_FREE(smb_fname);
+				TALLOC_FREE(dname);
+				TALLOC_FREE(fname);
+				continue;
+			}
+		}
+
+		/* Create smb_fname with NULL stream_name. */
+		atname = synthetic_smb_fname(talloc_tos(),
+					     dname,
+					     NULL,
+					     &smb_fname->st,
+					     dirptr->smb_dname->twrp,
+					     dirptr->smb_dname->flags);
+		if (atname == NULL) {
+			TALLOC_FREE(dname);
+			TALLOC_FREE(fname);
+			TALLOC_FREE(smb_fname);
+			return false;
+		}
+
+		/*
+		 * openat_pathref_fsp() will return
+		 * NT_STATUS_OBJECT_NAME_NOT_FOUND in non-POSIX context when
+		 * hitting a dangling symlink. It may be a DFS symlink, this is
+		 * checked below by the mode_fn() call, so we have to allow this
+		 * here.
+		 *
+		 * NT_STATUS_STOPPED_ON_SYMLINK is returned in POSIX context
+		 * when hitting a symlink and ensures we always return directory
+		 * entries that are symlinks in POSIX context.
+		 */
+		status = openat_pathref_fsp(dirptr->dir_hnd->fsp, atname);
+		if (!NT_STATUS_IS_OK(status) &&
+		    !NT_STATUS_EQUAL(status, NT_STATUS_OBJECT_NAME_NOT_FOUND))
+		{
+			TALLOC_FREE(atname);
+			TALLOC_FREE(dname);
+			TALLOC_FREE(fname);
+			TALLOC_FREE(smb_fname);
+			continue;
+		} else if (NT_STATUS_EQUAL(status, NT_STATUS_OBJECT_NAME_NOT_FOUND)) {
+			if (!(atname->flags & SMB_FILENAME_POSIX_PATH)) {
+				check_dfs_symlink = true;
+			}
+			/*
+			 * Check if it's a symlink. We only want to return this
+			 * if it's a DFS symlink or in POSIX mode. Disable
+			 * getting dosmode in the mode_fn() and prime the mode
+			 * as FILE_ATTRIBUTE_NORMAL.
+			 */
+			mode = FILE_ATTRIBUTE_NORMAL;
+			get_dosmode = false;
+		}
+
+		status = move_smb_fname_fsp_link(smb_fname, atname);
+		if (!NT_STATUS_IS_OK(status)) {
+			DBG_WARNING("Failed to move pathref for [%s]: %s\n",
+				    smb_fname_str_dbg(smb_fname),
+				    nt_errstr(status));
+			TALLOC_FREE(atname);
+			TALLOC_FREE(smb_fname);
+			TALLOC_FREE(dname);
+			TALLOC_FREE(fname);
+			continue;
+		}
+
+		if (!is_visible_fsp(smb_fname->fsp)) {
+			TALLOC_FREE(atname);
+			TALLOC_FREE(smb_fname);
+			TALLOC_FREE(dname);
+			TALLOC_FREE(fname);
+			continue;
+		}
+
+		/*
+		 * Don't leak metadata about the containing
+		 * directory of the share.
+		 */
+		if (dirptr_path_is_dot && ISDOTDOT(dname)) {
+			/*
+			 * Making a copy here, then freeing
+			 * the original will close the smb_fname->fsp.
+			 */
+			struct smb_filename *tmp_smb_fname =
+				cp_smb_filename(ctx, smb_fname);
+
+			if (tmp_smb_fname == NULL) {
+				TALLOC_FREE(atname);
+				TALLOC_FREE(smb_fname);
+				TALLOC_FREE(dname);
+				TALLOC_FREE(fname);
+				return false;
+			}
+			TALLOC_FREE(smb_fname);
+			smb_fname = tmp_smb_fname;
+			mode = FILE_ATTRIBUTE_DIRECTORY;
+			get_dosmode = false;
+		}
+
+		ok = mode_fn(ctx,
+			     private_data,
+			     dirptr->dir_hnd->fsp,
+			     atname,
+			     smb_fname,
+			     get_dosmode,
+			     &mode);
+		if (!ok) {
+			TALLOC_FREE(atname);
+			TALLOC_FREE(smb_fname);
+			TALLOC_FREE(dname);
+			TALLOC_FREE(fname);
+			continue;
+		}
+
+		TALLOC_FREE(atname);
+
+		/*
+		 * The only valid cases where we return the directory entry if
+		 * it's a symlink are:
+		 *
+		 * 1. POSIX context, always return it, or
+		 *
+		 * 2. a DFS symlink where the mode_fn() call above has verified
+		 *    this and set mode to FILE_ATTRIBUTE_REPARSE_POINT.
+		 */
+		if (check_dfs_symlink &&
+		    !(mode & FILE_ATTRIBUTE_REPARSE_POINT))
+		{
+			TALLOC_FREE(smb_fname);
+			TALLOC_FREE(dname);
+			TALLOC_FREE(fname);
 			continue;
 		}
 
 		if (!dir_check_ftype(mode, dirtype)) {
 			DEBUG(5,("[%s] attribs 0x%x didn't match 0x%x\n",
 				fname, (unsigned int)mode, (unsigned int)dirtype));
+			TALLOC_FREE(smb_fname);
 			TALLOC_FREE(dname);
 			TALLOC_FREE(fname);
-			TALLOC_FREE(pathreal);
 			continue;
 		}
 
-		if (ask_sharemode && !S_ISDIR(smb_fname.st.st_ex_mode)) {
+		if (ask_sharemode && !S_ISDIR(smb_fname->st.st_ex_mode)) {
 			struct timespec write_time_ts;
 			struct file_id fileid;
 
 			fileid = vfs_file_id_from_sbuf(conn,
-						       &smb_fname.st);
+						       &smb_fname->st);
 			get_file_infos(fileid, 0, NULL, &write_time_ts);
 			if (!is_omit_timespec(&write_time_ts)) {
-				update_stat_ex_mtime(&smb_fname.st,
+				update_stat_ex_mtime(&smb_fname->st,
 						     write_time_ts);
 			}
 		}
 
 		DEBUG(3,("smbd_dirptr_get_entry mask=[%s] found %s "
 			"fname=%s (%s)\n",
-			mask, smb_fname_str_dbg(&smb_fname),
+			mask, smb_fname_str_dbg(smb_fname),
 			dname, fname));
 
 		if (!conn->sconn->using_smb2) {
@@ -921,8 +1045,7 @@ bool smbd_dirptr_get_entry(TALLOC_CTX *ctx,
 
 		TALLOC_FREE(dname);
 
-		*_smb_fname = cp_smb_filename(ctx, &smb_fname);
-		TALLOC_FREE(pathreal);
+		*_smb_fname = talloc_move(ctx, &smb_fname);
 		if (*_smb_fname == NULL) {
 			return false;
 		}
@@ -1002,6 +1125,8 @@ static bool smbd_dirptr_8_3_match_fn(TALLOC_CTX *ctx,
 
 static bool smbd_dirptr_8_3_mode_fn(TALLOC_CTX *ctx,
 				    void *private_data,
+				    struct files_struct *dirfsp,
+				    struct smb_filename *atname,
 				    struct smb_filename *smb_fname,
 				    bool get_dosmode,
 				    uint32_t *_mode)
@@ -1019,7 +1144,10 @@ static bool smbd_dirptr_8_3_mode_fn(TALLOC_CTX *ctx,
 		}
 	}
 
-	*_mode = dos_mode(conn, smb_fname);
+	if (get_dosmode) {
+		*_mode = fdos_mode(smb_fname->fsp);
+		smb_fname->st = smb_fname->fsp->fsp_name->st;
+	}
 	return true;
 }
 
@@ -1068,14 +1196,12 @@ bool get_dir_entry(TALLOC_CTX *ctx,
 }
 
 /*******************************************************************
- Check to see if a user can read a file. This is only approximate,
+ Check to see if a user can read an fsp . This is only approximate,
  it is used as part of the "hide unreadable" option. Don't
  use it for anything security sensitive.
 ********************************************************************/
 
-static bool user_can_read_file(connection_struct *conn,
-				struct files_struct *dirfsp,
-				struct smb_filename *smb_fname)
+static bool user_can_read_fsp(struct files_struct *fsp)
 {
 	NTSTATUS status;
 	uint32_t rejected_share_access = 0;
@@ -1086,20 +1212,18 @@ static bool user_can_read_file(connection_struct *conn,
 				FILE_READ_ATTRIBUTES|
 				SEC_STD_READ_CONTROL;
 
-	SMB_ASSERT(dirfsp == conn->cwd_fsp);
-
 	/*
 	 * Never hide files from the root user.
 	 * We use (uid_t)0 here not sec_initial_uid()
 	 * as make test uses a single user context.
 	 */
 
-	if (get_current_uid(conn) == (uid_t)0) {
-		return True;
+	if (get_current_uid(fsp->conn) == (uid_t)0) {
+		return true;
 	}
 
 	/*
-	 * We can't directly use smbd_check_access_rights()
+	 * We can't directly use smbd_check_access_rights_fsp()
 	 * here, as this implicitly grants FILE_READ_ATTRIBUTES
 	 * which the Windows access-based-enumeration code
 	 * explicitly checks for on the file security descriptor.
@@ -1110,19 +1234,17 @@ static bool user_can_read_file(connection_struct *conn,
 	 * and the smb2.acl2.ACCESSBASED test for details.
 	 */
 
-	rejected_share_access = access_mask & ~(conn->share_access);
+	rejected_share_access = access_mask & ~(fsp->conn->share_access);
 	if (rejected_share_access) {
-		DEBUG(10, ("rejected share access 0x%x "
+		DBG_DEBUG("rejected share access 0x%x "
 			"on %s (0x%x)\n",
 			(unsigned int)access_mask,
-			smb_fname_str_dbg(smb_fname),
-			(unsigned int)rejected_share_access ));
+			fsp_str_dbg(fsp),
+			(unsigned int)rejected_share_access);
 		return false;
         }
 
-	status = SMB_VFS_GET_NT_ACL_AT(conn,
-			dirfsp,
-			smb_fname,
+	status = SMB_VFS_FGET_NT_ACL(metadata_fsp(fsp),
 			(SECINFO_OWNER |
 			 SECINFO_GROUP |
 			 SECINFO_DACL),
@@ -1130,62 +1252,55 @@ static bool user_can_read_file(connection_struct *conn,
 			&sd);
 
 	if (!NT_STATUS_IS_OK(status)) {
-                DEBUG(10, ("Could not get acl "
+		DBG_DEBUG("Could not get acl "
 			"on %s: %s\n",
-			smb_fname_str_dbg(smb_fname),
-			nt_errstr(status)));
+			fsp_str_dbg(fsp),
+			nt_errstr(status));
 		return false;
-        }
+	}
 
 	status = se_file_access_check(sd,
-				get_current_nttok(conn),
+				get_current_nttok(fsp->conn),
 				false,
 				access_mask,
 				&rejected_mask);
 
-        TALLOC_FREE(sd);
+	TALLOC_FREE(sd);
 
 	if (NT_STATUS_EQUAL(status, NT_STATUS_ACCESS_DENIED)) {
-		DEBUG(10,("rejected bits 0x%x read access for %s\n",
+		DBG_DEBUG("rejected bits 0x%x read access for %s\n",
 			(unsigned int)rejected_mask,
-			smb_fname_str_dbg(smb_fname) ));
+			fsp_str_dbg(fsp));
 		return false;
         }
 	return true;
 }
 
 /*******************************************************************
- Check to see if a user can write a file (and only files, we do not
- check dirs on this one). This is only approximate,
+ Check to see if a user can write to an fsp.
+ Always return true for directories.
+ This is only approximate,
  it is used as part of the "hide unwriteable" option. Don't
  use it for anything security sensitive.
 ********************************************************************/
 
-static bool user_can_write_file(connection_struct *conn,
-				struct files_struct *dirfsp,
-				const struct smb_filename *smb_fname)
+static bool user_can_write_fsp(struct files_struct *fsp)
 {
-	SMB_ASSERT(dirfsp == conn->cwd_fsp);
-
 	/*
 	 * Never hide files from the root user.
 	 * We use (uid_t)0 here not sec_initial_uid()
 	 * as make test uses a single user context.
 	 */
 
-	if (get_current_uid(conn) == (uid_t)0) {
-		return True;
+	if (get_current_uid(fsp->conn) == (uid_t)0) {
+		return true;
 	}
 
-	SMB_ASSERT(VALID_STAT(smb_fname->st));
-
-	/* Pseudo-open the file */
-
-	if(S_ISDIR(smb_fname->st.st_ex_mode)) {
-		return True;
+	if (fsp->fsp_flags.is_directory) {
+		return true;
 	}
 
-	return can_write_to_file(conn, dirfsp, smb_fname);
+	return can_write_to_fsp(fsp);
 }
 
 /*******************************************************************
@@ -1217,32 +1332,63 @@ static bool file_is_special(connection_struct *conn,
 
 /*******************************************************************
  Should the file be seen by the client?
- NOTE: A successful return is no guarantee of the file's existence.
 ********************************************************************/
 
-bool is_visible_file(connection_struct *conn,
-		struct smb_Dir *dir_hnd,
-		const char *name,
-		SMB_STRUCT_STAT *pst,
-		bool use_veto)
+bool is_visible_fsp(struct files_struct *fsp)
 {
-	bool hide_unreadable = lp_hide_unreadable(SNUM(conn));
-	bool hide_unwriteable = lp_hide_unwriteable_files(SNUM(conn));
-	bool hide_special = lp_hide_special_files(SNUM(conn));
-	int hide_new_files_timeout = lp_hide_new_files_timeout(SNUM(conn));
-	char *entry = NULL;
-	struct smb_filename *dir_path = dir_hnd->fsp->fsp_name;
-	struct smb_filename *smb_fname_base = NULL;
-	bool ret = false;
+	bool hide_unreadable = false;
+	bool hide_unwriteable = false;
+	bool hide_special = false;
+	int hide_new_files_timeout = 0;
+	const char *last_component = NULL;
 
-	if ((strcmp(".",name) == 0) || (strcmp("..",name) == 0)) {
-		return True; /* . and .. are always visible. */
+	/*
+	 * If the file does not exist, there's no point checking
+	 * the configuration options. We succeed, on the basis that the
+	 * checks *might* have passed if the file was present.
+	 */
+	if (fsp == NULL) {
+		return true;
 	}
 
-	/* If it's a vetoed file, pretend it doesn't even exist */
-	if (use_veto && IS_VETO_PATH(conn, name)) {
-		DEBUG(10,("is_visible_file: file %s is vetoed.\n", name ));
-		return False;
+	hide_unreadable = lp_hide_unreadable(SNUM(fsp->conn));
+	hide_unwriteable = lp_hide_unwriteable_files(SNUM(fsp->conn));
+	hide_special = lp_hide_special_files(SNUM(fsp->conn));
+	hide_new_files_timeout = lp_hide_new_files_timeout(SNUM(fsp->conn));
+
+	if (fsp->base_fsp != NULL) {
+		/* Only operate on non-stream files. */
+		fsp = fsp->base_fsp;
+	}
+
+	/* Get the last component of the base name. */
+	last_component = strrchr_m(fsp->fsp_name->base_name, '/');
+	if (!last_component) {
+		last_component = fsp->fsp_name->base_name;
+	} else {
+		last_component++; /* Go past '/' */
+	}
+
+	if (ISDOT(last_component) || ISDOTDOT(last_component)) {
+		return true; /* . and .. are always visible. */
+	}
+
+	if (fsp_get_pathref_fd(fsp) == -1) {
+		/*
+		 * Symlink in POSIX mode or MS-DFS.
+		 * We've checked veto files so the
+		 * only thing we can check is the
+		 * hide_new_files_timeout.
+		 */
+		if (hide_new_files_timeout != 0) {
+			double age = timespec_elapsed(
+				&fsp->fsp_name->st.st_ex_mtime);
+
+			if (age < (double)hide_new_files_timeout) {
+				return false;
+			}
+		}
+		return true;
 	}
 
 	if (hide_unreadable ||
@@ -1250,86 +1396,40 @@ bool is_visible_file(connection_struct *conn,
 	    hide_special ||
 	    (hide_new_files_timeout != 0))
 	{
-		entry = talloc_asprintf(talloc_tos(),
-					"%s/%s",
-					dir_path->base_name,
-					name);
-		if (!entry) {
-			ret = false;
-			goto out;
-		}
-
-		/* Create an smb_filename with stream_name == NULL. */
-		smb_fname_base = synthetic_smb_fname(talloc_tos(),
-						entry,
-						NULL,
-						pst,
-						dir_path->twrp,
-						0);
-		if (smb_fname_base == NULL) {
-			ret = false;
-			goto out;
-		}
-
-		/* If the file name does not exist, there's no point checking
-		 * the configuration options. We succeed, on the basis that the
-		 * checks *might* have passed if the file was present.
-		 */
-		if (!VALID_STAT(*pst)) {
-			if (SMB_VFS_STAT(conn, smb_fname_base) != 0) {
-				ret = true;
-				goto out;
-			}
-			*pst = smb_fname_base->st;
-		}
-
 		/* Honour _hide unreadable_ option */
 		if (hide_unreadable &&
-		    !user_can_read_file(conn,
-				conn->cwd_fsp,
-				smb_fname_base))
+		    !user_can_read_fsp(fsp))
 		{
-			DEBUG(10,("is_visible_file: file %s is unreadable.\n",
-				 entry ));
-			ret = false;
-			goto out;
+			DBG_DEBUG("file %s is unreadable.\n",
+				 fsp_str_dbg(fsp));
+			return false;
 		}
 		/* Honour _hide unwriteable_ option */
 		if (hide_unwriteable &&
-		    !user_can_write_file(conn,
-				conn->cwd_fsp,
-				smb_fname_base))
+		    !user_can_write_fsp(fsp))
 		{
-			DEBUG(10,("is_visible_file: file %s is unwritable.\n",
-				 entry ));
-			ret = false;
-			goto out;
+			DBG_DEBUG("file %s is unwritable.\n",
+				 fsp_str_dbg(fsp));
+			return false;
 		}
 		/* Honour _hide_special_ option */
-		if (hide_special && file_is_special(conn, smb_fname_base)) {
-			DEBUG(10,("is_visible_file: file %s is special.\n",
-				 entry ));
-			ret = false;
-			goto out;
+		if (hide_special && file_is_special(fsp->conn, fsp->fsp_name)) {
+			DBG_DEBUG("file %s is special.\n",
+				 fsp_str_dbg(fsp));
+			return false;
 		}
 
 		if (hide_new_files_timeout != 0) {
-
 			double age = timespec_elapsed(
-				&smb_fname_base->st.st_ex_mtime);
+				&fsp->fsp_name->st.st_ex_mtime);
 
 			if (age < (double)hide_new_files_timeout) {
-				ret = false;
-				goto out;
+				return false;
 			}
 		}
 	}
 
-	ret = true;
- out:
-	TALLOC_FREE(smb_fname_base);
-	TALLOC_FREE(entry);
-	return ret;
+	return true;
 }
 
 static int smb_Dir_destructor(struct smb_Dir *dir_hnd)
@@ -1337,7 +1437,7 @@ static int smb_Dir_destructor(struct smb_Dir *dir_hnd)
 	files_struct *fsp = dir_hnd->fsp;
 
 	SMB_VFS_CLOSEDIR(dir_hnd->conn, dir_hnd->dir);
-	fsp->fh->fd = -1;
+	fsp_set_fd(fsp, -1);
 	if (fsp->dptr != NULL) {
 		SMB_ASSERT(fsp->dptr->dir_hnd == dir_hnd);
 		fsp->dptr->dir_hnd = NULL;
@@ -1374,6 +1474,8 @@ struct smb_Dir *OpenDir(TALLOC_CTX *mem_ctx,
 				      O_RDONLY,
 				      &fsp);
 	if (!NT_STATUS_IS_OK(status)) {
+		/* Ensure we return the actual error from status in errno. */
+		errno = map_errno_from_nt_status(status);
 		return NULL;
 	}
 
@@ -1410,7 +1512,7 @@ static struct smb_Dir *OpenDir_fsp(TALLOC_CTX *mem_ctx, connection_struct *conn,
 		goto fail;
 	}
 
-	if (fsp->fh->fd == -1) {
+	if (fsp_get_io_fd(fsp) == -1) {
 		errno = EBADF;
 		goto fail;
 	}
@@ -1487,7 +1589,7 @@ const char *ReadDirName(struct smb_Dir *dir_hnd, long *poffset,
 	/* A real offset, seek to it. */
 	SeekDir(dir_hnd, *poffset);
 
-	while ((n = vfs_readdirname(conn, dir_hnd->dir, sbuf, &talloced))) {
+	while ((n = vfs_readdirname(conn, dir_hnd->fsp, dir_hnd->dir, sbuf, &talloced))) {
 		/* Ignore . and .. - we've already returned them. */
 		if (*n == '.') {
 			if ((n[1] == '\0') || (n[1] == '.' && n[2] == '\0')) {
@@ -1594,7 +1696,7 @@ static void DirCacheAdd(struct smb_Dir *dir_hnd, const char *name, long offset)
  Don't check for veto or invisible files.
 ********************************************************************/
 
-bool SearchDir(struct smb_Dir *dir_hnd, const char *name, long *poffset)
+static bool SearchDir(struct smb_Dir *dir_hnd, const char *name, long *poffset)
 {
 	int i;
 	const char *entry = NULL;
@@ -1638,7 +1740,7 @@ bool SearchDir(struct smb_Dir *dir_hnd, const char *name, long *poffset)
 
 struct files_below_forall_state {
 	char *dirpath;
-	size_t dirpath_len;
+	ssize_t dirpath_len;
 	int (*fn)(struct file_id fid, const struct share_mode_data *data,
 		  void *private_data);
 	void *private_data;
@@ -1651,7 +1753,7 @@ static int files_below_forall_fn(struct file_id fid,
 	struct files_below_forall_state *state = private_data;
 	char tmpbuf[PATH_MAX];
 	char *fullpath, *to_free;
-	size_t len;
+	ssize_t len;
 
 	len = full_path_tos(data->servicepath, data->base_name,
 			    tmpbuf, sizeof(tmpbuf),
@@ -1775,25 +1877,145 @@ NTSTATUS can_delete_directory_fsp(files_struct *fsp)
 	}
 
 	while ((dname = ReadDirName(dir_hnd, &dirpos, &st, &talloced))) {
-		/* Quick check for "." and ".." */
-		if (dname[0] == '.') {
-			if (!dname[1] || (dname[1] == '.' && !dname[2])) {
-				TALLOC_FREE(talloced);
-				continue;
-			}
-		}
+		struct smb_filename *smb_dname_full = NULL;
+		struct smb_filename *direntry_fname = NULL;
+		char *fullname = NULL;
+		int ret;
 
-		if (!is_visible_file(conn,
-				dir_hnd,
-				dname,
-				&st,
-				True)) {
+		if (ISDOT(dname) || (ISDOTDOT(dname))) {
+			TALLOC_FREE(talloced);
+			continue;
+		}
+		if (IS_VETO_PATH(conn, dname)) {
 			TALLOC_FREE(talloced);
 			continue;
 		}
 
-		DEBUG(10,("got name %s - can't delete\n",
-			 dname ));
+		fullname = talloc_asprintf(talloc_tos(),
+					   "%s/%s",
+					   fsp->fsp_name->base_name,
+					   dname);
+		if (fullname == NULL) {
+			status = NT_STATUS_NO_MEMORY;
+                        break;
+		}
+
+		smb_dname_full = synthetic_smb_fname(talloc_tos(),
+						     fullname,
+						     NULL,
+						     NULL,
+						     fsp->fsp_name->twrp,
+						     fsp->fsp_name->flags);
+		if (smb_dname_full == NULL) {
+			TALLOC_FREE(talloced);
+			TALLOC_FREE(fullname);
+			status = NT_STATUS_NO_MEMORY;
+			break;
+		}
+
+		ret = SMB_VFS_LSTAT(conn, smb_dname_full);
+		if (ret != 0) {
+			status = map_nt_error_from_unix(errno);
+			TALLOC_FREE(talloced);
+			TALLOC_FREE(fullname);
+			TALLOC_FREE(smb_dname_full);
+			break;
+		}
+
+		if (S_ISLNK(smb_dname_full->st.st_ex_mode)) {
+			/* Could it be an msdfs link ? */
+			if (lp_host_msdfs() &&
+			    lp_msdfs_root(SNUM(conn))) {
+				struct smb_filename *smb_dname;
+				smb_dname = synthetic_smb_fname(talloc_tos(),
+							dname,
+							NULL,
+							&smb_dname_full->st,
+							fsp->fsp_name->twrp,
+							fsp->fsp_name->flags);
+				if (smb_dname == NULL) {
+					TALLOC_FREE(talloced);
+					TALLOC_FREE(fullname);
+					TALLOC_FREE(smb_dname_full);
+					status = NT_STATUS_NO_MEMORY;
+					break;
+				}
+				if (is_msdfs_link(fsp, smb_dname)) {
+					TALLOC_FREE(talloced);
+					TALLOC_FREE(fullname);
+					TALLOC_FREE(smb_dname_full);
+					TALLOC_FREE(smb_dname);
+					DBG_DEBUG("got msdfs link name %s "
+						"- can't delete directory %s\n",
+						dname,
+						fsp_str_dbg(fsp));
+					status = NT_STATUS_DIRECTORY_NOT_EMPTY;
+					break;
+				}
+				TALLOC_FREE(smb_dname);
+			}
+			/* Not a DFS link - could it be a dangling symlink ? */
+			ret = SMB_VFS_STAT(conn, smb_dname_full);
+			if (ret == -1 && (errno == ENOENT || errno == ELOOP)) {
+				/*
+				 * Dangling symlink.
+				 * Allow if "delete veto files = yes"
+				 */
+				if (lp_delete_veto_files(SNUM(conn))) {
+					TALLOC_FREE(talloced);
+					TALLOC_FREE(fullname);
+					TALLOC_FREE(smb_dname_full);
+					continue;
+				}
+			}
+			DBG_DEBUG("got symlink name %s - "
+				"can't delete directory %s\n",
+				dname,
+				fsp_str_dbg(fsp));
+			TALLOC_FREE(talloced);
+			TALLOC_FREE(fullname);
+			TALLOC_FREE(smb_dname_full);
+			status = NT_STATUS_DIRECTORY_NOT_EMPTY;
+			break;
+		}
+
+		/* Not a symlink, get a pathref. */
+		status = synthetic_pathref(talloc_tos(),
+					   fsp,
+					   dname,
+					   NULL,
+					   &smb_dname_full->st,
+					   fsp->fsp_name->twrp,
+					   fsp->fsp_name->flags,
+					   &direntry_fname);
+		if (!NT_STATUS_IS_OK(status)) {
+			status = map_nt_error_from_unix(errno);
+			TALLOC_FREE(talloced);
+			TALLOC_FREE(fullname);
+			TALLOC_FREE(smb_dname_full);
+			break;
+		}
+
+		if (!is_visible_fsp(direntry_fname->fsp)) {
+			/*
+			 * Hidden file.
+			 * Allow if "delete veto files = yes"
+			 */
+			if (lp_delete_veto_files(SNUM(conn))) {
+				TALLOC_FREE(talloced);
+				TALLOC_FREE(fullname);
+				TALLOC_FREE(smb_dname_full);
+				TALLOC_FREE(direntry_fname);
+				continue;
+			}
+		}
+
+		TALLOC_FREE(talloced);
+		TALLOC_FREE(fullname);
+		TALLOC_FREE(smb_dname_full);
+		TALLOC_FREE(direntry_fname);
+
+		DBG_DEBUG("got name %s - can't delete\n", dname);
 		status = NT_STATUS_DIRECTORY_NOT_EMPTY;
 		break;
 	}

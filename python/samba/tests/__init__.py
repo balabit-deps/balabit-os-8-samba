@@ -17,7 +17,6 @@
 #
 
 """Samba Python tests."""
-from __future__ import print_function
 import os
 import tempfile
 import warnings
@@ -35,8 +34,6 @@ import re
 from enum import IntEnum, unique
 import samba.auth
 import samba.dcerpc.base
-from samba.compat import text_type
-from samba.compat import string_types
 from random import randint
 from random import SystemRandom
 from contextlib import contextmanager
@@ -140,7 +137,7 @@ class TestCase(unittest.TestCase):
     def hexdump(self, src):
         N = 0
         result = ''
-        is_string = isinstance(src, string_types)
+        is_string = isinstance(src, str)
         while src:
             ll = src[:8]
             lr = src[8:16]
@@ -174,6 +171,8 @@ class TestCase(unittest.TestCase):
             username = template.get_username()
             userpass = template.get_password()
 
+        simple_bind_dn = template.get_bind_dn()
+
         if kerberos_state is None:
             kerberos_state = template.get_kerberos_state()
 
@@ -187,113 +186,9 @@ class TestCase(unittest.TestCase):
         c.set_gensec_features(c.get_gensec_features()
                               | gensec.FEATURE_SEAL)
         c.set_kerberos_state(kerberos_state)
+        if simple_bind_dn:
+            c.set_bind_dn(simple_bind_dn)
         return c
-
-    # These functions didn't exist before Python2.7:
-    if sys.version_info < (2, 7):
-        import warnings
-
-        def skipTest(self, reason):
-            raise SkipTest(reason)
-
-        def assertIn(self, member, container, msg=None):
-            self.assertTrue(member in container, msg)
-
-        def assertIs(self, a, b, msg=None):
-            self.assertTrue(a is b, msg)
-
-        def assertIsNot(self, a, b, msg=None):
-            self.assertTrue(a is not b, msg)
-
-        def assertIsNotNone(self, a, msg=None):
-            self.assertTrue(a is not None)
-
-        def assertIsInstance(self, a, b, msg=None):
-            self.assertTrue(isinstance(a, b), msg)
-
-        def assertIsNone(self, a, msg=None):
-            self.assertTrue(a is None, msg)
-
-        def assertGreater(self, a, b, msg=None):
-            self.assertTrue(a > b, msg)
-
-        def assertGreaterEqual(self, a, b, msg=None):
-            self.assertTrue(a >= b, msg)
-
-        def assertLess(self, a, b, msg=None):
-            self.assertTrue(a < b, msg)
-
-        def assertLessEqual(self, a, b, msg=None):
-            self.assertTrue(a <= b, msg)
-
-        def addCleanup(self, fn, *args, **kwargs):
-            self._cleanups = getattr(self, "_cleanups", []) + [
-                (fn, args, kwargs)]
-
-        def assertRegexpMatches(self, text, regex, msg=None):
-            # PY3 note: Python 3 will never see this, but we use
-            # text_type for the benefit of linters.
-            if isinstance(regex, (str, text_type)):
-                regex = re.compile(regex)
-            if not regex.search(text):
-                self.fail(msg)
-
-        def _addSkip(self, result, reason):
-            addSkip = getattr(result, 'addSkip', None)
-            if addSkip is not None:
-                addSkip(self, reason)
-            else:
-                warnings.warn("TestResult has no addSkip method, skips not reported",
-                              RuntimeWarning, 2)
-                result.addSuccess(self)
-
-        def run(self, result=None):
-            if result is None:
-                result = self.defaultTestResult()
-            result.startTest(self)
-            testMethod = getattr(self, self._testMethodName)
-            try:
-                try:
-                    self.setUp()
-                except SkipTest as e:
-                    self._addSkip(result, str(e))
-                    return
-                except KeyboardInterrupt:
-                    raise
-                except:
-                    result.addError(self, self._exc_info())
-                    return
-
-                ok = False
-                try:
-                    testMethod()
-                    ok = True
-                except SkipTest as e:
-                    self._addSkip(result, str(e))
-                    return
-                except self.failureException:
-                    result.addFailure(self, self._exc_info())
-                except KeyboardInterrupt:
-                    raise
-                except:
-                    result.addError(self, self._exc_info())
-
-                try:
-                    self.tearDown()
-                except SkipTest as e:
-                    self._addSkip(result, str(e))
-                except KeyboardInterrupt:
-                    raise
-                except:
-                    result.addError(self, self._exc_info())
-                    ok = False
-
-                for (fn, args, kwargs) in reversed(getattr(self, "_cleanups", [])):
-                    fn(*args, **kwargs)
-                if ok:
-                    result.addSuccess(self)
-            finally:
-                result.stopTest(self)
 
     def assertStringsEqual(self, a, b, msg=None, strip=False):
         """Assert equality between two strings and highlight any differences.

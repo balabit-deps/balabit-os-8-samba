@@ -43,9 +43,9 @@
  Ensure a connection is encrypted.
 ********************************************************************/
 
-NTSTATUS cli_cm_force_encryption_creds(struct cli_state *c,
-				       struct cli_credentials *creds,
-				       const char *sharename)
+static NTSTATUS cli_cm_force_encryption_creds(struct cli_state *c,
+					      struct cli_credentials *creds,
+					      const char *sharename)
 {
 	uint16_t major, minor;
 	uint32_t caplow, caphigh;
@@ -130,9 +130,7 @@ NTSTATUS cli_cm_force_encryption_creds(struct cli_state *c,
 static NTSTATUS do_connect(TALLOC_CTX *ctx,
 					const char *server,
 					const char *share,
-					const struct user_auth_info *auth_info,
-					bool force_encrypt,
-					int max_protocol,
+					struct cli_credentials *creds,
 					const struct sockaddr_storage *dest_ss,
 					int port,
 					int name_type,
@@ -145,10 +143,12 @@ static NTSTATUS do_connect(TALLOC_CTX *ctx,
 	NTSTATUS status;
 	int flags = 0;
 	enum protocol_types protocol = PROTOCOL_NONE;
-	int signing_state = get_cmdline_auth_info_signing_state(auth_info);
-	struct cli_credentials *creds = NULL;
+	enum smb_signing_setting signing_state =
+		cli_credentials_get_smb_signing(creds);
+	enum smb_encryption_setting encryption_state =
+		cli_credentials_get_smb_encryption(creds);
 
-	if (force_encrypt) {
+	if (encryption_state >= SMB_ENCRYPTION_DESIRED) {
 		signing_state = SMB_SIGNING_REQUIRED;
 	}
 
@@ -190,14 +190,11 @@ static NTSTATUS do_connect(TALLOC_CTX *ctx,
 		return status;
 	}
 
-	if (max_protocol == 0) {
-		max_protocol = PROTOCOL_LATEST;
-	}
 	DEBUG(4,(" session request ok\n"));
 
 	status = smbXcli_negprot(c->conn, c->timeout,
 				 lp_client_min_protocol(),
-				 max_protocol);
+				 lp_client_max_protocol());
 
 	if (!NT_STATUS_IS_OK(status)) {
 		d_printf("protocol negotiation failed: %s\n",
@@ -215,13 +212,12 @@ static NTSTATUS do_connect(TALLOC_CTX *ctx,
 		smb2cli_conn_set_max_credits(c->conn, DEFAULT_SMB2_MAX_CREDITS);
 	}
 
-	creds = get_cmdline_auth_info_creds(auth_info);
-
 	status = cli_session_setup_creds(c, creds);
 	if (!NT_STATUS_IS_OK(status)) {
 		/* If a password was not supplied then
 		 * try again with a null username. */
-		if (force_encrypt || smbXcli_conn_signing_mandatory(c->conn) ||
+		if (encryption_state == SMB_ENCRYPTION_REQUIRED ||
+			smbXcli_conn_signing_mandatory(c->conn) ||
 			cli_credentials_authentication_requested(creds) ||
 			cli_credentials_is_anonymous(creds) ||
 			!NT_STATUS_IS_OK(status = cli_session_setup_anon(c)))
@@ -245,13 +241,19 @@ static NTSTATUS do_connect(TALLOC_CTX *ctx,
 
 	DEBUG(4,(" session setup ok\n"));
 
-	if (force_encrypt) {
+	if (encryption_state >= SMB_ENCRYPTION_DESIRED) {
 		status = cli_cm_force_encryption_creds(c,
 						       creds,
 						       sharename);
 		if (!NT_STATUS_IS_OK(status)) {
-			cli_shutdown(c);
-			return status;
+			switch (encryption_state) {
+			case SMB_ENCRYPTION_DESIRED:
+				break;
+			case SMB_ENCRYPTION_REQUIRED:
+			default:
+				cli_shutdown(c);
+				return status;
+			}
 		}
 	}
 
@@ -263,11 +265,10 @@ static NTSTATUS do_connect(TALLOC_CTX *ctx,
 	if (smbXcli_conn_dfs_supported(c->conn) &&
 			cli_check_msdfs_proxy(ctx, c, sharename,
 				&newserver, &newshare,
-				force_encrypt, creds)) {
+				creds)) {
 		cli_shutdown(c);
 		return do_connect(ctx, newserver,
-				newshare, auth_info,
-				force_encrypt, max_protocol,
+				newshare, creds,
 				NULL, port, name_type, pcli);
 	}
 
@@ -285,22 +286,6 @@ static NTSTATUS do_connect(TALLOC_CTX *ctx,
 	return NT_STATUS_OK;
 }
 
-/****************************************************************************
-****************************************************************************/
-
-static void cli_set_mntpoint(struct cli_state *cli, const char *mnt)
-{
-	TALLOC_CTX *frame = talloc_stackframe();
-	char *name = clean_name(frame, mnt);
-	if (!name) {
-		TALLOC_FREE(frame);
-		return;
-	}
-	TALLOC_FREE(cli->dfs_mountpoint);
-	cli->dfs_mountpoint = talloc_strdup(cli, name);
-	TALLOC_FREE(frame);
-}
-
 /********************************************************************
  Add a new connection to the list.
  referring_cli == NULL means a new initial connection.
@@ -310,9 +295,7 @@ static NTSTATUS cli_cm_connect(TALLOC_CTX *ctx,
 			       struct cli_state *referring_cli,
 			       const char *server,
 			       const char *share,
-			       const struct user_auth_info *auth_info,
-			       bool force_encrypt,
-			       int max_protocol,
+			       struct cli_credentials *creds,
 			       const struct sockaddr_storage *dest_ss,
 			       int port,
 			       int name_type,
@@ -322,8 +305,7 @@ static NTSTATUS cli_cm_connect(TALLOC_CTX *ctx,
 	NTSTATUS status;
 
 	status = do_connect(ctx, server, share,
-				auth_info,
-				force_encrypt, max_protocol,
+				creds,
 				dest_ss, port, name_type, &cli);
 
 	if (!NT_STATUS_IS_OK(status)) {
@@ -403,16 +385,14 @@ static struct cli_state *cli_cm_find(struct cli_state *cli,
 ****************************************************************************/
 
 NTSTATUS cli_cm_open(TALLOC_CTX *ctx,
-				struct cli_state *referring_cli,
-				const char *server,
-				const char *share,
-				const struct user_auth_info *auth_info,
-				bool force_encrypt,
-				int max_protocol,
-				const struct sockaddr_storage *dest_ss,
-				int port,
-				int name_type,
-				struct cli_state **pcli)
+		     struct cli_state *referring_cli,
+		     const char *server,
+		     const char *share,
+		     struct cli_credentials *creds,
+		     const struct sockaddr_storage *dest_ss,
+		     int port,
+		     int name_type,
+		     struct cli_state **pcli)
 {
 	/* Try to reuse an existing connection in this list. */
 	struct cli_state *c = cli_cm_find(referring_cli, server, share);
@@ -423,11 +403,11 @@ NTSTATUS cli_cm_open(TALLOC_CTX *ctx,
 		return NT_STATUS_OK;
 	}
 
-	if (auth_info == NULL) {
+	if (creds == NULL) {
 		/* Can't do a new connection
 		 * without auth info. */
 		d_printf("cli_cm_open() Unable to open connection [\\%s\\%s] "
-			"without auth info\n",
+			"without client credentials\n",
 			server, share );
 		return NT_STATUS_INVALID_PARAMETER;
 	}
@@ -436,9 +416,7 @@ NTSTATUS cli_cm_open(TALLOC_CTX *ctx,
 				referring_cli,
 				server,
 				share,
-				auth_info,
-				force_encrypt,
-				max_protocol,
+				creds,
 				dest_ss,
 				port,
 				name_type,
@@ -631,27 +609,6 @@ static char *cli_dfs_make_full_path(TALLOC_CTX *ctx,
 			cli->share,
 			path_sep,
 			dir);
-}
-
-/********************************************************************
- check for dfs referral
-********************************************************************/
-
-static bool cli_dfs_check_error(struct cli_state *cli, NTSTATUS expected,
-				NTSTATUS status)
-{
-	/* only deal with DS when we negotiated NT_STATUS codes and UNICODE */
-
-	if (!(smbXcli_conn_use_unicode(cli->conn))) {
-		return false;
-	}
-	if (!(smb1cli_conn_capabilities(cli->conn) & CAP_STATUS32)) {
-		return false;
-	}
-	if (NT_STATUS_EQUAL(status, expected)) {
-		return true;
-	}
-	return false;
 }
 
 /********************************************************************
@@ -870,6 +827,31 @@ NTSTATUS cli_dfs_get_referral(TALLOC_CTX *ctx,
 				consumed);
 }
 
+static bool cli_conn_have_dfs(struct cli_state *cli)
+{
+	struct smbXcli_conn *conn = cli->conn;
+	struct smbXcli_tcon *tcon = NULL;
+	bool ok;
+
+	if (smbXcli_conn_protocol(conn) < PROTOCOL_SMB2_02) {
+		uint32_t capabilities = smb1cli_conn_capabilities(conn);
+
+		if ((capabilities & CAP_STATUS32) == 0) {
+			return false;
+		}
+		if ((capabilities & CAP_UNICODE) == 0) {
+			return false;
+		}
+
+		tcon = cli->smb1.tcon;
+	} else {
+		tcon = cli->smb2.tcon;
+	}
+
+	ok = smbXcli_tcon_is_dfs_share(tcon);
+	return ok;
+}
+
 /********************************************************************
 ********************************************************************/
 struct cli_dfs_path_split {
@@ -880,7 +862,7 @@ struct cli_dfs_path_split {
 
 NTSTATUS cli_resolve_path(TALLOC_CTX *ctx,
 			  const char *mountpt,
-			  const struct user_auth_info *dfs_auth_info,
+			  struct cli_credentials *creds,
 			  struct cli_state *rootcli,
 			  const char *path,
 			  struct cli_state **targetcli,
@@ -903,20 +885,12 @@ NTSTATUS cli_resolve_path(TALLOC_CTX *ctx,
 	SMB_STRUCT_STAT sbuf;
 	uint32_t attributes;
 	NTSTATUS status;
-	struct smbXcli_tcon *root_tcon = NULL;
 	struct smbXcli_tcon *target_tcon = NULL;
 	struct cli_dfs_path_split *dfs_refs = NULL;
+	bool ok;
 
 	if ( !rootcli || !path || !targetcli ) {
 		return NT_STATUS_INVALID_PARAMETER;
-	}
-
-	/* Don't do anything if this is not a DFS root. */
-
-	if (smbXcli_conn_protocol(rootcli->conn) >= PROTOCOL_SMB2_02) {
-		root_tcon = rootcli->smb2.tcon;
-	} else {
-		root_tcon = rootcli->smb1.tcon;
 	}
 
 	/*
@@ -926,7 +900,8 @@ NTSTATUS cli_resolve_path(TALLOC_CTX *ctx,
 		path++;
 	}
 
-	if (!smbXcli_tcon_is_dfs_share(root_tcon)) {
+	ok = cli_conn_have_dfs(rootcli);
+	if (!ok) {
 		*targetcli = rootcli;
 		*pp_targetpath = talloc_strdup(ctx, path);
 		if (!*pp_targetpath) {
@@ -962,8 +937,7 @@ NTSTATUS cli_resolve_path(TALLOC_CTX *ctx,
 
 	/* Special case where client asked for a path that does not exist */
 
-	if (cli_dfs_check_error(rootcli, NT_STATUS_OBJECT_NAME_NOT_FOUND,
-				status)) {
+	if (NT_STATUS_EQUAL(status, NT_STATUS_OBJECT_NAME_NOT_FOUND)) {
 		*targetcli = rootcli;
 		*pp_targetpath = talloc_strdup(ctx, path);
 		if (!*pp_targetpath) {
@@ -974,8 +948,7 @@ NTSTATUS cli_resolve_path(TALLOC_CTX *ctx,
 
 	/* We got an error, check for DFS referral. */
 
-	if (!cli_dfs_check_error(rootcli, NT_STATUS_PATH_NOT_COVERED,
-				 status)) {
+	if (!NT_STATUS_EQUAL(status, NT_STATUS_PATH_NOT_COVERED)) {
 		return status;
 	}
 
@@ -985,9 +958,7 @@ NTSTATUS cli_resolve_path(TALLOC_CTX *ctx,
 			     rootcli,
 			     smbXcli_conn_remote_name(rootcli->conn),
 			     "IPC$",
-			     dfs_auth_info,
-			     cli_state_is_encryption_on(rootcli),
-			     smbXcli_conn_protocol(rootcli->conn),
+			     creds,
 			     NULL, /* dest_ss not needed, we reuse the transport */
 			     0,
 			     0x20,
@@ -1043,9 +1014,7 @@ NTSTATUS cli_resolve_path(TALLOC_CTX *ctx,
 		status = cli_cm_connect(ctx, rootcli,
 				dfs_refs[count].server,
 				dfs_refs[count].share,
-				dfs_auth_info,
-				cli_state_is_encryption_on(rootcli),
-				smbXcli_conn_protocol(rootcli->conn),
+				creds,
 				NULL, /* dest_ss */
 				0, /* port */
 				0x20,
@@ -1091,7 +1060,7 @@ NTSTATUS cli_resolve_path(TALLOC_CTX *ctx,
 
 	if (extrapath && strlen(extrapath) > 0) {
 		/* EMC Celerra NAS version 5.6.50 (at least) doesn't appear to */
-		/* put the trailing \ on the path, so to be save we put one in if needed */
+		/* put the trailing \ on the path, so to be safe we put one in if needed */
 		if (extrapath[strlen(extrapath)-1] != '\\' && **pp_targetpath != '\\') {
 			*pp_targetpath = talloc_asprintf(ctx,
 						  "%s\\%s",
@@ -1144,15 +1113,13 @@ NTSTATUS cli_resolve_path(TALLOC_CTX *ctx,
 		return NT_STATUS_NOT_FOUND;
 	}
 
-	cli_set_mntpoint(*targetcli, newmount);
-
 	/* Check for another dfs referral, note that we are not
 	   checking for loops here. */
 
 	if (!strequal(*pp_targetpath, "\\") && !strequal(*pp_targetpath, "/")) {
 		status = cli_resolve_path(ctx,
 					  newmount,
-					  dfs_auth_info,
+					  creds,
 					  *targetcli,
 					  *pp_targetpath,
 					  &newcli,
@@ -1204,7 +1171,6 @@ bool cli_check_msdfs_proxy(TALLOC_CTX *ctx,
 				const char *sharename,
 				char **pp_newserver,
 				char **pp_newshare,
-				bool force_encrypt,
 				struct cli_credentials *creds)
 {
 	struct client_dfs_referral *refs = NULL;
@@ -1216,6 +1182,8 @@ bool cli_check_msdfs_proxy(TALLOC_CTX *ctx,
 	char *newextrapath = NULL;
 	NTSTATUS status;
 	const char *remote_name;
+	enum smb_encryption_setting encryption_state =
+		cli_credentials_get_smb_encryption(creds);
 
 	if (!cli || !sharename) {
 		return false;
@@ -1251,12 +1219,24 @@ bool cli_check_msdfs_proxy(TALLOC_CTX *ctx,
 		return false;
 	}
 
-	if (force_encrypt) {
+	if (encryption_state >= SMB_ENCRYPTION_DESIRED) {
 		status = cli_cm_force_encryption_creds(cli, creds, "IPC$");
 		if (!NT_STATUS_IS_OK(status)) {
-			cli_tdis(cli);
-			cli_state_restore_tcon(cli, orig_tcon);
-			return false;
+			switch (encryption_state) {
+			case SMB_ENCRYPTION_DESIRED:
+				break;
+			case SMB_ENCRYPTION_REQUIRED:
+			default:
+				/*
+				 * Failed to set up encryption.
+				 * Disconnect the temporary IPC$
+				 * tcon before restoring the original
+				 * tcon so we don't leak it.
+				 */
+				cli_tdis(cli);
+				cli_state_restore_tcon(cli, orig_tcon);
+				return false;
+			}
 		}
 	}
 
@@ -1293,4 +1273,61 @@ bool cli_check_msdfs_proxy(TALLOC_CTX *ctx,
 	}
 
 	return true;
+}
+
+/********************************************************************
+ Windows and NetApp (and arguably the SMB1/2/3 specs) expect a non-DFS
+ path for the targets of rename and hardlink. If we have been given
+ a DFS path for these calls, convert it back into a local path by
+ stripping off the DFS prefix.
+********************************************************************/
+
+NTSTATUS cli_dfs_target_check(TALLOC_CTX *mem_ctx,
+			struct cli_state *cli,
+			const char *fname_src,
+			const char *fname_dst,
+			const char **fname_dst_out)
+{
+	char *dfs_prefix = NULL;
+	size_t prefix_len = 0;
+	struct smbXcli_tcon *tcon = NULL;
+
+	if (!smbXcli_conn_dfs_supported(cli->conn)) {
+		goto copy_fname_out;
+	}
+	if (smbXcli_conn_protocol(cli->conn) >= PROTOCOL_SMB2_02) {
+		tcon = cli->smb2.tcon;
+	} else {
+		tcon = cli->smb1.tcon;
+	}
+	if (!smbXcli_tcon_is_dfs_share(tcon)) {
+		goto copy_fname_out;
+	}
+	dfs_prefix = cli_dfs_make_full_path(mem_ctx, cli, "");
+	if (dfs_prefix == NULL) {
+		return NT_STATUS_NO_MEMORY;
+	}
+	prefix_len = strlen(dfs_prefix);
+	if (strncmp(fname_dst, dfs_prefix, prefix_len) != 0) {
+		/*
+		 * Prefix doesn't match. Assume it was
+		 * already stripped or not added in the
+		 * first place.
+		 */
+		goto copy_fname_out;
+	}
+	/* Return the trailing name after the prefix. */
+	*fname_dst_out = &fname_dst[prefix_len];
+	TALLOC_FREE(dfs_prefix);
+	return NT_STATUS_OK;
+
+  copy_fname_out:
+
+	/*
+	 * No change to the destination name. Just
+	 * point it at the incoming destination name.
+	 */
+	*fname_dst_out = fname_dst;
+	TALLOC_FREE(dfs_prefix);
+	return NT_STATUS_OK;
 }

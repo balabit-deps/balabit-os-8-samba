@@ -28,6 +28,7 @@
 #include "../libcli/security/security.h"
 #include "rpc_client/cli_pipe.h"
 #include "rpc_client/cli_lsarpc.h"
+#include "lib/util/string_wrappers.h"
 
 /* These values discovered by inspection */
 
@@ -174,7 +175,7 @@ static NTSTATUS cli_lsa_lookup_name(struct cli_state *cli,
 				    struct dom_sid *sid)
 {
 	struct smbXcli_tcon *orig_tcon = NULL;
-	struct rpc_pipe_client *p;
+	struct rpc_pipe_client *p = NULL;
 	struct policy_handle handle;
 	NTSTATUS status;
 	TALLOC_CTX *frame = talloc_stackframe();

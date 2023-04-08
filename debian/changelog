@@ -1,3 +1,9 @@
+samba (2:4.15.13+dfsg-0ubuntu0.20.04.2bb1) focal; urgency=medium
+
+  * Balabit patched version
+
+ -- Balabit Platform Team <devnull@dev.null>  Sat, 08 Apr 2023 16:26:07 +0200
+
 samba (2:4.15.13+dfsg-0ubuntu0.20.04.2) focal-security; urgency=medium
 
   * SECURITY UPDATE: Access controlled AD LDAP attributes can be discovered

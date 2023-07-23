@@ -1,0 +1,178 @@
+#!/bin/sh
+
+# $1: share name
+# $2: comma separated list of vfs_objects to use, if any
+add_share() {
+    local share="$1"
+    local vfs="$2"
+    if ! testparm -s 2>&1 | grep -E "^\[${share}\]"; then
+        echo "Adding [${share}] share"
+        cat >> /etc/samba/smb.conf <<EOFEOF
+[${share}]
+  read only = no
+  guest ok = no
+  path = /${share}
+EOFEOF
+        if [ -n "${vfs}" ]; then
+            echo "vfs objects = ${vfs}" >> /etc/samba/smb.conf
+        fi
+        systemctl reload smbd.service
+    else
+        echo "Share [${share}] already exists, continuing"
+    fi
+}
+
+# $1: username
+# $2: password
+add_user() {
+    local username="$1"
+    local password="$2"
+
+    echo "Creating a local and samba user called ${username}"
+    useradd -m "${username}"
+    echo "Setting samba password for the ${username} user"
+    (echo "${password}"; echo "${password}") | smbpasswd -s -a ${username}
+}
+
+# $1: share name
+populate_share() {
+    local sharename="$1"
+    local usergroup="$2"
+    local sharepath="/${sharename}"
+
+    mkdir -p "${sharepath}"
+    dd if=/dev/urandom bs=4096 count=1000 2>/dev/null | base64 > "${sharepath}/data"
+    cd "${sharepath}"
+    md5sum data > data.md5
+    chown -R "${usergroup}:${usergroup}" "${sharepath}"
+}
+
+
+# $1: kernel version in the form major.minor.patch
+check_kernel_version() {
+    local k_ver=$1
+    local k_major=$(echo ${k_ver} | cut -d . -f 1)
+    local k_minor=$(echo ${k_ver} | cut -d . -f 2)
+
+    # uring is supported starting with kernel 5.1.x
+    if [ ${k_major} -eq 5 ] && [ ${k_minor} -ge 1 ]; then
+       return 0
+    elif [ ${k_major} -ge 6 ]; then
+       return 0
+    else
+        return 1
+    fi
+}
+
+wait_container_ready() {
+    local container="${1}"
+    local -i limit=120 # seconds
+    local -i i=0
+    local -i result=0
+    local ip
+    local output
+
+    while /bin/true; do
+        ip=$(lxc list "${container}" -c 4 --format=csv | tail -1 | awk '{print $1}')
+        if [ -n "${ip}" ]; then
+            break
+        fi
+        i=$((i+1))
+        if [ ${i} -ge ${limit} ]; then
+            return 1
+        fi
+        sleep 1s
+        echo -n "."
+    done
+    while ! nc -z "${ip}" 22; do
+        echo -n "."
+        i=$((i+1))
+        if [ ${i} -ge ${limit} ]; then
+            return 1
+        fi
+        sleep 1s
+    done
+    # cloud-init might still be doing things...
+    # this call blocks, so wrap it in its own little timeout
+    output=$(lxc exec "${container}" -- timeout --verbose $((limit-i)) cloud-init status --wait) || {
+        result=$?
+        echo "cloud-init status --wait failed on container ${container}"
+        echo "${output}"
+        return ${result}
+    }
+    echo
+}
+
+install_lxd() {
+    if ! command -v lxd > /dev/null 2>&1; then
+        # the test depends has "lxd | snapd", so if we don't have lxd, we must
+        # install the snap
+        snap list lxd > /dev/null 2>&1 || {
+            echo "Installing the LXD snap..."
+            snap install lxd
+        }
+    fi
+}
+
+setup_lxd() {
+    local dns_domain="${1}"
+    local nic
+    local dns_ip
+
+    install_lxd
+    # Stop samba while lxd is setup, to avoid conflicts on lxdbr0:53
+    systemctl stop samba-ad-dc
+    lxd init --auto
+    lxd waitready --timeout 600
+    # sample csv output. Columns are NAME,TYPE,MANAGED,DESCRIPTION,USED_BY
+    #enp1s0,physical,NO,,0
+    #lxdbr0,bridge,YES,,1
+    nic=$(lxc network list --format=csv | grep -E "bridge,YES,,1" | cut -d , -f 1)
+    dns_ip=$(lxc network info "${nic}" | grep -w inet | awk '{print $2}')
+    # port=0 effectively disables dnsmasq's DNS, so it doesn't conflict with samba's DNS
+    lxc network set "${nic:-lxdbr0}" ipv6.address=none dns.domain="${dns_domain}" raw.dnsmasq="$(echo -e port=0\\ndhcp-option=option:dns-server,${dns_ip})"
+    if [ -n "${http_proxy}" ]; then
+        lxc config set core.proxy_http "${http_proxy}"
+    fi
+    if [ -n "${https_proxy}" ]; then
+        lxc config set core.proxy_https "${https_proxy}"
+    fi
+    if [ -n "${noproxy}" ]; then
+        lxc config set core.proxy_ignore_hosts "${noproxy}"
+    fi
+    # the default of 64k is too low for, at least, ppc64el on focal
+    lxc profile set default limits.kernel.memlock 262144
+    systemctl start samba-ad-dc
+    # give it some time, it's a lot of services to start
+    sleep 5s
+}
+
+# Copy the local apt package archive over to the lxd container.
+copy_local_apt_files() {
+    local container_name="${1:-docker}"
+
+    for local_source in $(apt-get indextargets | grep-dctrl -F URI -e '^file:/' -sURI | awk '{print $2}'); do
+        local_source=${local_source#file:}
+        local_dir=$(dirname "${local_source}")
+        lxc exec "${container_name}" -- mkdir -p "${local_dir}"
+        tar -cC "${local_dir}" . | lxc exec "${container_name}" -- tar -xC "${local_dir}"
+    done
+}
+
+send_apt_config() {
+    echo "Copying over /etc/apt to container ${1}"
+    lxc exec "${1}" -- rm -rf /etc/apt
+    lxc exec "${1}" -- mkdir -p /etc/apt
+    tar -cC /etc/apt . | lxc exec "${1}" -- tar -xC /etc/apt
+}
+
+install_packages_in_container() {
+    local container="${1}"
+    shift
+    local packages="${*}"
+
+    echo "### Installing dependencies in member server container: ${packages}"
+    lxc exec "${container}" --env DEBIAN_FRONTEND=noninteractive -- apt-get update -q
+    lxc exec "${container}" --env DEBIAN_FRONTEND=noninteractive -- apt-get dist-upgrade -q -y
+    lxc exec "${container}" --env DEBIAN_FRONTEND=noninteractive -- apt-get install -q -y ${packages}
+}

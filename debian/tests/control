@@ -20,3 +20,7 @@ Restrictions: needs-root, allow-stderr, isolation-container
 Tests: reinstall-samba-common-bin
 Depends: samba-common, samba-common-bin
 Restrictions: needs-root, needs-reboot, isolation-machine, allow-stderr
+
+Tests: samba-ad-dc-provisioning-internal-dns
+Depends: samba, samba-dsdb-modules, samba-vfs-modules, winbind, smbclient, krb5-user, bind9-dnsutils, lxd | snapd, lsb-release, dctrl-tools
+Restrictions: needs-root, isolation-machine, allow-stderr, breaks-testbed

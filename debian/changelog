@@ -1,3 +1,9 @@
+samba (2:4.15.13+dfsg-0ubuntu0.20.04.5bb1) focal; urgency=medium
+
+  * Balabit patched version
+
+ -- Balabit Platform Team <devnull@dev.null>  Sat, 09 Sep 2023 14:27:54 +0000
+
 samba (2:4.15.13+dfsg-0ubuntu0.20.04.5) focal; urgency=medium
 
   * d/p/issue-when-updating-old-passwd-containing-regex-metachars.patch:
